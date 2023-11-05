@@ -1,0 +1,9 @@
+{
+    "name": "test1",
+    "chromium_version": "116",
+    "user_agent": "test",
+    "proxy_flag": false,
+    "proxy_url": "",
+    "proxy_user": "",
+    "proxy_pass": ""
+}
