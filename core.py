@@ -1,9 +1,7 @@
-from selenium import webdriver
 import platform
 import os
 import subprocess
 from Model.Profile import Profile
-import time
 import shlex, shutil
 import json
 
