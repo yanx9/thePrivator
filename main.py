@@ -5,7 +5,7 @@ class App(customtkinter.CTk):
     
     def __init__(self):
         core = Core()
-        print(core.loaded_profiles)
+        # print(core.loaded_profiles)
         super().__init__()
         self.geometry(f"{1100}x{700}")
         self.title("thePrivator")

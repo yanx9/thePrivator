@@ -1,1 +1,2 @@
-selenium==4.11.2
+customtkinter==5.2.1
+psutil==5.9.6
