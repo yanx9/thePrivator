@@ -1,0 +1,18 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by all applicable intellectual property laws,
+* including trade secret and or copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+@font-face{font-family:AdobeClean-Regular;src:url(fonts/AdobeClean-Regular.otf) format("opentype")}@font-face{font-family:AdobeClean-Bold;src:url(fonts/AdobeClean-Bold.otf) format("opentype")}body{margin:0;max-height:1000px;width:100%}.iframe{border:none;height:460px;width:293px;margin-bottom:-2px}.iframe-with-footer{height:508px!important}.offline-mode{height:475px;width:290px}.offline-mode,.offline-mode-body{display:flex;flex-direction:column}.offline-mode-body{align-items:center;margin-top:100px}.offline-mode-header{align-items:center;border-bottom:1px solid hsla(0,0%,56%,.65);display:flex;font-family:AdobeClean-Bold;font-size:14px;font-weight:400;justify-content:space-between;padding:16px}.offline-mode-footer{align-items:center;border-top:1px solid hsla(0,0%,56%,.65);display:flex;margin-top:auto;padding:8px}.toggle-container{display:flex;align-items:center;padding-top:3px}.toggle-container input{opacity:0;width:0;height:0}.slider{background-image:url(../images/icons.png);background-position:-160px -508px;cursor:pointer;height:38px;width:38px}input:checked+.slider{background-position:-160px -558px}.footer-text{font-family:AdobeClean-Regular;color:#4b4b4b;font-size:14px;margin-left:4px}.offline-mode-icon{width:70px;height:70px;background:url(../images/no_connection.svg) no-repeat 50%;margin-bottom:10px}.offline-mode-title{font-family:AdobeClean-Bold}.offline-mode-message{max-width:200px;text-align:center;font-family:AdobeClean-Regular;color:#4b4b4b}.hidden{display:none!important}.header-pane{align-items:center;display:flex;cursor:pointer}.header-icon{background-image:url(../images/acrobat_prodc_appicon_24.svg);background-repeat:no-repeat;height:20px;width:20px}.header-text{margin-left:16px}.settings{margin-right:8px;line-height:0}.settings input[type=button].settings-icon{background-color:transparent!important;background-image:url(../images/settings_icon.svg);background-size:14px 14px;border:1px solid transparent!important;cursor:pointer}.loader,.settings input[type=button].settings-icon{background-position:50%;background-repeat:no-repeat}.loader{background-image:url(../images/loader.svg);background-size:80px 80px}

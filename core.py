@@ -4,12 +4,18 @@ import subprocess
 from Model.Profile import Profile
 import shlex, shutil
 import json
+from pathlib import Path
+import sys
 
 class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.loaded_profiles = []
-        self.chromium_path = "/opt/homebrew/bin/chromium"
+        self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
+        print("===============")
+        print(self.chromium_path)
+        print("===============")
+
         self.active_processes = {}
         self.load_profiles()
         print(platform.platform())
@@ -64,14 +70,16 @@ class Core():
         args = self.chromium_path
         if profile.user_agent != "":
             args += f" --user-agent='{profile.user_agent}'"
-        args += f" --user-data-dir='{os.getcwd()}/Profiles/{profile.name}/user-data'"
+            
+        datadir = Path(f"{os.getcwd()}/Profiles/{profile.name}/user-data")
+        args += f" --user-data-dir='{datadir}'"
         return args
 
     def new_profile(self, profile:Profile):
-        if not os.path.exists(f"Profiles/{profile.name}"):
-            os.mkdir(os.getcwd() + "/Profiles/" + profile.name)
-            os.mkdir(os.getcwd() + "/Profiles/" + profile.name + "/user-data")
-            with open(os.getcwd() + "/Profiles/" + profile.name + "/config.json", 'w') as file:
+        if not os.path.exists(Path(f"Profiles/{profile.name}")):
+            os.mkdir(os.path.join(os.getcwd(), "Profiles", profile.name))
+            os.mkdir(os.path.join(os.getcwd(), "Profiles", profile.name, "user-data"))
+            with open(os.path.join(os.getcwd(), "Profiles", profile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
                 file.write(profile.dump_config())
         else: print("Profile with this name already exists!")
@@ -79,8 +87,9 @@ class Core():
 
     def edit_profile(oldProfile:Profile, newProfile:Profile):
         if not os.path.exists(f"Profiles/{newProfile.name}") and oldProfile.name != newProfile.name:
-            os.rename(os.getcwd() + "/Profiles/" + oldProfile.name, os.getcwd() + "/Profiles/" + newProfile.name)
-        with open(os.getcwd() + "/Profiles/" + newProfile.name + "/config.json", 'w') as file:
+            os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
+                       os.path.join(os.getcwd(), "Profiles", newProfile.name))
+        with open(os.path.join(os.getcwd(), "Profiles", newProfile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
             file.write(newProfile.dump_config())
 
@@ -91,7 +100,14 @@ class Core():
 
     def run_profile(self, profile:Profile):
         command_line = self.craft_command(profile=profile)
-        proc = subprocess.Popen(shlex.split(command_line))
+        if sys.platform == 'win32':
+            args = command_line
+        else:
+            args = shlex.split(command_line)
+        
+        print(args)
+
+        proc = subprocess.Popen(args)
         self.active_processes.update({profile.name: proc})
 
     def stop_profile(self, profile:Profile):

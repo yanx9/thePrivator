@@ -1,3 +1,5 @@
-2023/11/05-00:47:49.948 a603 Reusing MANIFEST /Users/yanx/Projects/thePrivator/Profiles/test1/user-data/Default/Site Characteristics Database/MANIFEST-000001
-2023/11/05-00:47:49.948 a603 Recovering log #3
-2023/11/05-00:47:49.949 a603 Reusing old log /Users/yanx/Projects/thePrivator/Profiles/test1/user-data/Default/Site Characteristics Database/000003.log 
+2023/11/07-02:00:06.594 6284 Log #3: 3 ops saved to Table #4 OK
+2023/11/07-02:00:06.597 6284 Archiving E:\Studia\Praca\thePrivator\Profiles\test1\user-data\Default\Site Characteristics Database/000003.log: OK
+2023/11/07-02:00:06.597 6284 Table #4: 3 entries OK
+2023/11/07-02:00:06.598 6284 Archiving E:\Studia\Praca\thePrivator\Profiles\test1\user-data\Default\Site Characteristics Database/MANIFEST-000001: OK
+2023/11/07-02:00:06.602 6284 **** Repaired leveldb E:\Studia\Praca\thePrivator\Profiles\test1\user-data\Default\Site Characteristics Database; recovered 1 files; 241 bytes. Some data may have been lost. ****

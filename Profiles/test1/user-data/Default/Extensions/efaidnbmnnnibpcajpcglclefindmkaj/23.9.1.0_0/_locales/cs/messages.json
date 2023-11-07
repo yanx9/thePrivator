@@ -1,0 +1,450 @@
+{
+   "ConvertVerbDescription": {
+      "message": "Převádějte dokumenty z a do formátu PDF."
+   },
+   "Disable": {
+      "message": "Zakázat"
+   },
+   "EditVerbDescription": {
+      "message": "Přeskupujte, odstraňujte nebo otáčejte stránky v souborech PDF."
+   },
+   "Enable": {
+      "message": "Povolit"
+   },
+   "LearnMoreURL": {
+      "message": "https://helpx.adobe.com/cz/acrobat/kb/acrobat-pro-aip-for-chrome.html"
+   },
+   "LearnMoreURLEdge": {
+      "message": "https://helpx.adobe.com/cz/acrobat/kb/acrobat-pro-aip-for-edge.html"
+   },
+   "SignVerbDescription": {
+      "message": "Vyplňte a podepište PDF nebo požádejte o podpisy"
+   },
+   "adobeYoloErrorMessage": {
+      "message": "Je nám líto, tento odkaz je neplatný"
+   },
+   "adobeYoloMessage": {
+      "message": "Přihlašování do aplikace Acrobat..."
+   },
+   "analyticsOptinTitle": {
+      "message": "Odeslání dat o využití"
+   },
+   "appearancePrefDesc": {
+      "message": "Přepínání mezi tmavým a světlým motivem"
+   },
+   "appearancePrefOp1": {
+      "message": "Použít systémové nastavení"
+   },
+   "appearancePrefOp2": {
+      "message": "Tmavý motiv"
+   },
+   "appearancePrefOp3": {
+      "message": "Světlý motiv"
+   },
+   "appearancePrefTitle": {
+      "message": "Nastavení tmavého režimu"
+   },
+   "convertMegaVerbText": {
+      "message": "Převést"
+   },
+   "dcWebBookmarkTitle": {
+      "message": "Domovská stránka aplikace Adobe Acrobat"
+   },
+   "editMegaVerbText": {
+      "message": "Upravit"
+   },
+   "extensionMenuTitle": {
+      "message": "Rozšíření Acrobat – zkratka ke všem vašim nástrojům PDF"
+   },
+   "fteOwnershipSideRedCardContent": {
+      "message": "Nastavte aplikaci Acrobat jako výchozí prohlížeč souborů PDF a získejte mimo jiné možnosti přidávat poznámky, vyplňovat formuláře a podepisovat."
+   },
+   "fteSideCardPrimaryHeader": {
+      "message": "Použijte aplikaci Acrobat"
+   },
+   "fteSideCardSecondaryHeader": {
+      "message": "přímo v prohližeči Chrome"
+   },
+   "localFileOptionDesc": {
+      "message": "Udělte rozšíření aplikace Acrobat přístup k místním adresám URL souborů, abyste mohli otevřít všechny své soubory PDF v aplikaci Acrobat v prohlížeči Chrome."
+   },
+   "localFileOptionTitle": {
+      "message": "Otevírání místních souborů PDF v aplikaci Acrobat"
+   },
+   "localFteContinue": {
+      "message": "Přejděte do Nastavení"
+   },
+   "localFteDescription": {
+      "message": "Využijte rozšíření aplikace Acrobat na maximum a použijte jej k otevření všech souborů PDF. Povolte v nastavení rozšíření možnost Povolit přístup k URL souborů."
+   },
+   "localFteDontShowAgainText": {
+      "message": "Příště nezobrazovat"
+   },
+   "localFteTitle": {
+      "message": "Přepnout do aplikace Acrobat a otevřít místní soubory"
+   },
+   "optionsFailurePrompt": {
+      "message": "Nemůžeme uložit vaše změny. Zkuste to znovu později"
+   },
+   "optionsSuccessPrompt": {
+      "message": "Předvolby úspěšně uloženy"
+   },
+   "pdfOwnerShipDmbConfirmBtn": {
+      "message": "Pokračovat"
+   },
+   "pdfOwnerShipSideRedCardConfirmBtn": {
+      "message": "Pokračovat"
+   },
+   "pdfOwnershipDefSideCardcontent": {
+      "message": "Nastavte aplikaci Adobe Acrobat jako výchozí prohlížeč souborů PDF a získejte mimo jiné možnosti prohlížet, přidávat poznámky, vyplňovat formuláře a podepisovat."
+   },
+   "pdfOwnershipExploreAcrobat": {
+      "message": "Použít Acrobat v prohlížeči Chrome"
+   },
+   "pdfOwnershipExploreAcrobatEdge": {
+      "message": "Používejte Acrobat v Microsoft Edge"
+   },
+   "pdfOwnershipExploreOptionsDescription": {
+      "message": "Nastavte ve svém prohlížeči Acrobat jako výchozí aplikaci pro prohlížení souborů PDF a získáte přístup k funkcím přidávání poznámek, vyplnění a podepisování a dalším nástrojům PDF."
+   },
+   "pdfOwnershipExploreOptionsTitle": {
+      "message": "Otevřít soubory PDF v aplikaci Acrobat"
+   },
+   "pdfOwnershipPromptCancel": {
+      "message": "Nyní ne"
+   },
+   "pdfOwnershipPromptContent": {
+      "message": "Pokud nastavíte aplikaci Adobe Acrobat jako svůj výchozí prohlížeč souborů PDF, můžete se soubory dělat mnohem více úkonů v prohlížeči Chrome."
+   },
+   "pdfOwnershipPromptContent2": {
+      "message": "Nastavte aplikaci Acrobat jako výchozí prohlížeč souborů PDF a pracujte se soubory PDF přímo v prohlížeči Google Chrome. Přidávejte poznámky, vyplňujte a podepisujte nebo vyzkoušejte například nástroje pro konverzi a kompresi."
+   },
+   "pdfOwnershipPromptContentEdge": {
+      "message": "Nastavte Adobe Acrobat jako výchozí prohlížeč a dělejte s PDF v prohlížeči Microsoft Edge více."
+   },
+   "pdfOwnershipPromptDeny": {
+      "message": "Ne, děkuji"
+   },
+   "pdfOwnershipPromptOk": {
+      "message": "Nastavit jako výchozí"
+   },
+   "pdfOwnershipPromptOkFullscreen": {
+      "message": "Vyzkoušet nyní"
+   },
+   "popupNoConnection": {
+      "message": "Žádné připojení"
+   },
+   "popupOfflineMessage": {
+      "message": "Chcete-li obnovit připojení, obraťte se na správce"
+   },
+   "saveLocationOp1": {
+      "message": "Vždy se zeptat"
+   },
+   "saveLocationOp2": {
+      "message": "Adobe"
+   },
+   "saveLocationOp3": {
+      "message": "Tento počítač"
+   },
+   "saveLocationPreferenceDescription": {
+      "message": "Nastavte umístění pro uložení souborů"
+   },
+   "saveLocationPreferenceTitle": {
+      "message": "Uložit umístění souborů"
+   },
+   "sharepointPreferenceMessage": {
+      "message": "Povolit stažení souborů SharePoint v aplikaci Acrobat."
+   },
+   "signMegaVerbText": {
+      "message": "Podepsat"
+   },
+   "stripTextOpenAcrobat": {
+      "message": "Otevřít v aplikaci Acrobat"
+   },
+   "stripTextOpenFillnSign": {
+      "message": "Vyplnit a podepsat v aplikaci Acrobat"
+   },
+   "userLocale": {
+      "message": "Národní prostředí uživatele"
+   },
+   "web2pdfAddButtonText": {
+      "message": "Přidat do existujícího PDF..."
+   },
+   "web2pdfAlwaysShow": {
+      "message": "Zobrazit automaticky pro soubory PDF"
+   },
+   "web2pdfAppendLinkContextMenu": {
+      "message": "Připojit cíl vazby k existujícímu PDF"
+   },
+   "web2pdfAppendPageContextMenu": {
+      "message": "Přidat webovou stránku do existujícího PDF..."
+   },
+   "web2pdfBadVersion": {
+      "message": "Tato verze prohlížeče Chrome nepodporuje aplikaci Adobe Acrobat.  Minimální číslo verze je: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfBadVersionEdge": {
+      "message": "Tato verze prohlížeče Edge nepodporuje aplikaci Adobe Acrobat.  Minimální číslo verze je: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfClickToOpen": {
+      "message": "Kliknutím na odkaz níže otevřete dokument PDF v aplikaci Acrobat."
+   },
+   "web2pdfCompressPDFText": {
+      "message": "Komprimovat PDF"
+   },
+   "web2pdfConvertButtonText": {
+      "message": "Převést stránku do PDF…"
+   },
+   "web2pdfConvertButtonToolTip": {
+      "message": "Rozšíření Acrobat – zkratka ke všem vašim nástrojům PDF."
+   },
+   "web2pdfConvertButtonToolTipERPReader": {
+      "message": "Rozšíření pro Acrobat Reader je nyní vypnuto. Obraťte se na správce IT"
+   },
+   "web2pdfConvertButtonToolTipReader": {
+      "message": "Otevřít PDF v Acrobat Readeru"
+   },
+   "web2pdfConvertLinkContextMenu": {
+      "message": "Převést cíl vazby do Adobe PDF"
+   },
+   "web2pdfConvertPageContextMenu": {
+      "message": "Převést webovou stránku do Adobe PDF..."
+   },
+   "web2pdfCopyText": {
+      "message": "Kopírování do aplikace Acrobat"
+   },
+   "web2pdfCreatePDFText": {
+      "message": "Převést do PDF"
+   },
+   "web2pdfDestinationText": {
+      "message": "Cílová složka:"
+   },
+   "web2pdfDoneButtonText": {
+      "message": "Hotovo"
+   },
+   "web2pdfEditDeletePDFText": {
+      "message": "Odstranit stránky"
+   },
+   "web2pdfEditPDFText": {
+      "message": "Upravit PDF"
+   },
+   "web2pdfEditReorderPDFText": {
+      "message": "Změnit pořadí stránek"
+   },
+   "web2pdfEditRotatePDFText": {
+      "message": "Otočit stránky"
+   },
+   "web2pdfExportPDFToExcelText": {
+      "message": "PDF na Excel"
+   },
+   "web2pdfExportPDFToJPGText": {
+      "message": "PDF na JPG"
+   },
+   "web2pdfExportPDFToPPTText": {
+      "message": "PDF na PPT"
+   },
+   "web2pdfExportPDFToWordText": {
+      "message": "PDF na Word"
+   },
+   "web2pdfExtnDescription": {
+      "message": "Pomocí aplikace Acrobat v prohlížeči můžete prohlížet, převádět, komprimovat a podepisovat soubory PDF"
+   },
+   "web2pdfExtnDescriptionBeta": {
+      "message": "Pomocí aplikace Acrobat v prohlížeči můžete prohlížet, převádět, komprimovat a podepisovat soubory PDF"
+   },
+   "web2pdfExtnDescriptionChrome": {
+      "message": "Buďte produktivnější při práci se soubory PDF v prohlížeči Google Chrome pomocí nástrojů Adobe Acrobat pro prohlížení, vyplňování, přidávání poznámek a podepisování. Vyzkoušejte také nástroje pro převod a kompresi."
+   },
+   "web2pdfExtnDescriptionEdge": {
+      "message": "Buďte produktivnější při práci se soubory PDF v prohlížeči Microsoft Edge pomocí nástrojů Adobe Acrobat pro prohlížení, vyplňování, přidávání poznámek a podepisování. Vyzkoušejte také nástroje pro převod a kompresi."
+   },
+   "web2pdfExtnName": {
+      "message": "Adobe Acrobat: nástroje pro úpravu, převod a podpis souborů PDF"
+   },
+   "web2pdfExtnNameBeta": {
+      "message": "Adobe Acrobat Beta"
+   },
+   "web2pdfExtnNameEdge": {
+      "message": "Adobe Acrobat: nástroje pro úpravu, převod a podpis souborů PDF"
+   },
+   "web2pdfExtnNameStage": {
+      "message": "Adobe Acrobat Stage"
+   },
+   "web2pdfFileLockedError": {
+      "message": "Soubor nemůže být uložen, protože je používán jiným procesem."
+   },
+   "web2pdfFilename": {
+      "message": "Název souboru:"
+   },
+   "web2pdfFillSignAcrobatButtonText": {
+      "message": "Vyplnit a podepsat"
+   },
+   "web2pdfFillandSignText": {
+      "message": "Vyplnit a podepsat"
+   },
+   "web2pdfFrictionlessToggleDescription": {
+      "message": "Rozšíření Adobe Acrobat doporučuje nástroje pro práci s PDF. Naše doporučení vychází z vašich hledání a z toho, co se objevuje v zařízení. Vyhledávání se neodesílají společnosti Adobe."
+   },
+   "web2pdfFrictionlessUrl": {
+      "message": "https://www.adobe.com/go/fl_chromeext_cz"
+   },
+   "web2pdfFrictionlessUrlEdge": {
+      "message": "https://www.adobe.com/cz/acrobat/online.html?x_api_client_id=edge_extension&x_api_client_location=trefoil&mv=other&mv2=edge_extension:trefoil&trackingid=HM85XB76"
+   },
+   "web2pdfGoToAOnlineButtonText": {
+      "message": "Přejděte na aplikaci Acrobat online"
+   },
+   "web2pdfHTMLJSError": {
+      "message": "Chyba při zpracování webové stránky."
+   },
+   "web2pdfHTMLTooLarge": {
+      "message": "Obsah HTML je příliš velký, nelze zpracovat."
+   },
+   "web2pdfInfoHoverPopup": {
+      "message": "Rozšíření Adobe Acrobat doporučuje nástroje pro práci s PDF. Naše doporučení vychází z vašich hledání a z toho, co se objevuje v zařízení. Vyhledávání se neodesílají společnosti Adobe. Pokud chcete tuto funkci vypnout, klikněte \u003Cspan class = \"tooltip-content-settings\">zde\u003C/span>."
+   },
+   "web2pdfLoaderTitle": {
+      "message": "Nahrávání..."
+   },
+   "web2pdfMissingMac": {
+      "message": "Aplikace Adobe Acrobat for Chrome ještě není dostupná na platformě Mac"
+   },
+   "web2pdfMissingMacEdge": {
+      "message": "Aplikace Adobe Acrobat pro Microsoft Edge ještě není dostupná na platformě Mac"
+   },
+   "web2pdfNoFoldersText": {
+      "message": "Ve vašem úložišti aplikace Acrobat DC nejsou žádné složky."
+   },
+   "web2pdfNoWritePermissionOnSelectedFile": {
+      "message": "Nemáte oprávnění zápisu do vybraného souboru."
+   },
+   "web2pdfOpenButtonText": {
+      "message": "Otevřít v Acrobatu"
+   },
+   "web2pdfOpenButtonTextOlder": {
+      "message": "Stáhnout Adobe PDF"
+   },
+   "web2pdfOpenButtonTextReader": {
+      "message": "Otevřít v Acrobat Readeru"
+   },
+   "web2pdfOpenConvertedPDFDescription": {
+      "message": "Po dokončení převodu webové stránky na soubor PDF se soubor PDF automaticky otevře v aplikaci Acrobat."
+   },
+   "web2pdfOpenConvertedPDFTitle": {
+      "message": "Automaticky otevřít převedené soubory PDF v aplikaci Acrobat"
+   },
+   "web2pdfOpenInDCButtonText": {
+      "message": "Otevřít PDF v Acrobatu"
+   },
+   "web2pdfOptOut": {
+      "message": "Za účelem vylepšování funkcí produktu odesílá toto rozšíření společnosti Adobe informace o způsobu, jakým jej používáte."
+   },
+   "web2pdfOptOutDisabled": {
+      "message": "Nebudou sdílena žádná vaše data použití."
+   },
+   "web2pdfOptions": {
+      "message": "Volby"
+   },
+   "web2pdfOptionsTitle": {
+      "message": "Předvolby Adobe Acrobat"
+   },
+   "web2pdfPDFOpenFailed": {
+      "message": "Soubor PDF se nepodařilo otevřít"
+   },
+   "web2pdfPDFOpenFailedv2": {
+      "message": "Soubor se nepodařilo otevřít"
+   },
+   "web2pdfPDFOpened": {
+      "message": "Soubor PDF je otevřen"
+   },
+   "web2pdfPDFOpening": {
+      "message": "Otevírání souboru PDF"
+   },
+   "web2pdfPreferencesButtonText": {
+      "message": "Předvolby..."
+   },
+   "web2pdfPreferencesNewText": {
+      "message": "Nastavení převodu..."
+   },
+   "web2pdfPrivacy": {
+      "message": "O aplikaci Adobe Acrobat"
+   },
+   "web2pdfReplaceWarning": {
+      "message": "již existuje.\nChcete ho nahradit?"
+   },
+   "web2pdfRequestSignaturesText": {
+      "message": "Požádat o podpisy"
+   },
+   "web2pdfSave": {
+      "message": "Uložit"
+   },
+   "web2pdfSaveButton": {
+      "message": "Uložit předvolby"
+   },
+   "web2pdfShowPDFTools": {
+      "message": "Zobrazit s výsledky hledání Google"
+   },
+   "web2pdfShowPDFViewerOption": {
+      "message": "Použít Acrobat jako výchozí prohlížeč PDF"
+   },
+   "web2pdfShowPersistentOpen": {
+      "message": "Zobrazit tlačítko \"Otevřít v Acrobatu\""
+   },
+   "web2pdfShowPersistentOpenAlways": {
+      "message": "Vždy zobrazit tlačítko \"Otevřít v Acrobatu\""
+   },
+   "web2pdfShowPersistentOpenDescription": {
+      "message": "Vždy zobrazovat možnost otevřít soubor PDF v aplikaci Acrobat."
+   },
+   "web2pdfStatusCancelled": {
+      "message": "Převod zrušen"
+   },
+   "web2pdfStatusComplete": {
+      "message": "Převod byl úspěšný"
+   },
+   "web2pdfStatusDownloading": {
+      "message": "Stahování souboru pro převod..."
+   },
+   "web2pdfStatusDownloadingPDF": {
+      "message": "Stahování souboru PDF"
+   },
+   "web2pdfStatusFailure": {
+      "message": "Chyba převodu"
+   },
+   "web2pdfStatusInProgress": {
+      "message": "Probíhá převod..."
+   },
+   "web2pdfStatusUnknownFailure": {
+      "message": "Neznámá chyba"
+   },
+   "web2pdfStatusWaiting": {
+      "message": "Čekání na převod..."
+   },
+   "web2pdfTitle": {
+      "message": "Adobe Acrobat"
+   },
+   "web2pdfUnsupportedAcrobatVersion": {
+      "message": "Nemůžeme najít podporovanou verzi aplikace Acrobat. Nainstalujte si \u003Ca target='_blank' href='https://acrobat.adobe.com/cz/cs/free-trial-download.html?trackingid=29NMCS7T&mv=other'>bezplatnou 7denní zkušební verzi\u003C/a>."
+   },
+   "web2pdfUntitledFileName": {
+      "message": "bez názvu"
+   },
+   "web2pdfVisitButtonText": {
+      "message": "Vytvořit PDF online"
+   },
+   "webpagePDFConversion": {
+      "message": "Nastavení převodu webové stránky do PDF"
+   },
+   "webpagePDFConversionDescription": {
+      "message": "Při ukládání webových stránek ve formátu PDF můžete nastavit okraje, písma a další podrobnosti rozvržení"
+   }
+}

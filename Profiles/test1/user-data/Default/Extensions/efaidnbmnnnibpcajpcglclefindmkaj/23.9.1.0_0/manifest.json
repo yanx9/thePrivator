@@ -1,0 +1,51 @@
+{
+   "action": {
+      "default_icon": "browser/images/acrobat_dc_appicon_24.png",
+      "default_title": "__MSG_extensionMenuTitle__"
+   },
+   "background": {
+      "service_worker": "service-worker.js",
+      "type": "module"
+   },
+   "content_scripts": [ {
+      "js": [ "libs/jquery-3.1.1.min.js", "browser/js/ch-settings.js", "content_scripts/content-script-utils.js", "content_scripts/ch-content-script.js" ],
+      "matches": [ "file://*/*", "http://*/*", "https://*/*" ],
+      "run_at": "document_start"
+   }, {
+      "js": [ "content_scripts/ch-content-script-dend.js" ],
+      "matches": [ "file://*/*", "http://*/*", "https://*/*" ],
+      "run_at": "document_end"
+   } ],
+   "content_security_policy": {
+      "extension_pages": "script-src 'self'; child-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline'; frame-src https://use.typekit.net https://assets.adobedtm.com https://*.adobecontent.io https://*.adobelogin.com https://local-test.acrobat.com:* https://local-test.acrobat.adobe.com:* https://*.acrobat.com https://*.adobe.com"
+   },
+   "default_locale": "en",
+   "description": "__MSG_web2pdfExtnDescriptionChrome__",
+   "externally_connectable": {
+      "ids": [ "bngnhmnppadfcmpggglniifohlkmddfc" ],
+      "matches": [ "https://*.adobe.com/*", "https://*.acrobat.com/*", "https://adobe.com/*", "https://www.adobe.com/*" ]
+   },
+   "host_permissions": [ "\u003Call_urls>" ],
+   "icons": {
+      "128": "browser/images/acrobat_dc_appicon_128.png",
+      "16": "browser/images/acrobat_dc_appicon_16.png",
+      "48": "browser/images/acrobat_dc_appicon_48.png"
+   },
+   "incognito": "not_allowed",
+   "key": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCZBtDwJUnqCebbFbTP819W+x0Tk9Com3yrxaCi/D0t/1FPWBuOvyyiQtFr/FmloZu/2ml8LFYNGNE6gQSSIgGXZceAFCRxzj+EXSI37kNIPISrdKznCTdkA6oSKUpFEVOcoD959DQFqeNbliB9MV+ZrZST+DOVxApdMSJzsCczIwIDAQAB",
+   "manifest_version": 3,
+   "minimum_chrome_version": "107.0",
+   "name": "__MSG_web2pdfExtnName__",
+   "optional_permissions": [ "history", "bookmarks" ],
+   "options_page": "browser/js/options.html",
+   "permissions": [ "contextMenus", "tabs", "downloads", "nativeMessaging", "webRequest", "webNavigation", "storage", "scripting", "alarms", "declarativeNetRequest" ],
+   "storage": {
+      "managed_schema": "schema.json"
+   },
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "23.9.1.0",
+   "web_accessible_resources": [ {
+      "matches": [ "\u003Call_urls>" ],
+      "resources": [ "viewer.html", "signInHandler.html", "browser/js/frame.html", "browser/js/frameUI.html", "browser/js/local-fte.html", "browser/js/lsCopy.html", "signInAdobeYolo.html" ]
+   } ]
+}

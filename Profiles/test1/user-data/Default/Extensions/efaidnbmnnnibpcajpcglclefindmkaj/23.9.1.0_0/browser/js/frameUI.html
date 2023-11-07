@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!--
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by all applicable intellectual property laws,
+* including trade secret and or copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+-->
+
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <link href="../css/popupUI.css" type="text/css" rel="stylesheet" />
+    <script src="../../libs/jquery-3.1.1.min.js"></script>
+    <script type="module" src="./frameUI.js"></script>
+    <script src="./ch-settings.js"></script>
+</head>
+
+<body>
+    <div id="accordion" class="acrobat-only-card ui-modal hidden">
+        <div class="custom-accordion-header">
+            <img src="../images/acrobat_reader2020_32.png" class="accordian-header-img" />
+            <span class="content-slide translate" id="pdfOwnershipExploreAcrobat"></span>
+        </div>
+        <div>
+            <p class="content-body translate" id="pdfOwnershipDefSideCardcontent"></p>
+            <div class="action-buttons">
+                <button id="acc-cancel"
+                    class="type-spectrum-Button type-spectrum-Button--primary type-spectrum-Button--cancel">
+                    <span class="type-spectrum-Button-label translate" id="pdfOwnershipPromptCancel"></span>
+                </button>
+                <button id="acc-deny"
+                    class="type-spectrum-Button type-spectrum-Button--primary type-spectrum-Button--cancel hidden">
+                    <span class="type-spectrum-Button-label translate" id="pdfOwnershipPromptDeny"></span>
+                </button>
+                <button id="acc-ok" class="type-spectrum-Button type-spectrum-Button--cta">
+                    <span class="type-spectrum-Button-label translate" id="pdfOwnershipPromptOk"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+    <div id="fteTopBar" class="acrobat-only-top-bar hidden">
+        <span class="translate top-bar-div" id="pdfOwnershipPromptContent2"></span>
+        <div class = "top-bar-actions">
+        <button id="top-bar-acc-ok" class="type-spectrum-Button type-spectrum-Button--cta top-bar-button">
+            <span class="type-spectrum-Button-label translate" id="pdfOwnerShipDmbConfirmBtn"></span>
+        </button>
+        <div class = "divider"></div>
+        <button id="acc-top-bar-close" class="top-bar-img">
+            <img src="../images/close.svg" />
+        </button>
+    </div>
+    </div>
+    <div id="fteSideCard" class="side-card-modal acrobat-only-side-card hidden">
+        <div class="fteSideCard-header">
+            <span class="translate primary-header" id="fteSideCardPrimaryHeader"></span>
+            <span class="translate secondary-header" id="fteSideCardSecondaryHeader"></span>
+        </div>
+        <div>
+            <p class="fteSideCard-content-body translate" id="fteOwnershipSideRedCardContent"></p>
+            <div class="side-card-action-button">
+                <button id="side-card-acc-ok" class="type-spectrum-Button type-spectrum-Button--cta">
+                    <span class="type-spectrum-Button-label translate" id="pdfOwnerShipSideRedCardConfirmBtn"></span>
+                </button>
+            </div>
+        </div>
+        <div class="side-card-close-icon" id="sideCardCloseIcon">
+            <img src="../images/close.svg" />
+        </div>
+    </div>
+    <div class="acrobatMainDiv persistent hidden">
+        <div class="actions">
+            <div class="do-acrobat-icon"></div>
+            <input type="button" class="acro-option pdf hidden do_acrobat translate" id="stripTextOpenAcrobat"
+                value="Open in Acrobat" />
+            <input type="button" class="close-dialog" />
+        </div>
+        <div class="progress-area hidden">
+            <div class="convert-status hidden">
+                <div class="convert-status-icon"></div>
+                <div class="convert-status-title"></div>
+            </div>
+            <div class="in-process hidden">
+                <div class="do-acrobat-icon"></div>
+                <div class="convert"></div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

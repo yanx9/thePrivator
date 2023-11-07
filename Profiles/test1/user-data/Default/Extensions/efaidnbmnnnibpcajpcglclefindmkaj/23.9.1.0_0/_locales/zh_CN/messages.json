@@ -1,0 +1,450 @@
+{
+   "ConvertVerbDescription": {
+      "message": "将文档与 PDF 相互转换。"
+   },
+   "Disable": {
+      "message": "停用"
+   },
+   "EditVerbDescription": {
+      "message": "重排序、旋转或删除 PDF 中的页面。"
+   },
+   "Enable": {
+      "message": "启用"
+   },
+   "LearnMoreURL": {
+      "message": "https://helpx.adobe.com/cn/acrobat/kb/acrobat-pro-aip-for-chrome.html"
+   },
+   "LearnMoreURLEdge": {
+      "message": "https://helpx.adobe.com/cn/acrobat/kb/acrobat-pro-aip-for-edge.html"
+   },
+   "SignVerbDescription": {
+      "message": "填写并签署 PDF，或请求签名。"
+   },
+   "adobeYoloErrorMessage": {
+      "message": "抱歉，此链接无效"
+   },
+   "adobeYoloMessage": {
+      "message": "正在登录至 Acrobat..."
+   },
+   "analyticsOptinTitle": {
+      "message": "发送使用情况数据"
+   },
+   "appearancePrefDesc": {
+      "message": "在深色和浅色主题之间切换"
+   },
+   "appearancePrefOp1": {
+      "message": "使用系统设置"
+   },
+   "appearancePrefOp2": {
+      "message": "深色主题"
+   },
+   "appearancePrefOp3": {
+      "message": "浅色主题"
+   },
+   "appearancePrefTitle": {
+      "message": "深色模式设置"
+   },
+   "convertMegaVerbText": {
+      "message": "转换"
+   },
+   "dcWebBookmarkTitle": {
+      "message": "Adobe Acrobat 主页"
+   },
+   "editMegaVerbText": {
+      "message": "编辑"
+   },
+   "extensionMenuTitle": {
+      "message": "Acrobat 扩展程序 - 所有 PDF 工具的快捷方式"
+   },
+   "fteOwnershipSideRedCardContent": {
+      "message": "将 Acrobat 设为默认的 PDF 查看器，即可直接在 Chrome 中注释、填写表单、签名及执行更多操作。"
+   },
+   "fteSideCardPrimaryHeader": {
+      "message": "使用 Acrobat"
+   },
+   "fteSideCardSecondaryHeader": {
+      "message": "直接在 Chrome 中"
+   },
+   "localFileOptionDesc": {
+      "message": "授权 Acrobat 扩展程序访问您的本地文件 URL，以在 Chrome 中打开 Acrobat 中的所有 PDF 文件。"
+   },
+   "localFileOptionTitle": {
+      "message": "正在 Acrobat 中打开本地 PDF"
+   },
+   "localFteContinue": {
+      "message": "转至设置"
+   },
+   "localFteDescription": {
+      "message": "充分利用 Acrobat 扩展程序并使用它打开所有 PDF。在扩展程序设置中打开“允许”以访问文件 URL。"
+   },
+   "localFteDontShowAgainText": {
+      "message": "不再显示此消息"
+   },
+   "localFteTitle": {
+      "message": "切换到 Acrobat 以打开本地文件"
+   },
+   "optionsFailurePrompt": {
+      "message": "我们无法保存您的更改。请稍后再试"
+   },
+   "optionsSuccessPrompt": {
+      "message": "已成功保存首选项"
+   },
+   "pdfOwnerShipDmbConfirmBtn": {
+      "message": "继续"
+   },
+   "pdfOwnerShipSideRedCardConfirmBtn": {
+      "message": "继续"
+   },
+   "pdfOwnershipDefSideCardcontent": {
+      "message": "将 Adobe Acrobat 设为默认的 PDF 查看器，即可查看、注释、填写表单、签名及执行更多操作。"
+   },
+   "pdfOwnershipExploreAcrobat": {
+      "message": "在 Chrome 中使用 Acrobat"
+   },
+   "pdfOwnershipExploreAcrobatEdge": {
+      "message": "在 Microsoft Edge 中使用 Acrobat"
+   },
+   "pdfOwnershipExploreOptionsDescription": {
+      "message": "将 Acrobat 设置为浏览器中的默认 PDF 查看器，以使用注释、填写和签名等更多 PDF 工具。"
+   },
+   "pdfOwnershipExploreOptionsTitle": {
+      "message": "在 Acrobat 中打开 PDF"
+   },
+   "pdfOwnershipPromptCancel": {
+      "message": "暂不"
+   },
+   "pdfOwnershipPromptContent": {
+      "message": "将 Adobe Acrobat 设为默认查看器，在 Chrome 中对 PDF 执行更多操作。"
+   },
+   "pdfOwnershipPromptContent2": {
+      "message": "将 Acrobat 设为默认的 PDF 查看器以直接在 Google Chrome 中使用 PDF。可以注释、填写、签名和尝试转换和压缩等工具。"
+   },
+   "pdfOwnershipPromptContentEdge": {
+      "message": "将 Adobe Acrobat 设为默认查看器，在 Microsoft Edge 中对 PDF 执行更多操作。"
+   },
+   "pdfOwnershipPromptDeny": {
+      "message": "不，谢谢"
+   },
+   "pdfOwnershipPromptOk": {
+      "message": "设置为默认"
+   },
+   "pdfOwnershipPromptOkFullscreen": {
+      "message": "立即试用"
+   },
+   "popupNoConnection": {
+      "message": "无连接"
+   },
+   "popupOfflineMessage": {
+      "message": "请联系您的管理员恢复连接"
+   },
+   "saveLocationOp1": {
+      "message": "每次询问"
+   },
+   "saveLocationOp2": {
+      "message": "Adobe 云存储"
+   },
+   "saveLocationOp3": {
+      "message": "我的电脑"
+   },
+   "saveLocationPreferenceDescription": {
+      "message": "设置保存文件的位置"
+   },
+   "saveLocationPreferenceTitle": {
+      "message": "将文件保存到相应位置"
+   },
+   "sharepointPreferenceMessage": {
+      "message": "允许在 Acrobat 中签出 SharePoint 文件。"
+   },
+   "signMegaVerbText": {
+      "message": "签名"
+   },
+   "stripTextOpenAcrobat": {
+      "message": "在 Acrobat 中打开"
+   },
+   "stripTextOpenFillnSign": {
+      "message": "Acrobat 中的“填写和签名”"
+   },
+   "userLocale": {
+      "message": "用户区域设置"
+   },
+   "web2pdfAddButtonText": {
+      "message": "添加到现有的 PDF..."
+   },
+   "web2pdfAlwaysShow": {
+      "message": "自动显示于 PDF"
+   },
+   "web2pdfAppendLinkContextMenu": {
+      "message": "将链接目标追加到现有的 PDF"
+   },
+   "web2pdfAppendPageContextMenu": {
+      "message": "将网页添加到现有的 PDF..."
+   },
+   "web2pdfBadVersion": {
+      "message": "此 Chrome 版本不支持 Adobe Acrobat。最低版本为: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfBadVersionEdge": {
+      "message": "此 Edge 版本不支持 Adobe Acrobat。最低版本为: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfClickToOpen": {
+      "message": "单击下面的链接以在 Acrobat 中打开 PDF。"
+   },
+   "web2pdfCompressPDFText": {
+      "message": "压缩 PDF"
+   },
+   "web2pdfConvertButtonText": {
+      "message": "将网页转换为 PDF..."
+   },
+   "web2pdfConvertButtonToolTip": {
+      "message": "Acrobat 扩展程序 - 所有 PDF 工具的快捷键。"
+   },
+   "web2pdfConvertButtonToolTipERPReader": {
+      "message": "Acrobat Reader 扩展当前处于禁用状态。请联系您的 IT 管理员。"
+   },
+   "web2pdfConvertButtonToolTipReader": {
+      "message": "在 Acrobat Reader 中打开 PDF"
+   },
+   "web2pdfConvertLinkContextMenu": {
+      "message": "将链接目标转换为 Adobe PDF"
+   },
+   "web2pdfConvertPageContextMenu": {
+      "message": "将网页转换为 Adobe PDF..."
+   },
+   "web2pdfCopyText": {
+      "message": "正在复制到 Acrobat"
+   },
+   "web2pdfCreatePDFText": {
+      "message": "转换为 PDF"
+   },
+   "web2pdfDestinationText": {
+      "message": "目标文件夹："
+   },
+   "web2pdfDoneButtonText": {
+      "message": "完成"
+   },
+   "web2pdfEditDeletePDFText": {
+      "message": "删除页面"
+   },
+   "web2pdfEditPDFText": {
+      "message": "编辑 PDF"
+   },
+   "web2pdfEditReorderPDFText": {
+      "message": "重排序页面"
+   },
+   "web2pdfEditRotatePDFText": {
+      "message": "旋转页面"
+   },
+   "web2pdfExportPDFToExcelText": {
+      "message": "PDF 转为 Excel"
+   },
+   "web2pdfExportPDFToJPGText": {
+      "message": "PDF 转为 JPG"
+   },
+   "web2pdfExportPDFToPPTText": {
+      "message": "PDF 转为 PPT"
+   },
+   "web2pdfExportPDFToWordText": {
+      "message": "PDF 转为 Word"
+   },
+   "web2pdfExtnDescription": {
+      "message": "在浏览器中使用 Acrobat 对 PDF 进行查看、转换、压缩和签名"
+   },
+   "web2pdfExtnDescriptionBeta": {
+      "message": "在浏览器中使用 Acrobat 对 PDF 进行查看、转换、压缩和签名"
+   },
+   "web2pdfExtnDescriptionChrome": {
+      "message": "利用 Adobe Acrobat PDF 工具在 Google Chrome 中完成更多任务：查看、填充、注释、签名，您还可以试试转换和压缩工具。"
+   },
+   "web2pdfExtnDescriptionEdge": {
+      "message": "利用 Adobe Acrobat PDF 工具在 Microsoft Edge 中完成更多任务：查看、填充、注释、签名，您还可以试试转换和压缩工具。"
+   },
+   "web2pdfExtnName": {
+      "message": "Adobe Acrobat：PDF 编辑、转化、签名工具"
+   },
+   "web2pdfExtnNameBeta": {
+      "message": "Adobe Acrobat 测试版"
+   },
+   "web2pdfExtnNameEdge": {
+      "message": "Adobe Acrobat：PDF 编辑、转化、签名工具"
+   },
+   "web2pdfExtnNameStage": {
+      "message": "Adobe Acrobat 阶段"
+   },
+   "web2pdfFileLockedError": {
+      "message": "文件无法保存，因为正在被另一进程使用。"
+   },
+   "web2pdfFilename": {
+      "message": "文件名："
+   },
+   "web2pdfFillSignAcrobatButtonText": {
+      "message": "填写和签名"
+   },
+   "web2pdfFillandSignText": {
+      "message": "填写并签名"
+   },
+   "web2pdfFrictionlessToggleDescription": {
+      "message": "为了有助于您完成任务，Adobe Acrobat 扩展推荐了 PDF 工具。我们的推荐是基于您的搜索以及设备上的某些活动；您的搜索内容不会发送到 Adobe。"
+   },
+   "web2pdfFrictionlessUrl": {
+      "message": "https://www.adobe.com/go/fl_chromeext_cn"
+   },
+   "web2pdfFrictionlessUrlEdge": {
+      "message": "https://www.adobe.com/cn/acrobat/online.html?x_api_client_id=edge_extension&x_api_client_location=trefoil&mv=other&mv2=edge_extension:trefoil&trackingid=HM85XB76"
+   },
+   "web2pdfGoToAOnlineButtonText": {
+      "message": "转到 Acrobat 在线版"
+   },
+   "web2pdfHTMLJSError": {
+      "message": "处理网页时出错。"
+   },
+   "web2pdfHTMLTooLarge": {
+      "message": "HTML 内容过大，无法处理。"
+   },
+   "web2pdfInfoHoverPopup": {
+      "message": "为了有助于您完成任务，Adobe Acrobat 扩展推荐了 PDF 工具。我们的推荐是基于您的搜索以及设备上的某些活动；您的搜索内容不会发送到 Adobe。单击\u003Cspan class = \"tooltip-content-settings\">此处\u003C/span>可禁用此功能。"
+   },
+   "web2pdfLoaderTitle": {
+      "message": "正在加载..."
+   },
+   "web2pdfMissingMac": {
+      "message": "Adobe Acrobat for Chrome 尚不适用于 Mac"
+   },
+   "web2pdfMissingMacEdge": {
+      "message": "Adobe Acrobat for Microsoft Edge 尚不适用于 Mac"
+   },
+   "web2pdfNoFoldersText": {
+      "message": "您的 Acrobat DC 存储中没有文件夹。"
+   },
+   "web2pdfNoWritePermissionOnSelectedFile": {
+      "message": "您对选定的文件没有写入权限。"
+   },
+   "web2pdfOpenButtonText": {
+      "message": "在 Acrobat 中打开"
+   },
+   "web2pdfOpenButtonTextOlder": {
+      "message": "下载 Adobe PDF"
+   },
+   "web2pdfOpenButtonTextReader": {
+      "message": "在 Acrobat Reader 中打开"
+   },
+   "web2pdfOpenConvertedPDFDescription": {
+      "message": "完成网页到 PDF 的转换后，将自动在 Acrobat 中打开转换后的 PDF。"
+   },
+   "web2pdfOpenConvertedPDFTitle": {
+      "message": "自动在 Acrobat 中打开转换后的 PDF"
+   },
+   "web2pdfOpenInDCButtonText": {
+      "message": "在 Acrobat 中打开 PDF"
+   },
+   "web2pdfOptOut": {
+      "message": "为改进产品功能，此扩展会向 Adobe 发送有关您如何使用它的信息。"
+   },
+   "web2pdfOptOutDisabled": {
+      "message": "您的使用情况数据不会被共享。"
+   },
+   "web2pdfOptions": {
+      "message": "选项"
+   },
+   "web2pdfOptionsTitle": {
+      "message": "Adobe Acrobat 偏好设置"
+   },
+   "web2pdfPDFOpenFailed": {
+      "message": "未能打开 PDF"
+   },
+   "web2pdfPDFOpenFailedv2": {
+      "message": "无法打开"
+   },
+   "web2pdfPDFOpened": {
+      "message": "已打开 PDF"
+   },
+   "web2pdfPDFOpening": {
+      "message": "正在打开 PDF"
+   },
+   "web2pdfPreferencesButtonText": {
+      "message": "首选项..."
+   },
+   "web2pdfPreferencesNewText": {
+      "message": "转换设置..."
+   },
+   "web2pdfPrivacy": {
+      "message": "关于 Adobe Acrobat"
+   },
+   "web2pdfReplaceWarning": {
+      "message": "已存在。\n要替换它吗？"
+   },
+   "web2pdfRequestSignaturesText": {
+      "message": "请求签名"
+   },
+   "web2pdfSave": {
+      "message": "保存"
+   },
+   "web2pdfSaveButton": {
+      "message": "保存首选项"
+   },
+   "web2pdfShowPDFTools": {
+      "message": "显示 Google 搜索结果"
+   },
+   "web2pdfShowPDFViewerOption": {
+      "message": "使用 Acrobat 作为默认的 PDF 查看器"
+   },
+   "web2pdfShowPersistentOpen": {
+      "message": "显示“在 Acrobat 中打开”"
+   },
+   "web2pdfShowPersistentOpenAlways": {
+      "message": "始终显示“在 Acrobat 中打开”"
+   },
+   "web2pdfShowPersistentOpenDescription": {
+      "message": "每次都显示在 Acrobat 中打开 PDF 的选项。"
+   },
+   "web2pdfStatusCancelled": {
+      "message": "转换已取消"
+   },
+   "web2pdfStatusComplete": {
+      "message": "转换成功"
+   },
+   "web2pdfStatusDownloading": {
+      "message": "正在下载以进行转换..."
+   },
+   "web2pdfStatusDownloadingPDF": {
+      "message": "正在下载 PDF"
+   },
+   "web2pdfStatusFailure": {
+      "message": "转换失败"
+   },
+   "web2pdfStatusInProgress": {
+      "message": "正在转换..."
+   },
+   "web2pdfStatusUnknownFailure": {
+      "message": "未知的故障"
+   },
+   "web2pdfStatusWaiting": {
+      "message": "正在等待转换..."
+   },
+   "web2pdfTitle": {
+      "message": "Adobe Acrobat"
+   },
+   "web2pdfUnsupportedAcrobatVersion": {
+      "message": "无法找到支持的 Acrobat 版本。请安装\u003Ca target='_blank' href='https://acrobat.adobe.com/cn/zh-Hans/free-trial-download.html?trackingid=29NMCS7T&mv=other'>免费的 7 天试用版\u003C/a>。"
+   },
+   "web2pdfUntitledFileName": {
+      "message": "未命名"
+   },
+   "web2pdfVisitButtonText": {
+      "message": "在线创建 PDF"
+   },
+   "webpagePDFConversion": {
+      "message": "网页至 PDF 转换设置"
+   },
+   "webpagePDFConversionDescription": {
+      "message": "将网页保存为 PDF 时，您可以设置页边距、字体和其他布局细节 "
+   }
+}

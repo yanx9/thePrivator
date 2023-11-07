@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "OpenHelpx": {
+      "title": "Open helpx tab.",
+      "description": "If set to false then it won't open helpx.",
+      "type": "string"
+    },
+    "UsageMeasurement": {
+      "title": "Turn on/off usage Analytics",
+      "description": "To disable usage measurement, set UsageMeasurement to false in the group policy.",
+      "type": "string"
+    },
+    "UninstallPopup": {
+      "title": "Show/Hide Uninstall popup for free users",
+      "description": "To disable uninstall popup after user becomes free, set UninstallPopup to false",
+      "type": "string"
+    }
+  }
+}

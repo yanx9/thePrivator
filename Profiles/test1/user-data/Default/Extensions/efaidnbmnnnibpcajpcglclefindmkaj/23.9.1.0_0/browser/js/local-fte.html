@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<!--
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by all applicable intellectual property laws,
+* including trade secret and or copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+-->
+
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <link href="../css/core.css" type="text/css" rel="stylesheet" />
+    <link href="../css/local-fte.css" type="text/css" rel="stylesheet" />
+    <script src="../../libs/jquery-3.1.1.min.js"></script>
+    <script type="module" src="./local-fte.js"></script>
+</head>
+
+<body>
+    <title>&#65279;</title>
+    <div id="fteLocalFile" class="acrobat-only-local-fte">
+        <div class="local-fte-dialog">
+            <div id="closeLocalFte" class="close-button"/></div>
+            <div id="localFteTitle" class="title translate"></div>
+            <div class="seperator"></div>
+            <div id="localFteDescription" class="description translate"></div>
+            <div class="local-file-animated-fte"></div>
+            <div class="buttons">
+                <div id="localFteDontShowAgain" class="dontShowAgain">
+                    <input id="localFteDontShowAgainInput" type="checkbox" hidden>
+                    <div id="localFteDontShowAgainText" class="dontShowAgainText translate" hidden></div>
+                </div>
+                <button id="continueLocalFte" class="type-spectrum-Button type-spectrum-Button--cta">
+                    <span id="localFteContinue" class="type-spectrum-Button-label translate"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

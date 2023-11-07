@@ -1,0 +1,450 @@
+{
+   "ConvertVerbDescription": {
+      "message": "Konverter dokumenter til eller fra PDF."
+   },
+   "Disable": {
+      "message": "Deaktiver"
+   },
+   "EditVerbDescription": {
+      "message": "Omordne, roter eller slett sider i PDF-filen."
+   },
+   "Enable": {
+      "message": "Aktiver"
+   },
+   "LearnMoreURL": {
+      "message": "https://helpx.adobe.com/no/acrobat/kb/acrobat-pro-aip-for-chrome.html"
+   },
+   "LearnMoreURLEdge": {
+      "message": "https://helpx.adobe.com/no/acrobat/kb/acrobat-pro-aip-for-edge.html"
+   },
+   "SignVerbDescription": {
+      "message": "Fyll ut og signer PDF-filer, eller be om signaturer."
+   },
+   "adobeYoloErrorMessage": {
+      "message": "Beklager, denne lenken er ugyldig"
+   },
+   "adobeYoloMessage": {
+      "message": "Logger deg på Acrobat ..."
+   },
+   "analyticsOptinTitle": {
+      "message": "Send bruksdata"
+   },
+   "appearancePrefDesc": {
+      "message": "Bytt mellom mørkt og lyst tema"
+   },
+   "appearancePrefOp1": {
+      "message": "Bruk systeminnstilling"
+   },
+   "appearancePrefOp2": {
+      "message": "Mørkt tema"
+   },
+   "appearancePrefOp3": {
+      "message": "Lyst tema"
+   },
+   "appearancePrefTitle": {
+      "message": "Mørk modus-innstillinger"
+   },
+   "convertMegaVerbText": {
+      "message": "Konverter"
+   },
+   "dcWebBookmarkTitle": {
+      "message": "Adobe Acrobat Hjem"
+   },
+   "editMegaVerbText": {
+      "message": "Rediger"
+   },
+   "extensionMenuTitle": {
+      "message": "Acrobat-utvidelse – snarvei til alle dine PDF-verktøy"
+   },
+   "fteOwnershipSideRedCardContent": {
+      "message": "Kommenter, fyll ut skjemaer, signer og annet direkte i Chrome når du angir Acrobat som standard PDF-leser."
+   },
+   "fteSideCardPrimaryHeader": {
+      "message": "Bruke Acrobat"
+   },
+   "fteSideCardSecondaryHeader": {
+      "message": "direkte i Chrome"
+   },
+   "localFileOptionDesc": {
+      "message": "Gi Acrobat-utvidelsen tilgang til dine lokale filnettadresser for å åpne alle PDF-ene dine i Acrobat i Chrome."
+   },
+   "localFileOptionTitle": {
+      "message": "Åpner lokale PDF-er i Acrobat"
+   },
+   "localFteContinue": {
+      "message": "Gå til innstillinger"
+   },
+   "localFteDescription": {
+      "message": "Få mest mulig ut av Acrobat-utvidelsen og bruk den til å åpne alle PDF-er. Slå på Tillat tilgang til filnettadresser i utvidelsesinnstillingene."
+   },
+   "localFteDontShowAgainText": {
+      "message": "Ikke vis dette på nytt"
+   },
+   "localFteTitle": {
+      "message": "Bytt til Acrobat for å åpne dine lokale filer"
+   },
+   "optionsFailurePrompt": {
+      "message": "Vi kunne ikke lagre endringene. Prøv på nytt senere"
+   },
+   "optionsSuccessPrompt": {
+      "message": "Innstillinger er lagret"
+   },
+   "pdfOwnerShipDmbConfirmBtn": {
+      "message": "Fortsett"
+   },
+   "pdfOwnerShipSideRedCardConfirmBtn": {
+      "message": "Fortsett"
+   },
+   "pdfOwnershipDefSideCardcontent": {
+      "message": "Vis, kommenter, fyll ut skjemaer, signer og annet når du angir Adobe Acrobat som standard PDF-leser."
+   },
+   "pdfOwnershipExploreAcrobat": {
+      "message": "Bruk Acrobat i Chrome"
+   },
+   "pdfOwnershipExploreAcrobatEdge": {
+      "message": "Bruke Acrobat i Microsoft Edge"
+   },
+   "pdfOwnershipExploreOptionsDescription": {
+      "message": "Gjør Acrobat til standard PDF-visningsprogram i nettleseren for å bruke kommentering, fyll ut og signer og flere PDF-verktøy."
+   },
+   "pdfOwnershipExploreOptionsTitle": {
+      "message": "Åpne PDF-filer i Acrobat"
+   },
+   "pdfOwnershipPromptCancel": {
+      "message": "Ikke nå"
+   },
+   "pdfOwnershipPromptContent": {
+      "message": "Gjør mer med PDF-filer i Chrome når du angir Adobe Acrobat som standard visningsprogram."
+   },
+   "pdfOwnershipPromptContent2": {
+      "message": "Angi Acrobat som standard PDF-leser for å bruke PDF-filer direkte i Google Chrome. Kommenter, fyll ut, signer og prøv verktøy som konvertering og komprimering."
+   },
+   "pdfOwnershipPromptContentEdge": {
+      "message": "Gjør mer med PDF-filer i Microsoft Edge når du angir Adobe Acrobat som standard visningsprogram."
+   },
+   "pdfOwnershipPromptDeny": {
+      "message": "Nei takk"
+   },
+   "pdfOwnershipPromptOk": {
+      "message": "Angi som standard"
+   },
+   "pdfOwnershipPromptOkFullscreen": {
+      "message": "Prøv det nå"
+   },
+   "popupNoConnection": {
+      "message": "Ingen tilkobling"
+   },
+   "popupOfflineMessage": {
+      "message": "Kontakt administratoren din for å gjenoppta tilkoblingen"
+   },
+   "saveLocationOp1": {
+      "message": "Spør meg hver gang"
+   },
+   "saveLocationOp2": {
+      "message": "Adobe"
+   },
+   "saveLocationOp3": {
+      "message": "Min datamaskin"
+   },
+   "saveLocationPreferenceDescription": {
+      "message": "Angi en plassering for å lagre filene dine"
+   },
+   "saveLocationPreferenceTitle": {
+      "message": "Plassering av lagret fil"
+   },
+   "sharepointPreferenceMessage": {
+      "message": "Tillat utsjekking av SharePoint-filer i Acrobat."
+   },
+   "signMegaVerbText": {
+      "message": "Signer"
+   },
+   "stripTextOpenAcrobat": {
+      "message": "Åpne i Acrobat"
+   },
+   "stripTextOpenFillnSign": {
+      "message": "Fyll ut og signer i Acrobat"
+   },
+   "userLocale": {
+      "message": "Nasjonal innstilling for bruker"
+   },
+   "web2pdfAddButtonText": {
+      "message": "Legg til i eksisterende PDF-fil"
+   },
+   "web2pdfAlwaysShow": {
+      "message": "Vis automatisk for PDF-filer"
+   },
+   "web2pdfAppendLinkContextMenu": {
+      "message": "Tilføy koblingsmål til en eksisterende PDF-fil"
+   },
+   "web2pdfAppendPageContextMenu": {
+      "message": "Legg til nettside i eksisterende PDF-fil..."
+   },
+   "web2pdfBadVersion": {
+      "message": "Denne versjonen av Chrome støtter ikke Adobe Acrobat.  Minimumsversjon er: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfBadVersionEdge": {
+      "message": "Denne versjonen av Edge støtter ikke Adobe Acrobat. Minimumsversjon er: $version$",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfClickToOpen": {
+      "message": "Klikk koblingen nedenfor for å åpne PDF-filen i Acrobat."
+   },
+   "web2pdfCompressPDFText": {
+      "message": "Komprimer PDF"
+   },
+   "web2pdfConvertButtonText": {
+      "message": "Konverter nettside til PDF-fil"
+   },
+   "web2pdfConvertButtonToolTip": {
+      "message": "Acrobat-utvidelse – snarvei til alle dine PDF-verktøy."
+   },
+   "web2pdfConvertButtonToolTipERPReader": {
+      "message": "Acrobat Reader-tillegget er deaktivert nå. Kontakt IT-administratoren."
+   },
+   "web2pdfConvertButtonToolTipReader": {
+      "message": "Åpne PDF-filen i Acrobat Reader"
+   },
+   "web2pdfConvertLinkContextMenu": {
+      "message": "Konverter koblingsmål til en Adobe PDF-fil"
+   },
+   "web2pdfConvertPageContextMenu": {
+      "message": "Konverter nettside til Adobe PDF..."
+   },
+   "web2pdfCopyText": {
+      "message": "Kopierer til Acrobat"
+   },
+   "web2pdfCreatePDFText": {
+      "message": "Konverter til PDF"
+   },
+   "web2pdfDestinationText": {
+      "message": "Målmappe:"
+   },
+   "web2pdfDoneButtonText": {
+      "message": "Fullført"
+   },
+   "web2pdfEditDeletePDFText": {
+      "message": "Slett sider"
+   },
+   "web2pdfEditPDFText": {
+      "message": "Rediger PDF"
+   },
+   "web2pdfEditReorderPDFText": {
+      "message": "Omordne sider"
+   },
+   "web2pdfEditRotatePDFText": {
+      "message": "Roter sider"
+   },
+   "web2pdfExportPDFToExcelText": {
+      "message": "PDF til Excel"
+   },
+   "web2pdfExportPDFToJPGText": {
+      "message": "PDF til JPG"
+   },
+   "web2pdfExportPDFToPPTText": {
+      "message": "PDF til PPT"
+   },
+   "web2pdfExportPDFToWordText": {
+      "message": "PDF til Word"
+   },
+   "web2pdfExtnDescription": {
+      "message": "Bruk Acrobat i nettleseren for å vise, konvertere, komprimere og signere PDF-filer"
+   },
+   "web2pdfExtnDescriptionBeta": {
+      "message": "Bruk Acrobat i nettleseren for å vise, konvertere, komprimere og signere PDF-filer"
+   },
+   "web2pdfExtnDescriptionChrome": {
+      "message": "Gjør med i Google Chrome med brukervennlige Adobe Acrobat PDF-verktøy. Vis, fyll ut, kommenter, signer og prøv konverterings- og komprimeringsverktøy."
+   },
+   "web2pdfExtnDescriptionEdge": {
+      "message": "Gjør med i Microsoft Edge med brukervennlige Adobe Acrobat PDF-verktøy. Vis, fyll ut, kommenter, signer og prøv konverterings- og komprimeringsverktøy."
+   },
+   "web2pdfExtnName": {
+      "message": "Adobe Acrobat: PDF-verktøy for redigering, konvertering og signering"
+   },
+   "web2pdfExtnNameBeta": {
+      "message": "Adobe Acrobat Beta"
+   },
+   "web2pdfExtnNameEdge": {
+      "message": "Adobe Acrobat: PDF-verktøy for redigering, konvertering og signering"
+   },
+   "web2pdfExtnNameStage": {
+      "message": "Adobe Acrobat-nivå"
+   },
+   "web2pdfFileLockedError": {
+      "message": "Kan ikke lagre filen fordi den er i bruk av en annen prosess."
+   },
+   "web2pdfFilename": {
+      "message": "Filnavn:"
+   },
+   "web2pdfFillSignAcrobatButtonText": {
+      "message": "Fyll ut og signer"
+   },
+   "web2pdfFillandSignText": {
+      "message": "Fyll ut og signer"
+   },
+   "web2pdfFrictionlessToggleDescription": {
+      "message": "Adobe Acrobat-utvidelse anbefaler PDF-verktøy for å hjelpe deg med å utføre oppgaven. Anbefalingene våre er basert på det du søkte etter, og skjer på enheten din. Søk blir ikke sendt til Adobe."
+   },
+   "web2pdfFrictionlessUrl": {
+      "message": "https://www.adobe.com/go/fl_chromeext_no"
+   },
+   "web2pdfFrictionlessUrlEdge": {
+      "message": "https://www.adobe.com/no/acrobat/online.html?x_api_client_id=edge_extension&x_api_client_location=trefoil&mv=other&mv2=edge_extension:trefoil&trackingid=HM85XB76"
+   },
+   "web2pdfGoToAOnlineButtonText": {
+      "message": "Gå til Acrobat på nettet"
+   },
+   "web2pdfHTMLJSError": {
+      "message": "Det oppstod en feil under behandling av nettsiden."
+   },
+   "web2pdfHTMLTooLarge": {
+      "message": "Kan ikke behandle HTML-innholdet fordi det er for stort."
+   },
+   "web2pdfInfoHoverPopup": {
+      "message": "Adobe Acrobat-utvidelse anbefaler PDF-verktøy for å hjelpe deg med å utføre oppgaven. Anbefalingen vår er basert på det du søkte etter, og skjer på enheten din. Søk blir ikke sendt til Adobe. Klikk \u003Cspan class = \"tooltip-content-settings\">her\u003C/span> for å deaktivere denne funksjonen."
+   },
+   "web2pdfLoaderTitle": {
+      "message": "Laster ..."
+   },
+   "web2pdfMissingMac": {
+      "message": "Adobe Acrobat for Chrome er ennå ikke tilgjengelig for Mac"
+   },
+   "web2pdfMissingMacEdge": {
+      "message": "Adobe Acrobat for Microsoft Edge er ennå ikke tilgjengelig for Mac"
+   },
+   "web2pdfNoFoldersText": {
+      "message": "Du har ingen mapper i Acrobat DC-lageret."
+   },
+   "web2pdfNoWritePermissionOnSelectedFile": {
+      "message": "Du har ikke skrivetillatelse for den valgte filen."
+   },
+   "web2pdfOpenButtonText": {
+      "message": "Åpne i Acrobat"
+   },
+   "web2pdfOpenButtonTextOlder": {
+      "message": "Last ned Adobe PDF"
+   },
+   "web2pdfOpenButtonTextReader": {
+      "message": "Åpne i Acrobat Reader"
+   },
+   "web2pdfOpenConvertedPDFDescription": {
+      "message": "Åpne automatisk den konverterte PDF-filen i Acrobat når konverteringen av nettside til PDF er fullført."
+   },
+   "web2pdfOpenConvertedPDFTitle": {
+      "message": "Åpne konverterte PDF-filer i Acrobat automatisk"
+   },
+   "web2pdfOpenInDCButtonText": {
+      "message": "Åpne PDF-filen i Acrobat"
+   },
+   "web2pdfOptOut": {
+      "message": "For å forbedre produktfunksjoner sender denne appen informasjon til Adobe om hvordan du bruker den."
+   },
+   "web2pdfOptOutDisabled": {
+      "message": "Ingen av bruksdataene dine blir delt."
+   },
+   "web2pdfOptions": {
+      "message": "Alternativer"
+   },
+   "web2pdfOptionsTitle": {
+      "message": "Adobe Acrobat-innstillinger"
+   },
+   "web2pdfPDFOpenFailed": {
+      "message": "Kan ikke åpne PDF-fil"
+   },
+   "web2pdfPDFOpenFailedv2": {
+      "message": "Kunne ikke åpne"
+   },
+   "web2pdfPDFOpened": {
+      "message": "PDF-fil åpnet"
+   },
+   "web2pdfPDFOpening": {
+      "message": "Åpner PDF-fil"
+   },
+   "web2pdfPreferencesButtonText": {
+      "message": "Innstillinger..."
+   },
+   "web2pdfPreferencesNewText": {
+      "message": "Konverteringsinnstillinger..."
+   },
+   "web2pdfPrivacy": {
+      "message": "Om Adobe Acrobat"
+   },
+   "web2pdfReplaceWarning": {
+      "message": "finnes allerede.\nVil du erstatte den?"
+   },
+   "web2pdfRequestSignaturesText": {
+      "message": "Be om signaturer"
+   },
+   "web2pdfSave": {
+      "message": "Lagre"
+   },
+   "web2pdfSaveButton": {
+      "message": "Lagre innstillinger"
+   },
+   "web2pdfShowPDFTools": {
+      "message": "Vis med Google-søkeresultater"
+   },
+   "web2pdfShowPDFViewerOption": {
+      "message": "Bruk Acrobat som standard PDF-leser"
+   },
+   "web2pdfShowPersistentOpen": {
+      "message": "Vis “Åpne i Acrobat”"
+   },
+   "web2pdfShowPersistentOpenAlways": {
+      "message": "Vis alltid “Åpne i Acrobat”"
+   },
+   "web2pdfShowPersistentOpenDescription": {
+      "message": "Vis alternativ for å åpne PDF i Acrobat hver gang."
+   },
+   "web2pdfStatusCancelled": {
+      "message": "Konverteringen ble avbrutt"
+   },
+   "web2pdfStatusComplete": {
+      "message": "Konvertering fullført"
+   },
+   "web2pdfStatusDownloading": {
+      "message": "Laster ned for konvertering ..."
+   },
+   "web2pdfStatusDownloadingPDF": {
+      "message": "Laster ned PDF-fil"
+   },
+   "web2pdfStatusFailure": {
+      "message": "Konverteringsfeil"
+   },
+   "web2pdfStatusInProgress": {
+      "message": "Konverterer ..."
+   },
+   "web2pdfStatusUnknownFailure": {
+      "message": "Ukjent feil"
+   },
+   "web2pdfStatusWaiting": {
+      "message": "Venter på å konvertere ..."
+   },
+   "web2pdfTitle": {
+      "message": "Adobe Acrobat"
+   },
+   "web2pdfUnsupportedAcrobatVersion": {
+      "message": "Finner ikke en versjon av Acrobat som støttes. Installer en \u003Ca target='_blank' href='https://acrobat.adobe.com/no/no/free-trial-download.html?trackingid=29NMCS7T&mv=other'>gratis 7-dagers prøveversjon\u003C/a>."
+   },
+   "web2pdfUntitledFileName": {
+      "message": "uten tittel"
+   },
+   "web2pdfVisitButtonText": {
+      "message": "Opprett PDF på nettet"
+   },
+   "webpagePDFConversion": {
+      "message": "Konverteringsinnstilling for nettside til PDF"
+   },
+   "webpagePDFConversionDescription": {
+      "message": "Ved lagring av nettsider som PDF-er, kan du angi marger, skrifttyper og andre layoutdetaljer"
+   }
+}

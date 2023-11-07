@@ -1,0 +1,18 @@
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by all applicable intellectual property laws,
+* including trade secret and or copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+@font-face{font-family:AdobeClean-Regular;src:url(fonts/AdobeClean-Regular.otf) format("opentype")}@font-face{font-family:AdobeClean-Bold;src:url(fonts/AdobeClean-Bold.otf) format("opentype")}.acrobat-only-local-fte{height:auto;width:576px;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:4px;overflow:hidden}.local-file-animated-fte{height:240px;width:512px;margin-top:16px;margin-bottom:32px;background-image:url(../images/OpenInAcrobatEN_Anim_030423_v01.svg);background-size:cover}.transparent-background{background:#323639 0 0 no-repeat padding-box;opacity:.8;height:100%;width:100%;position:absolute;top:0;left:0}.local-fte-dialog{display:flex;margin:32px;flex-direction:column}.local-fte-dialog .title{font-family:AdobeClean-Bold;font-size:18px;color:#000}.local-fte-dialog .seperator{background-color:#eaeaea;height:1px;width:516px;margin-top:12px;margin-bottom:16px}.local-fte-dialog .description{font-family:AdobeClean-Regular;font-size:14px;color:#222}.local-fte-dialog .buttons{display:flex;height:auto;justify-content:space-between}.local-fte-dialog .dontShowAgain{display:flex;margin-top:8px;margin-bottom:8px;gap:5px}.local-fte-dialog .dontShowAgainText{font-family:AdobeClean-Regular;font-size:14px;color:#222}.local-fte-dialog .close-button{position:absolute;right:18px;top:18px;height:28px;width:28px;background-image:url(../images/s_crosslarge_18_n.svg);background-repeat:no-repeat;background-position:50%}.local-fte-dialog .close-button:hover{filter:brightness(30%)}

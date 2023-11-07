@@ -1,0 +1,450 @@
+{
+   "ConvertVerbDescription": {
+      "message": "Konvertieren Sie Dokumente in eine oder aus einer PDF-Datei."
+   },
+   "Disable": {
+      "message": "Deaktivieren"
+   },
+   "EditVerbDescription": {
+      "message": "Ordnen, drehen oder löschen Sie Seiten in Ihrer PDF-Datei."
+   },
+   "Enable": {
+      "message": "Aktivieren"
+   },
+   "LearnMoreURL": {
+      "message": "https://helpx.adobe.com/de/acrobat/kb/acrobat-pro-aip-for-chrome.html"
+   },
+   "LearnMoreURLEdge": {
+      "message": "https://helpx.adobe.com/de/acrobat/kb/acrobat-pro-aip-for-edge.html"
+   },
+   "SignVerbDescription": {
+      "message": "Füllen Sie PDF-Dateien aus und unterzeichnen Sie sie, oder fordern Sie Signaturen an."
+   },
+   "adobeYoloErrorMessage": {
+      "message": "Dieser Link ist leider ungültig"
+   },
+   "adobeYoloMessage": {
+      "message": "Du wirst bei Acrobat angemeldet..."
+   },
+   "analyticsOptinTitle": {
+      "message": "Nutzungsdaten senden"
+   },
+   "appearancePrefDesc": {
+      "message": "Zwischen dunklem und hellem Design wechseln"
+   },
+   "appearancePrefOp1": {
+      "message": "Systemeinstellung verwenden"
+   },
+   "appearancePrefOp2": {
+      "message": "Dunkles Design"
+   },
+   "appearancePrefOp3": {
+      "message": "Helles Design"
+   },
+   "appearancePrefTitle": {
+      "message": "Einstellungen für den Dunkelmodus"
+   },
+   "convertMegaVerbText": {
+      "message": "Konvertieren"
+   },
+   "dcWebBookmarkTitle": {
+      "message": "Adobe Acrobat-Startseite"
+   },
+   "editMegaVerbText": {
+      "message": "Bearbeiten"
+   },
+   "extensionMenuTitle": {
+      "message": "Acrobat-Erweiterung – Schneller Zugriff auf deine gesamten PDF-Werkzeuge"
+   },
+   "fteOwnershipSideRedCardContent": {
+      "message": "Wenn Sie Acrobat als Standard-PDF-Viewer festlegen, können Sie direkt in Chrome kommentieren, Formulare ausfüllen, signieren und vieles mehr."
+   },
+   "fteSideCardPrimaryHeader": {
+      "message": "Acrobat verwenden"
+   },
+   "fteSideCardSecondaryHeader": {
+      "message": "direkt in Chrome"
+   },
+   "localFileOptionDesc": {
+      "message": "Gewähre Acrobat-Erweiterungszugriff auf die URLs deiner lokalen Dateien, um alle deine PDF-Dateien in der Acrobat-Erweiterung von Chrome zu öffnen."
+   },
+   "localFileOptionTitle": {
+      "message": "Lokale PDF-Dateien in Acrobat öffnen"
+   },
+   "localFteContinue": {
+      "message": "Zu Einstellungen gehen"
+   },
+   "localFteDescription": {
+      "message": "Hole das Beste aus der Acrobat-Erweiterung heraus und öffne damit alle PDF-Dateien. Aktiviere in den Erweiterungseinstellungen „Zugriff auf Datei-URLs erlauben“."
+   },
+   "localFteDontShowAgainText": {
+      "message": "Nicht mehr anzeigen"
+   },
+   "localFteTitle": {
+      "message": "Zu Acrobat wechseln, um deine lokalen Dateien zu öffnen"
+   },
+   "optionsFailurePrompt": {
+      "message": "Ihre Änderungen können nicht gespeichert werden. Versuchen Sie es später erneut"
+   },
+   "optionsSuccessPrompt": {
+      "message": "Einstellungen erfolgreich gespeichert"
+   },
+   "pdfOwnerShipDmbConfirmBtn": {
+      "message": "Weiter"
+   },
+   "pdfOwnerShipSideRedCardConfirmBtn": {
+      "message": "Weiter"
+   },
+   "pdfOwnershipDefSideCardcontent": {
+      "message": "Wenn Sie Adobe Acrobat als Ihren Standard-PDF-Viewer festlegen, können Sie anzeigen, kommentieren, Formulare ausfüllen, signieren und vieles mehr."
+   },
+   "pdfOwnershipExploreAcrobat": {
+      "message": "Acrobat in Chrome verwenden"
+   },
+   "pdfOwnershipExploreAcrobatEdge": {
+      "message": "Acrobat in Microsoft Edge verwenden"
+   },
+   "pdfOwnershipExploreOptionsDescription": {
+      "message": "Machen Sie Acrobat zum Standard-PDF-Viewer in Ihrem Browser, um Kommentare, Ausfüllen und Unterzeichnen sowie weitere PDF-Tools zu verwenden."
+   },
+   "pdfOwnershipExploreOptionsTitle": {
+      "message": "PDFs in Acrobat öffnen"
+   },
+   "pdfOwnershipPromptCancel": {
+      "message": "Jetzt nicht"
+   },
+   "pdfOwnershipPromptContent": {
+      "message": "Wenn Sie Adobe Acrobat als Standard-Anzeiger festlegen, lässt sich in Chrome mehr mit PDFs machen."
+   },
+   "pdfOwnershipPromptContent2": {
+      "message": "Legen Sie Acrobat als Standard-PDF-Viewer fest, um mit PDF-Dateien direkt in Google Chrome zu arbeiten. Sie können kommentieren, ausfüllen, signieren und Tools zur Konvertierung und Komprimierung ausprobieren."
+   },
+   "pdfOwnershipPromptContentEdge": {
+      "message": "Wenn Sie Adobe Acrobat als Standard-Anzeiger festlegen, können Sie in Microsoft Edge mehr mit PDFs schaffen."
+   },
+   "pdfOwnershipPromptDeny": {
+      "message": "Nein, danke"
+   },
+   "pdfOwnershipPromptOk": {
+      "message": "Jetzt festlegen"
+   },
+   "pdfOwnershipPromptOkFullscreen": {
+      "message": "Jetzt ausprobieren"
+   },
+   "popupNoConnection": {
+      "message": "Keine Verbindung"
+   },
+   "popupOfflineMessage": {
+      "message": "Bitte wende dich an deine*n Administrator*in, um die Verbindung wieder herzustellen."
+   },
+   "saveLocationOp1": {
+      "message": "Jedes Mal fragen"
+   },
+   "saveLocationOp2": {
+      "message": "Cloud-Speicherplatz von Adobe"
+   },
+   "saveLocationOp3": {
+      "message": "Arbeitsplatz"
+   },
+   "saveLocationPreferenceDescription": {
+      "message": "Speicherort für deine Dateien festlegen"
+   },
+   "saveLocationPreferenceTitle": {
+      "message": "Datei-Speicherort"
+   },
+   "sharepointPreferenceMessage": {
+      "message": "Auschecken von SharePoint-Dateien in Acrobat zulassen."
+   },
+   "signMegaVerbText": {
+      "message": "Unterschr."
+   },
+   "stripTextOpenAcrobat": {
+      "message": "In Acrobat öffnen"
+   },
+   "stripTextOpenFillnSign": {
+      "message": "Ausfüllen und unterschreiben in Acrobat"
+   },
+   "userLocale": {
+      "message": "Benutzersprache"
+   },
+   "web2pdfAddButtonText": {
+      "message": "Zu einer PDF hinzufügen..."
+   },
+   "web2pdfAlwaysShow": {
+      "message": "Automatisch für PDFs anzeigen"
+   },
+   "web2pdfAppendLinkContextMenu": {
+      "message": "Linkziel an vorhandene PDF-Datei anhängen"
+   },
+   "web2pdfAppendPageContextMenu": {
+      "message": "Webseite vorhandener PDF-Datei hinzufügen..."
+   },
+   "web2pdfBadVersion": {
+      "message": "Adobe Acrobat wird nicht von dieser Version von Chrome unterstützt. Es ist mindestens die Version $version$ erforderlich.",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfBadVersionEdge": {
+      "message": "Adobe Acrobat wird von dieser Version von Edge nicht unterstützt. Es ist mindestens die Version $version$ erforderlich.",
+      "placeholders": {
+         "version": {
+            "content": "$1"
+         }
+      }
+   },
+   "web2pdfClickToOpen": {
+      "message": "Klicken Sie unten auf den Link zum Öffnen der PDF-Datei in Acrobat."
+   },
+   "web2pdfCompressPDFText": {
+      "message": "PDF komprimieren"
+   },
+   "web2pdfConvertButtonText": {
+      "message": "Webseite in PDF konvert..."
+   },
+   "web2pdfConvertButtonToolTip": {
+      "message": "Acrobat-Erweiterung – Schneller Zugriff auf all deine PDF-Tools."
+   },
+   "web2pdfConvertButtonToolTipERPReader": {
+      "message": "Die Acrobat Reader-Erweiterung ist momentan deaktiviert. Wenden Sie sich an Ihren IT-Admin."
+   },
+   "web2pdfConvertButtonToolTipReader": {
+      "message": "PDF-Datei in Acrobat Reader öffnen"
+   },
+   "web2pdfConvertLinkContextMenu": {
+      "message": "Linkziel in Adobe PDF konvertieren"
+   },
+   "web2pdfConvertPageContextMenu": {
+      "message": "Webseite in Adobe PDF konvertieren..."
+   },
+   "web2pdfCopyText": {
+      "message": "In Acrobat kopieren"
+   },
+   "web2pdfCreatePDFText": {
+      "message": "In PDF konvertieren"
+   },
+   "web2pdfDestinationText": {
+      "message": "Zielordner:"
+   },
+   "web2pdfDoneButtonText": {
+      "message": "Fertig"
+   },
+   "web2pdfEditDeletePDFText": {
+      "message": "Seiten löschen"
+   },
+   "web2pdfEditPDFText": {
+      "message": "PDF bearbeiten"
+   },
+   "web2pdfEditReorderPDFText": {
+      "message": "Seiten neu anordnen"
+   },
+   "web2pdfEditRotatePDFText": {
+      "message": "Seiten drehen"
+   },
+   "web2pdfExportPDFToExcelText": {
+      "message": "PDF in Excel"
+   },
+   "web2pdfExportPDFToJPGText": {
+      "message": "PDF in JPG"
+   },
+   "web2pdfExportPDFToPPTText": {
+      "message": "PDF in PPT"
+   },
+   "web2pdfExportPDFToWordText": {
+      "message": "PDF in Word"
+   },
+   "web2pdfExtnDescription": {
+      "message": "Verwenden Sie Acrobat im Browser, um PDF-Dateien anzuzeigen, zu konvertieren, zu komprimieren und zu unterzeichnen"
+   },
+   "web2pdfExtnDescriptionBeta": {
+      "message": "Verwenden Sie Acrobat im Browser, um PDF-Dateien anzuzeigen, zu konvertieren, zu komprimieren und zu unterzeichnen"
+   },
+   "web2pdfExtnDescriptionChrome": {
+      "message": "Mit den Adobe Acrobat-Werkzeugen für PDF-Dateien haben Sie mehr Funktionen in Google Chrome zur Verfügung. Mit den Werkzeugen können Sie anzeigen, ausfüllen, kommentieren, signieren, konvertieren und komprimieren."
+   },
+   "web2pdfExtnDescriptionEdge": {
+      "message": "Mit den Adobe Acrobat-Werkzeugen für PDF-Dateien haben Sie mehr Funktionen in Microsoft Edge zur Verfügung. Mit den Werkzeugen können Sie anzeigen, ausfüllen, kommentieren, signieren, konvertieren und komprimieren."
+   },
+   "web2pdfExtnName": {
+      "message": "Adobe Acrobat: Werkzeuge zum Bearbeiten, Konvertieren und Signieren von PDF-Dateien"
+   },
+   "web2pdfExtnNameBeta": {
+      "message": "Adobe Acrobat Beta"
+   },
+   "web2pdfExtnNameEdge": {
+      "message": "Adobe Acrobat: Werkzeuge zum Bearbeiten, Konvertieren und Signieren von PDF-Dateien"
+   },
+   "web2pdfExtnNameStage": {
+      "message": "Adobe Acrobat-Phase"
+   },
+   "web2pdfFileLockedError": {
+      "message": "Die Datei kann nicht gespeichert werden, weil sie von einem anderen Prozess verwendet wird."
+   },
+   "web2pdfFilename": {
+      "message": "Dateiname:"
+   },
+   "web2pdfFillSignAcrobatButtonText": {
+      "message": "Ausfüllen & unterschreiben"
+   },
+   "web2pdfFillandSignText": {
+      "message": "Ausfüllen & unterschreiben"
+   },
+   "web2pdfFrictionlessToggleDescription": {
+      "message": "Die Adobe Acrobat-Erweiterung empfiehlt für Ihre Aufgabe hilfreiche PDF-Tools basierend auf dem, was Sie gesucht haben. Die Empfehlung erhalten Sie auf dem Gerät. Suchen werden nicht an Adobe gesendet."
+   },
+   "web2pdfFrictionlessUrl": {
+      "message": "https://www.adobe.com/go/fl_chromeext_de"
+   },
+   "web2pdfFrictionlessUrlEdge": {
+      "message": "https://www.adobe.com/de/acrobat/online.html?x_api_client_id=edge_extension&x_api_client_location=trefoil&mv=other&mv2=edge_extension:trefoil&trackingid=HM85XB76"
+   },
+   "web2pdfGoToAOnlineButtonText": {
+      "message": "Gehe zu Acrobat online"
+   },
+   "web2pdfHTMLJSError": {
+      "message": "Fehler bei der Verarbeitung der Webseite."
+   },
+   "web2pdfHTMLTooLarge": {
+      "message": "HTML-Inhalt ist zu groß für die Verarbeitung."
+   },
+   "web2pdfInfoHoverPopup": {
+      "message": "Die Adobe Acrobat-Erweiterung empfiehlt für Ihre Aufgabe hilfreiche PDF-Tools basierend auf dem, was Sie gesucht haben, und findet auf dem Gerät statt. Suchen werden nicht an Adobe gesendet. Klicken Sie \u003Cspan class = \"tooltip-content-settings\">hier\u003C/span>, um diese Funktion zu deaktivieren."
+   },
+   "web2pdfLoaderTitle": {
+      "message": "Wird geladen..."
+   },
+   "web2pdfMissingMac": {
+      "message": "Adobe Acrobat für Chrom ist für Mac derzeit nicht verfügbar."
+   },
+   "web2pdfMissingMacEdge": {
+      "message": "Adobe Acrobat für Microsoft Edge ist für Mac noch nicht verfügbar."
+   },
+   "web2pdfNoFoldersText": {
+      "message": "Sie haben noch keine Ordner in Ihrem Acrobat DC-Speicher."
+   },
+   "web2pdfNoWritePermissionOnSelectedFile": {
+      "message": "Sie verfügen nicht über Schreibberechtigungen für die ausgewählte Datei."
+   },
+   "web2pdfOpenButtonText": {
+      "message": "In Acrobat öffnen"
+   },
+   "web2pdfOpenButtonTextOlder": {
+      "message": "Adobe PDF herunterladen"
+   },
+   "web2pdfOpenButtonTextReader": {
+      "message": "In Acrobat Reader öffnen"
+   },
+   "web2pdfOpenConvertedPDFDescription": {
+      "message": "Öffnen Sie die konvertierte PDF-Datei automatisch in Acrobat, sobald die Konvertierung der Webseite in PDF abgeschlossen ist."
+   },
+   "web2pdfOpenConvertedPDFTitle": {
+      "message": "Konvertierte PDF-Dateien automatisch in Acrobat öffnen"
+   },
+   "web2pdfOpenInDCButtonText": {
+      "message": "PDF in Acrobat öffnen"
+   },
+   "web2pdfOptOut": {
+      "message": "Um die Produktfunktionen zu verbessern, sendet diese Erweiterung Adobe Informationen über Ihre Nutzung."
+   },
+   "web2pdfOptOutDisabled": {
+      "message": "Deine Nutzungsdaten werden nicht freigegeben."
+   },
+   "web2pdfOptions": {
+      "message": "Optionen"
+   },
+   "web2pdfOptionsTitle": {
+      "message": "Adobe Acrobat-Voreinstellungen"
+   },
+   "web2pdfPDFOpenFailed": {
+      "message": "PDF konnte nicht geöffnet werden"
+   },
+   "web2pdfPDFOpenFailedv2": {
+      "message": "Konnte nicht geöffnet werden"
+   },
+   "web2pdfPDFOpened": {
+      "message": "PDF geöffnet"
+   },
+   "web2pdfPDFOpening": {
+      "message": "PDF wird geöffnet"
+   },
+   "web2pdfPreferencesButtonText": {
+      "message": "Einstellungen…"
+   },
+   "web2pdfPreferencesNewText": {
+      "message": "Konvertierungseinstellungen..."
+   },
+   "web2pdfPrivacy": {
+      "message": "Info über Adobe Acrobat"
+   },
+   "web2pdfReplaceWarning": {
+      "message": "existiert bereits.\n Ersetzen?"
+   },
+   "web2pdfRequestSignaturesText": {
+      "message": "Signaturen anfragen"
+   },
+   "web2pdfSave": {
+      "message": "Speichern"
+   },
+   "web2pdfSaveButton": {
+      "message": "Voreinstellungen speichern"
+   },
+   "web2pdfShowPDFTools": {
+      "message": "Google-Suchergebnisse anzeigen"
+   },
+   "web2pdfShowPDFViewerOption": {
+      "message": "Acrobat als Standard-PDF-Viewer verwenden"
+   },
+   "web2pdfShowPersistentOpen": {
+      "message": "„In Acrobat geöffnet“ anzeigen"
+   },
+   "web2pdfShowPersistentOpenAlways": {
+      "message": "Immer „In Acrobat geöffnet“ anzeigen"
+   },
+   "web2pdfShowPersistentOpenDescription": {
+      "message": "Option zum Öffnen von PDF in Acrobat jedes Mal anzeigen."
+   },
+   "web2pdfStatusCancelled": {
+      "message": "Konversion abgebrochen"
+   },
+   "web2pdfStatusComplete": {
+      "message": "Konversion erfolgreich"
+   },
+   "web2pdfStatusDownloading": {
+      "message": "Download für Konvertierung..."
+   },
+   "web2pdfStatusDownloadingPDF": {
+      "message": "PDF wird heruntergeladen"
+   },
+   "web2pdfStatusFailure": {
+      "message": "Konvertierungsfehler"
+   },
+   "web2pdfStatusInProgress": {
+      "message": "Konvertierung läuft…"
+   },
+   "web2pdfStatusUnknownFailure": {
+      "message": "Unbekannter Fehler"
+   },
+   "web2pdfStatusWaiting": {
+      "message": "Warten auf Konvertierung…"
+   },
+   "web2pdfTitle": {
+      "message": "Adobe Acrobat"
+   },
+   "web2pdfUnsupportedAcrobatVersion": {
+      "message": "Es konnte keine unterstützte Acrobat-Version gefunden werden. Installieren Sie eine \u003Ca target='_blank' href='https://acrobat.adobe.com/de/de/free-trial-download.html?trackingid=29NMCS7T&mv=other'>kostenlose 7-tägige Testversion\u003C/a>."
+   },
+   "web2pdfUntitledFileName": {
+      "message": "Unbenannt"
+   },
+   "web2pdfVisitButtonText": {
+      "message": "PDF online erstellen"
+   },
+   "webpagePDFConversion": {
+      "message": "Einstellungen zum Speichern von Webseiten im PDF-Format"
+   },
+   "webpagePDFConversionDescription": {
+      "message": "Beim Speichern von Webseiten als PDF-Dateien kannst du Seitenränder, Schriftarten und andere Layout-Einstellungen ändern."
+   }
+}

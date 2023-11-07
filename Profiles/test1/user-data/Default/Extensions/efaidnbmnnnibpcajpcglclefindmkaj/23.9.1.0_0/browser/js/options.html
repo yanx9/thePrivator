@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<!--
+/*************************************************************************
+* ADOBE CONFIDENTIAL
+* ___________________
+*
+*  Copyright 2015 Adobe Systems Incorporated
+*  All Rights Reserved.
+*
+* NOTICE:  All information contained herein is, and remains
+* the property of Adobe Systems Incorporated and its suppliers,
+* if any.  The intellectual and technical concepts contained
+* herein are proprietary to Adobe Systems Incorporated and its
+* suppliers and are protected by all applicable intellectual property laws,
+* including trade secret and or copyright laws.
+* Dissemination of this information or reproduction of this material
+* is strictly forbidden unless prior written permission is obtained
+* from Adobe Systems Incorporated.
+**************************************************************************/
+-->
+<html>
+    <head>
+    <title id="web2pdfOptionsTitle" class="translate"></title>
+    <link href="../css/core.css" type="text/css" rel="stylesheet"/>
+    <link href="../css/common.css" type="text/css" rel="stylesheet"/>
+    <link href="../css/options.css" type="text/css" rel="stylesheet"/>
+
+    <script src="../../libs/jquery-3.1.1.min.js"></script>
+    <script src="./ch-settings.js"></script>
+    <script type="module" src="./options.js"></script>
+    </head>
+<body>
+
+<!-- <div class="container">
+    <div class="header translate" id="web2pdfOptions">Options</div>
+    <div id="message" class="success hidden"></div>
+    <div id="web2pdfMissingMac" class="header hidden translate" ></div>
+    <div id="bad-version" class="header hidden"></div>
+</div>
+-->
+
+    <!-- Top Header -->
+    <header class="top-bar">
+        <div>
+            <span class="app-icon"></span>
+            <span class="app-title translate" id="web2pdfTitle"></span>
+        </div>
+        <!-- Floodgate controlled -->
+        <div class="hidden" id="saveButtonHeader">
+            <button id="web2pdfSaveButton" disabled="disabled" class="type-spectrum-Button type-spectrum-Button--cta options-save-button translate"></button>
+        </div>
+    </header>
+
+    <!-- Prompt for preference save notification -->
+    <section id="savePrompt">
+        <div class="prompt">
+            <span class="prompt-check-icon"></span>
+            <span class="prompt-title translate" id="optionsSuccessPrompt"></span>
+            <span class="prompt-close-icon">
+                <button id="prompt-close"></button>
+            </span>
+        </div>
+    </section>
+
+    <!-- Options -->
+    <div class="content">
+        <div id="errors"></div>
+        <header>
+            <h1 class="translate" id="web2pdfOptionsTitle"></h1>
+        </header>
+        <div id="toggles"></div>
+        <div id="progress"></div>
+        <div class="save-btn hidden" id="saveButtonFooter">
+            <button id="web2pdfSaveButton" disabled="disabled" class="type-spectrum-Button type-spectrum-Button--cta options-save-button translate"></button>
+        </div>
+    </div>
+</div>
+</body>
+</html>
