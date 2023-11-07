@@ -43,7 +43,13 @@ class App(ctk.CTk):
     def run_profile_callback(self, profile:Profile):
         self.start_buttons[profile.name].configure(state=ctk.DISABLED)
         self.core.run_profile(profile)
-        self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='red', text="⏹️")
+        self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='red', text="⏹️",
+                                                    command=lambda arg=profile: self.stop_profile_callback(arg))
+    def stop_profile_callback(self, profile:Profile):
+        self.start_buttons[profile.name].configure(state=ctk.DISABLED)
+        self.core.stop_profile(profile)
+        self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='green', text="▶️",
+                                                    command=lambda arg=profile: self.run_profile_callback(arg))
 
 if __name__ == "__main__":
     app = App()
