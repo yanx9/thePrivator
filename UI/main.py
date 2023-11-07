@@ -1,8 +1,10 @@
 from typing import Optional, Tuple, Union
 import customtkinter
-
+from core import Core
 class App(customtkinter.CTk):
     def __init__(self):
+        core = Core()
+        print(core.loaded_profiles[])
         super().__init__()
         self.geometry(f"{1100}x{700}")
         self.title("thePrivator")
@@ -16,10 +18,15 @@ class App(customtkinter.CTk):
         self.createButton = customtkinter.CTkButton(self.top_frame, width=30, height=30, text="+")
         self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="w")
         self.profile_frames = []
+        self.start_buttons = []
         for i in range(0,10):
             self.profile_frames.append(customtkinter.CTkFrame(self, height=50))
             self.profile_frames[i].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
-            
+
+            button = customtkinter.CTkButton(self.profile_frames[i], width=30, height=30, text="▶️")
+            button.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="w")
+
+            self.start_buttons.append(button)
 
 
 if __name__ == "__main__":
