@@ -1,1 +1,3 @@
 local/
+Profiles/*/user-data/
+__pycache__/

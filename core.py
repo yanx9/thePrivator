@@ -11,7 +11,8 @@ class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.loaded_profiles = []
-        self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
+        # self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
+        self.chromium_path = "/opt/homebrew/bin/chromium"
         print("===============")
         print(self.chromium_path)
         print("===============")

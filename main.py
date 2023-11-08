@@ -17,9 +17,9 @@ class App(ctk.CTk):
         self.top_frame = ctk.CTkFrame(self, height=40)
         self.top_frame.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="new")
         self.searchBar = ctk.CTkEntry(self.top_frame, height=30, placeholder_text="Search", border_width=0)
-        self.searchBar.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="w")
+        self.searchBar.grid(row=0, column=0, padx=10, pady=(10, 10))
         self.createButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="+")
-        self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="w")
+        self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10))
         self.profile_frames = {}
         self.start_buttons = {}
         for i, profile in enumerate(self.core.loaded_profiles):
