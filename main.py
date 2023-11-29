@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 import customtkinter as ctk
 from core import Core
 from Model.Profile import Profile
+from UI.configure import Config
 
 class App(ctk.CTk):
     
@@ -22,7 +23,7 @@ class App(ctk.CTk):
         self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10))
         self.profile_frames = {}
         self.start_buttons = {}
-        for i, profile in enumerate(self.core.loaded_profiles):
+        for i, profile, in enumerate(self.core.loaded_profiles):
             self.profile_frames.update({profile.name: ctk.CTkFrame(self, height=50)})
             self.profile_frames[profile.name].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
             
