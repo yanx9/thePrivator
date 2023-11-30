@@ -86,7 +86,7 @@ class Core():
         else: print("Profile with this name already exists!")
         self.update_prof_list()
 
-    def edit_profile(oldProfile:Profile, newProfile:Profile):
+    def edit_profile(self, oldProfile:Profile, newProfile:Profile):
         if not os.path.exists(f"Profiles/{newProfile.name}") and oldProfile.name != newProfile.name:
             os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
                        os.path.join(os.getcwd(), "Profiles", newProfile.name))

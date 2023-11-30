@@ -25,7 +25,10 @@ class App(ctk.CTk):
         self.start_buttons = {}
         self.edit_buttons = {}
         self.config_windows = {}
+        self.update_list()
+            
 
+    def update_list(self):
         for i, profile, in enumerate(self.core.loaded_profiles):
             self.profile_frames.update({profile.name: ctk.CTkFrame(self, height=50)})
             self.profile_frames[profile.name].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
@@ -45,10 +48,6 @@ class App(ctk.CTk):
             self.edit_buttons.update({profile.name: editButton})
         print(self.start_buttons)
 
-
-    def update_list(self):
-        pass
-
     def run_profile_callback(self, profile:Profile):
         self.start_buttons[profile.name].configure(state=ctk.DISABLED)
         self.core.run_profile(profile)
@@ -61,7 +60,7 @@ class App(ctk.CTk):
         self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='green', text="▶️",
                                                     command=lambda arg=profile: self.run_profile_callback(arg))
 
-    def edit_profile_callback(self, profile:Profile):
+    def edit_profile_callback(self, profile:Profile): #TODO: fix moving profiles
         self.edit_buttons[profile.name].configure(state=ctk.DISABLED)
         self.config_windows.update({profile.name: None})
         if self.config_windows[profile.name] is None or not self.config_windows[profile.name].winfo_exists():
@@ -69,6 +68,7 @@ class App(ctk.CTk):
         else:
             self.config_windows.focus()  # if window exists focus it
         self.edit_buttons[profile.name].configure(state=ctk.NORMAL)
+        self.update_list()
 
 if __name__ == "__main__":
     app = App()
