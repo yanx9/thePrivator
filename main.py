@@ -6,10 +6,10 @@ from UI.configure import Config
 
 class App(ctk.CTk):
     
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.core = Core()
         # print(core.loaded_profiles)
-        super().__init__()
+        super().__init__(*args, **kwargs)
         self.geometry(f"{1100}x{700}")
         self.title("thePrivator")
         self.grid_columnconfigure(0, weight=1)
@@ -23,18 +23,26 @@ class App(ctk.CTk):
         self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10))
         self.profile_frames = {}
         self.start_buttons = {}
+        self.edit_buttons = {}
+        self.config_windows = {}
+
         for i, profile, in enumerate(self.core.loaded_profiles):
             self.profile_frames.update({profile.name: ctk.CTkFrame(self, height=50)})
             self.profile_frames[profile.name].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
             
             label = ctk.CTkLabel(self.profile_frames[profile.name], text=profile.name)
             label.grid(row=0, column=0, padx=10, pady=(10, 10))
-            button = ctk.CTkButton(self.profile_frames[profile.name],
+            startButton = ctk.CTkButton(self.profile_frames[profile.name],
                                               fg_color='green', width=30, height=30, text="▶️",
                                                 command=lambda arg=profile: self.run_profile_callback(arg))
-            button.grid(row=0, column=1, padx=10, pady=(10, 10))
+            editButton = ctk.CTkButton(self.profile_frames[profile.name],
+                                              fg_color='blue', width=30, height=30, text="✏️",
+                                                command=lambda arg=profile: self.edit_profile_callback(arg))
+            startButton.grid(row=0, column=1, padx=10, pady=(10, 10))
+            editButton.grid(row=0, column=2, padx=10, pady=(10, 10))
 
-            self.start_buttons.update({profile.name: button})
+            self.start_buttons.update({profile.name: startButton})
+            self.edit_buttons.update({profile.name: editButton})
         print(self.start_buttons)
 
 
@@ -46,11 +54,21 @@ class App(ctk.CTk):
         self.core.run_profile(profile)
         self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='red', text="⏹️",
                                                     command=lambda arg=profile: self.stop_profile_callback(arg))
+    
     def stop_profile_callback(self, profile:Profile):
         self.start_buttons[profile.name].configure(state=ctk.DISABLED)
         self.core.stop_profile(profile)
         self.start_buttons[profile.name].configure(state=ctk.NORMAL, fg_color='green', text="▶️",
                                                     command=lambda arg=profile: self.run_profile_callback(arg))
+
+    def edit_profile_callback(self, profile:Profile):
+        self.edit_buttons[profile.name].configure(state=ctk.DISABLED)
+        self.config_windows.update({profile.name: None})
+        if self.config_windows[profile.name] is None or not self.config_windows[profile.name].winfo_exists():
+            self.config_windows.update({profile.name: Config(profile=profile)}) # create window if its None or destroyed
+        else:
+            self.config_windows.focus()  # if window exists focus it
+        self.edit_buttons[profile.name].configure(state=ctk.NORMAL)
 
 if __name__ == "__main__":
     app = App()

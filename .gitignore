@@ -1,3 +1,4 @@
 local/
 Profiles/*/user-data/
 __pycache__/
+*.egg-info
