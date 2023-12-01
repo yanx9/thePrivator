@@ -19,7 +19,7 @@ class App(ctk.CTk):
         self.top_frame.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="new")
         self.searchBar = ctk.CTkEntry(self.top_frame, height=30, placeholder_text="Search", border_width=0)
         self.searchBar.grid(row=0, column=0, padx=10, pady=(10, 10))
-        self.createButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="+")
+        self.createButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="New Profile", command=self.add_profile_callback)
         self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10))
         self.profile_frames = {}
         self.start_buttons = {}
@@ -29,6 +29,12 @@ class App(ctk.CTk):
             
 
     def update_list(self):
+        self.core.load_profiles()
+        if self.core.loaded_profiles is []:
+            label = ctk.CTkLabel(self, text="No profiles! Add a profile to start...")
+            label.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="nswe")
+            pass
+        
         for i, profile, in enumerate(self.core.loaded_profiles):
             self.profile_frames.update({profile.name: ctk.CTkFrame(self, height=50)})
             self.profile_frames[profile.name].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
@@ -64,11 +70,18 @@ class App(ctk.CTk):
         self.edit_buttons[profile.name].configure(state=ctk.DISABLED)
         self.config_windows.update({profile.name: None})
         if self.config_windows[profile.name] is None or not self.config_windows[profile.name].winfo_exists():
-            self.config_windows.update({profile.name: Config(profile=profile)}) # create window if its None or destroyed
+            self.config_windows.update({profile.name: Config(profile=profile, update_callback=self.update_list)}) # create window if its None or destroyed
         else:
             self.config_windows.focus()  # if window exists focus it
+        #self.wait_window(self.config_windows[profile.name])
         self.edit_buttons[profile.name].configure(state=ctk.NORMAL)
-        self.update_list()
+
+        self.config_windows[profile.name].protocol("WM_DELETE_WINDOW", self.update_list())
+
+    def add_profile_callback(self):
+        self.newConfigure = Config(profile=Profile(), update_callback=self.update_list, isNew=True)
+        #self.wait_window(newConfigure)
+        self.newConfigure.protocol("WM_DELETE_WINDOW", self.update_list())
 
 if __name__ == "__main__":
     app = App()

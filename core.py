@@ -87,7 +87,9 @@ class Core():
         self.update_prof_list()
 
     def edit_profile(self, oldProfile:Profile, newProfile:Profile):
-        if not os.path.exists(f"Profiles/{newProfile.name}") and oldProfile.name != newProfile.name:
+        # print(oldProfile.name, newProfile.name, oldProfile.user_agent, newProfile.user_agent)
+        if not os.path.exists(os.path.join(os.getcwd(), "Profiles", oldProfile.name)) or oldProfile.name != newProfile.name:
+            print(os.path.join(os.getcwd(), "Profiles", newProfile.name))
             os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
                        os.path.join(os.getcwd(), "Profiles", newProfile.name))
         with open(os.path.join(os.getcwd(), "Profiles", newProfile.name, "config.json"), 'w') as file:
