@@ -24,17 +24,21 @@ class App(ctk.CTk):
         self.profile_frames = {}
         self.start_buttons = {}
         self.edit_buttons = {}
+        self.delete_buttons = {}
         self.config_windows = {}
         self.update_list()
             
 
     def update_list(self):
+        for widget in self.grid_slaves():
+                if widget.grid_info()['row'] > 0:
+                    widget.destroy()
         self.core.load_profiles()
-        if self.core.loaded_profiles is []:
+        if self.core.loaded_profiles == []:
             label = ctk.CTkLabel(self, text="No profiles! Add a profile to start...")
             label.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="nswe")
             pass
-        
+            
         for i, profile, in enumerate(self.core.loaded_profiles):
             self.profile_frames.update({profile.name: ctk.CTkFrame(self, height=50)})
             self.profile_frames[profile.name].grid(row=i+1, column=0, padx=10, pady=(10, 0), sticky="new")
@@ -47,12 +51,19 @@ class App(ctk.CTk):
             editButton = ctk.CTkButton(self.profile_frames[profile.name],
                                               fg_color='blue', width=30, height=30, text="✏️",
                                                 command=lambda arg=profile: self.edit_profile_callback(arg))
+            deleteButton = ctk.CTkButton(self.profile_frames[profile.name],
+                                              fg_color='red', width=30, height=30, text="🗑️",
+                                                command=lambda arg=profile: self.delete_profile_callback(arg))
             startButton.grid(row=0, column=1, padx=10, pady=(10, 10))
             editButton.grid(row=0, column=2, padx=10, pady=(10, 10))
+            deleteButton.grid(row=0, column=3, padx=10, pady=(10, 10))
+
 
             self.start_buttons.update({profile.name: startButton})
             self.edit_buttons.update({profile.name: editButton})
+            self.delete_buttons.update({profile.name: deleteButton})
         print(self.start_buttons)
+
 
     def run_profile_callback(self, profile:Profile):
         self.start_buttons[profile.name].configure(state=ctk.DISABLED)
@@ -78,10 +89,14 @@ class App(ctk.CTk):
 
         self.config_windows[profile.name].protocol("WM_DELETE_WINDOW", self.update_list())
 
+    def delete_profile_callback(self, profile:Profile):
+        self.core.delete_profile(profile=profile)
+        self.profile_frames.pop(profile.name)
+        self.update_list()
+
     def add_profile_callback(self):
         self.newConfigure = Config(profile=Profile(), update_callback=self.update_list, isNew=True)
-        #self.wait_window(newConfigure)
-        self.newConfigure.protocol("WM_DELETE_WINDOW", self.update_list())
+
 
 if __name__ == "__main__":
     app = App()
