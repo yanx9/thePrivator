@@ -32,7 +32,7 @@ class Config(ctk.CTkToplevel):
         self.uaLabel = ctk.CTkLabel(self.uaFrame, text="User agent: ")
         self.uaLabel.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nw")
         self.uaEntry = ctk.CTkEntry(self.uaFrame, width=250)
-        self.uaEntry.insert(ctk.END, profile.user_agent)
+        self.uaEntry.insert(ctk.END, self.profile.user_agent)
         self.uaEntry.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="ew")
         self.uaFrame.columnconfigure(0, weight=1)
 
@@ -47,7 +47,7 @@ class Config(ctk.CTkToplevel):
         self.proxyUrlLabel = ctk.CTkLabel(self.proxyFrame, text="URL: ")
         self.proxyUrlLabel.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="nw")
         self.proxyUrlEntry = ctk.CTkEntry(self.proxyFrame, width=250, state=ctk.NORMAL if self.proxySwitch.get() == 1 else ctk.DISABLED)
-        self.proxyUrlEntry.insert(ctk.END, profile.proxy_url)
+        self.proxyUrlEntry.insert(ctk.END, self.profile.proxy_url)
         self.proxyUrlEntry.grid(row=1, column=1, padx=10, pady=(10, 10), sticky="ew")
         self.proxyFrame.columnconfigure(0, weight=1)
 
@@ -65,6 +65,7 @@ class Config(ctk.CTkToplevel):
         self.discardButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="nwse")
         self.changesFrame.columnconfigure(0, weight=1)
         self.changesFrame.columnconfigure(1, weight=1)
+        print(self.proxyUrlEntry._text_color)
 
 
 #  NOTE:  SAVING CHANGES
@@ -91,7 +92,11 @@ class Config(ctk.CTkToplevel):
         switch_state = self.proxySwitch.get()
 
         # Enable or disable other fields based on the switch state
-        self.proxyUrlEntry.configure(state=ctk.NORMAL if switch_state == 1 else ctk.DISABLED)
+        if switch_state == 1:
+            self.proxyUrlEntry.configure(state=ctk.NORMAL, text_color="white") 
+        else:
+            self.proxyUrlEntry.configure(state=ctk.DISABLED, text_color="grey") 
+            
         # entry2.config(state=tk.NORMAL if switch_state == 1 else tk.DISABLED)
         # button.config(state=tk.NORMAL if switch_state == 1 else tk.DISABLED)
 

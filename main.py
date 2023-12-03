@@ -3,6 +3,7 @@ import customtkinter as ctk
 from core import Core
 from Model.Profile import Profile
 from UI.configure import Config
+import utils
 
 class App(ctk.CTk):
     
@@ -54,10 +55,13 @@ class App(ctk.CTk):
             deleteButton = ctk.CTkButton(self.profile_frames[profile.name],
                                               fg_color='red', width=30, height=30, text="🗑️",
                                                 command=lambda arg=profile: self.delete_profile_callback(arg))
+            sizeLabel = ctk.CTkLabel(self.profile_frames[profile.name],
+                                     text = utils.get_folder_size(utils.get_profile_path(profile)))
+        
             startButton.grid(row=0, column=1, padx=10, pady=(10, 10))
             editButton.grid(row=0, column=2, padx=10, pady=(10, 10))
             deleteButton.grid(row=0, column=3, padx=10, pady=(10, 10))
-
+            sizeLabel.grid(row=0, column=4, padx=10, pady=(10, 10))
 
             self.start_buttons.update({profile.name: startButton})
             self.edit_buttons.update({profile.name: editButton})

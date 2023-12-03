@@ -18,30 +18,13 @@ class Core():
         self.load_profiles()
         print(platform.platform())
 
-    def config_prompt(self):
-        profile_name = ""
-        print("=== Configuration prompt ===")
-        while profile_name == "":
-            profile_name = input("Enter profile name: ")
-        ua = input("Enter user agent: ")
-        if ua == "": 
-            ua = "Enter user agent: "
-        return Profile(
-            profile_name, 
-            "116", 
-            ua,
-            False,
-            "",
-            "",
-            ""
-            )
     def load_profiles(self):
         loaded_profiles = []
         for root, dirs, files in os.walk("Profiles"):
             for filename in files:
                 if filename == 'config.json':
                     config_path = os.path.join(root, filename)
-
+                    
                     # Load the JSON data from the config file
                     with open(config_path, 'r') as config_file:
                         config_data = json.load(config_file)
@@ -91,20 +74,19 @@ class Core():
         # if os.path.exists(Path(f"Profiles/{newProfile.name}")):
         #     print("Profile with this name already exists!")
         #     return 1
-        if os.path.exists(os.path.join(os.getcwd(), "Profiles", newProfile.name)):
+        if oldProfile.name != newProfile.name and os.path.exists(os.path.join(os.getcwd(), "Profiles", newProfile.name)):
             print("No to lipa")
             pass
         print(oldProfile.name, newProfile.name)
-        if oldProfile.name != newProfile.name:
 
-            print(os.path.join(os.getcwd(), "Profiles", newProfile.name))
-            os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
-                       os.path.join(os.getcwd(), "Profiles", newProfile.name))
-            with open(os.path.join(os.getcwd(), "Profiles",
-                                   newProfile.name, "config.json"), 'w') as file:
-                # Step 2: Write data to the file
-                file.write(newProfile.dump_config())
-            return 0
+        print(os.path.join(os.getcwd(), "Profiles", newProfile.name))
+        os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
+                    os.path.join(os.getcwd(), "Profiles", newProfile.name))
+        with open(os.path.join(os.getcwd(), "Profiles",
+                                newProfile.name, "config.json"), 'w') as file:
+            # Step 2: Write data to the file
+            file.write(newProfile.dump_config())
+        return 0
     
     def delete_profile(self, profile:Profile):
         if os.path.exists(f"Profiles/{profile.name}"):
