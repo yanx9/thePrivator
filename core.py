@@ -13,9 +13,6 @@ class Core():
         self.loaded_profiles = []
         # self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
         self.chromium_path = "/opt/homebrew/bin/chromium"
-        print("===============")
-        print(self.chromium_path)
-        print("===============")
 
         self.active_processes = {}
         self.load_profiles()
@@ -83,19 +80,32 @@ class Core():
             with open(os.path.join(os.getcwd(), "Profiles", profile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
                 file.write(profile.dump_config())
-        else: print("Profile with this name already exists!")
+        else:
+            print("Profile with this name already exists!")
+            return 1
         self.update_prof_list()
+        return 0
 
     def edit_profile(self, oldProfile:Profile, newProfile:Profile):
         # print(oldProfile.name, newProfile.name, oldProfile.user_agent, newProfile.user_agent)
-        if not os.path.exists(os.path.join(os.getcwd(), "Profiles", oldProfile.name)) or oldProfile.name != newProfile.name:
+        # if os.path.exists(Path(f"Profiles/{newProfile.name}")):
+        #     print("Profile with this name already exists!")
+        #     return 1
+        if os.path.exists(os.path.join(os.getcwd(), "Profiles", newProfile.name)):
+            print("No to lipa")
+            pass
+        print(oldProfile.name, newProfile.name)
+        if oldProfile.name != newProfile.name:
+
             print(os.path.join(os.getcwd(), "Profiles", newProfile.name))
             os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
                        os.path.join(os.getcwd(), "Profiles", newProfile.name))
-        with open(os.path.join(os.getcwd(), "Profiles", newProfile.name, "config.json"), 'w') as file:
-            # Step 2: Write data to the file
-            file.write(newProfile.dump_config())
-
+            with open(os.path.join(os.getcwd(), "Profiles",
+                                   newProfile.name, "config.json"), 'w') as file:
+                # Step 2: Write data to the file
+                file.write(newProfile.dump_config())
+            return 0
+    
     def delete_profile(self, profile:Profile):
         if os.path.exists(f"Profiles/{profile.name}"):
             shutil.rmtree(os.getcwd() + "/Profiles/" + profile.name)

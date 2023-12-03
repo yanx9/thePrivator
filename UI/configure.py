@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 import customtkinter as ctk
 from Model.Profile import Profile
 from core import Core
+from copy import copy
 
 class Config(ctk.CTkToplevel):
     def __init__(self, profile:Profile, update_callback, isNew=False, *args, **kwargs):
@@ -11,8 +12,9 @@ class Config(ctk.CTkToplevel):
         self.profile = profile
         self.isNew = isNew
         if self.isNew == True:
-            self.title(f"New Profile")
-        self.title(f"Config: {profile.name}")
+            self.title("New Profile")
+        else:
+            self.title(f"Config: {profile.name}")
         self.geometry("400x300")
         self.grid_columnconfigure(0, weight=1)
 
@@ -68,18 +70,19 @@ class Config(ctk.CTkToplevel):
 #  NOTE:  SAVING CHANGES
 
     def save_changes_callback(self):
-        result = self.profile
+        result = copy(self.profile)
         result.name = self.nameEntry.get()
         result.user_agent = self.uaEntry.get()
         result.proxy_flag = self.proxySwitch.get()
         result.proxy_url = self.proxyUrlEntry.get()
         print(result.proxy_flag)
         if self.isNew == True:
-            self.core.new_profile(result)
+            res = self.core.new_profile(result)
         else:
-            self.core.edit_profile(self.profile, result)
-        self.update_callback()
-        self.destroy()
+            res = self.core.edit_profile(self.profile, result)
+        if res == 0:
+            self.update_callback()
+            self.destroy()
 
     def discard_changes_callback(self):
         self.destroy()
