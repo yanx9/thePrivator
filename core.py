@@ -5,7 +5,6 @@ from Model.Profile import Profile
 import shlex, shutil
 import json
 from pathlib import Path
-import sys
 import platform
 
 class Core():
@@ -40,7 +39,8 @@ class Core():
                         config_data['proxy_url'],
                         config_data['proxy_user'],
                         config_data['proxy_pass'],
-                        config_data['auth_flag']
+                        config_data['auth_flag'],
+                        config_data['proxy_port'],
                     )
 
                     # Append the Profile object to the loaded_profiles list
@@ -55,9 +55,14 @@ class Core():
         args = self.chromium_path
         if profile.user_agent != "":
             args += f" --user-agent='{profile.user_agent}'"
+        if profile.proxy_flag == 1:
+            if profile.auth_flag == 1: 
+                args += f" --proxy-server=http://{profile.proxy_user}:{profile.proxy_pass}@{profile.proxy_url}:{profile.proxy_port}"
+            elif profile.auth_flag == 0:
+                args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             
         datadir = Path(f"{os.getcwd()}/Profiles/{profile.name}/user-data")
-        args += f" --user-data-dir='{datadir}'"
+        args += f" --user-data-dir='{datadir}' --remote-debugging-port=9222"
         return args
 
     def new_profile(self, profile:Profile):
@@ -99,7 +104,7 @@ class Core():
 
     def run_profile(self, profile:Profile):
         command_line = self.craft_command(profile=profile)
-        if sys.platform == 'win32':
+        if platform.system() == 'Windows':
             args = command_line
         else:
             args = shlex.split(command_line)

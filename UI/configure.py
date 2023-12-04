@@ -51,11 +51,22 @@ class Config(ctk.CTkToplevel):
         self.proxySwitch.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nsw")
         self.proxyUrlLabel = ctk.CTkLabel(self.proxyFrame, text="URL: ")
         self.proxyUrlLabel.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="nsw")
-        self.proxyUrlEntry = ctk.CTkEntry(self.proxyFrame, width=250, 
+        self.proxyInputFrame = ctk.CTkFrame(self.proxyFrame, height=50, bg_color="transparent")
+        self.proxyInputFrame.grid(row=1, column=1, sticky="nswe")
+        self.proxyAddressLabel = ctk.CTkLabel(self.proxyInputFrame, text="http://")
+        self.proxyAddressLabel.grid(row=0, column=0, padx=3, pady=(10, 10), sticky="nesw")
+        self.proxyAddressEntry = ctk.CTkEntry(self.proxyInputFrame, width=150, placeholder_text="http://127.0.0.1", 
                                           text_color="white" if self.proxySwitch.get() == 1 else "grey")
-        self.proxyUrlEntry.insert(ctk.END, self.profile.proxy_url)
-        self.proxyUrlEntry.configure(state=ctk.NORMAL if self.proxySwitch.get() == 1 else ctk.DISABLED)
-        self.proxyUrlEntry.grid(row=1, column=1, padx=10, pady=(10, 10), sticky="esw")
+        self.proxyAddressEntry.insert(ctk.END, self.profile.proxy_url)
+        self.proxyAddressEntry.grid(row=0, column=1, pady=(10, 10), sticky="nesw")
+        self.proxyPortLabel = ctk.CTkLabel(self.proxyInputFrame, text=":")
+        self.proxyPortLabel.grid(row=0, column=2, padx=3, pady=(10, 10), sticky="nesw")
+        self.proxyPortEntry = ctk.CTkEntry(self.proxyInputFrame, width=60, placeholder_text="8080",
+                                          text_color="white" if self.proxySwitch.get() == 1 else "grey")
+        self.proxyPortEntry.insert(ctk.END, self.profile.proxy_port)
+        self.proxyPortEntry.grid(row=0, column=3, pady=(10, 10), sticky="nesw")
+        
+
         self.proxyAuthCheck = ctk.CTkCheckBox(self.proxyFrame, text="Auth?", command=self.toggle_auth_fields)
         if profile.auth_flag is 1:
             self.proxyAuthCheck.select()
@@ -93,7 +104,7 @@ class Config(ctk.CTkToplevel):
         self.discardButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="nwse")
         self.changesFrame.columnconfigure(0, weight=1)
         self.changesFrame.columnconfigure(1, weight=1)
-        print(self.proxyUrlEntry._text_color)
+        print(self.proxyAddressEntry._text_color)
 
         self.toggle_auth_fields()
         self.toggle_proxy_fields()
@@ -107,11 +118,12 @@ class Config(ctk.CTkToplevel):
         result.name = self.nameEntry.get()
         result.user_agent = self.uaEntry.get()
         result.proxy_flag = self.proxySwitch.get()
-        result.proxy_url = self.proxyUrlEntry.get()
+        result.proxy_url = self.proxyAddressEntry.get()
         result.proxy_user = self.proxyUserEntry.get()
         result.proxy_pass = self.proxyPassEntry.get()
         result.auth_flag = self.proxyAuthCheck.get()
-        print(result.proxy_flag)
+        result.proxy_port = self.proxyPortEntry.get()
+        print(result.proxy_port)
         if self.isNew == True:
             res = self.core.new_profile(result)
         else:
@@ -129,10 +141,13 @@ class Config(ctk.CTkToplevel):
 
         # Enable or disable other fields based on the switch state
         if switch_state == 1:
-            self.proxyUrlEntry.configure(state=ctk.NORMAL, text_color="white")
+            self.proxyAddressEntry.configure(state=ctk.NORMAL, text_color="white")
+            self.proxyPortEntry.configure(state=ctk.NORMAL, text_color="white")
+            self.proxyAuthCheck.configure(state=ctk.NORMAL)
             self.toggle_auth_fields()
         else:
-            self.proxyUrlEntry.configure(state=ctk.DISABLED, text_color="grey")
+            self.proxyAddressEntry.configure(state=ctk.DISABLED, text_color="grey")
+            self.proxyPortEntry.configure(state=ctk.DISABLED, text_color="grey")
             self.proxyAuthCheck.configure(state=ctk.DISABLED) 
             self.proxyUserEntry.configure(state=ctk.DISABLED, text_color="grey")
             self.proxyPassEntry.configure(state=ctk.DISABLED, text_color="grey")

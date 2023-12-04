@@ -2,9 +2,10 @@
     "name": "New1q321",
     "chromium_version": "116",
     "user_agent": "Default",
-    "proxy_flag": 0,
-    "proxy_url": "scasd",
-    "proxy_user": "asdasd",
-    "proxy_pass": "dddsadasdas",
-    "auth_flag": 1
+    "proxy_flag": 1,
+    "proxy_url": "localhost",
+    "proxy_user": "",
+    "proxy_pass": "",
+    "auth_flag": 0,
+    "proxy_port": "8080"
 }

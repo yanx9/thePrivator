@@ -2,7 +2,7 @@ import json
 class Profile:
     def __init__(self, name="New", chromium_version="116", user_agent="Default",
                   proxy_flag=0, proxy_url="", proxy_user="", proxy_pass="",
-                  auth_flag=0):
+                  auth_flag=0, proxy_port=""):
         self.name = name
         self.chromium_version = chromium_version
         self.user_agent = user_agent
@@ -11,6 +11,7 @@ class Profile:
         self.proxy_user = proxy_user
         self.proxy_pass = proxy_pass
         self.auth_flag = auth_flag
+        self.proxy_port = proxy_port
     def dump_config(self):
         return json.dumps(self.__dict__, indent = 4)
     
