@@ -86,8 +86,9 @@ class App(ctk.CTk):
         self.config_windows.update({profile.name: None})
         if self.config_windows[profile.name] is None or not self.config_windows[profile.name].winfo_exists():
             self.config_windows.update({profile.name: Config(profile=profile, update_callback=self.update_list)}) # create window if its None or destroyed
+            self.config_windows[profile.name].focus()
         else:
-            self.config_windows.focus()  # if window exists focus it
+            self.config_windows[profile.name].focus()  # if window exists focus it
         #self.wait_window(self.config_windows[profile.name])
         self.edit_buttons[profile.name].configure(state=ctk.NORMAL)
 

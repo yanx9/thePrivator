@@ -15,11 +15,14 @@ class Config(ctk.CTkToplevel):
             self.title("New Profile")
         else:
             self.title(f"Config: {profile.name}")
-        self.geometry("400x300")
+        self.geometry("440x400")
         self.grid_columnconfigure(0, weight=1)
 
         self.mainFrame = ctk.CTkScrollableFrame(self, width=400, height=300)
         self.mainFrame.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="new")
+        self.mainFrame.rowconfigure(0, weight=1)
+        self.mainFrame.rowconfigure(0, weight=1)
+
         self.nameFrame = ctk.CTkFrame(self.mainFrame, height=50)
         self.nameFrame.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="new")
         self.nameLabel = ctk.CTkLabel(self.nameFrame, text="Profile name: ")
@@ -72,6 +75,8 @@ class Config(ctk.CTkToplevel):
         self.proxyPassEntry.configure(state=ctk.NORMAL if self.proxyAuthCheck.get() == 1 else ctk.DISABLED, 
                                           text_color="white" if self.proxyAuthCheck.get() == 1 else "grey")
 
+        
+
         self.proxyFrame.columnconfigure(0, weight=1)
 
         if self.isNew == True:
@@ -79,9 +84,9 @@ class Config(ctk.CTkToplevel):
         else:
             saveText = "Save Changes"
 
-        self.changesFrame = ctk.CTkFrame(self.mainFrame, height=50)
+        self.changesFrame = ctk.CTkFrame(self, height=50)
         """change row to n+1"""
-        self.changesFrame.grid(row=4, column=0, padx=10, pady=(10, 10), sticky="sew")
+        self.changesFrame.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="sew")
         self.saveButton = ctk.CTkButton(self.changesFrame, text=saveText, command=self.save_changes_callback)
         self.saveButton.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nwse")
         self.discardButton = ctk.CTkButton(self.changesFrame, text="Discard Changes", command=self.discard_changes_callback)
@@ -89,6 +94,10 @@ class Config(ctk.CTkToplevel):
         self.changesFrame.columnconfigure(0, weight=1)
         self.changesFrame.columnconfigure(1, weight=1)
         print(self.proxyUrlEntry._text_color)
+
+        self.toggle_auth_fields()
+        self.toggle_proxy_fields()
+        
 
 
 #  NOTE:  SAVING CHANGES
@@ -99,6 +108,9 @@ class Config(ctk.CTkToplevel):
         result.user_agent = self.uaEntry.get()
         result.proxy_flag = self.proxySwitch.get()
         result.proxy_url = self.proxyUrlEntry.get()
+        result.proxy_user = self.proxyUserEntry.get()
+        result.proxy_pass = self.proxyPassEntry.get()
+        result.auth_flag = self.proxyAuthCheck.get()
         print(result.proxy_flag)
         if self.isNew == True:
             res = self.core.new_profile(result)
@@ -112,15 +124,22 @@ class Config(ctk.CTkToplevel):
         self.destroy()
     
     def toggle_proxy_fields(self):
+        print(self.geometry())
         switch_state = self.proxySwitch.get()
 
         # Enable or disable other fields based on the switch state
         if switch_state == 1:
-            self.proxyUrlEntry.configure(state=ctk.NORMAL, text_color="white") 
+            self.proxyUrlEntry.configure(state=ctk.NORMAL, text_color="white")
+            self.toggle_auth_fields()
         else:
-            self.proxyUrlEntry.configure(state=ctk.DISABLED, text_color="grey") 
+            self.proxyUrlEntry.configure(state=ctk.DISABLED, text_color="grey")
+            self.proxyAuthCheck.configure(state=ctk.DISABLED) 
+            self.proxyUserEntry.configure(state=ctk.DISABLED, text_color="grey")
+            self.proxyPassEntry.configure(state=ctk.DISABLED, text_color="grey")
 
     def toggle_auth_fields(self):
+        if self.proxySwitch.get() == 0:
+            pass
         switch_state = self.proxyAuthCheck.get()
         print(self.proxyAuthCheck.get())
 
@@ -128,9 +147,7 @@ class Config(ctk.CTkToplevel):
         if switch_state == 1:
             self.proxyUserEntry.configure(state=ctk.NORMAL, text_color="white")
             self.proxyPassEntry.configure(state=ctk.NORMAL, text_color="white") 
-
         else:
             self.proxyUserEntry.configure(state=ctk.DISABLED, text_color="grey")
             self.proxyPassEntry.configure(state=ctk.DISABLED, text_color="grey") 
-        pass
             

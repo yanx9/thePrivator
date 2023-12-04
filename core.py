@@ -6,17 +6,20 @@ import shlex, shutil
 import json
 from pathlib import Path
 import sys
+import platform
 
 class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.loaded_profiles = []
-        # self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
-        self.chromium_path = "/opt/homebrew/bin/chromium"
+        if platform.system() == 'Windows':
+            self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
+        else:
+            self.chromium_path = "/opt/homebrew/bin/chromium"
 
         self.active_processes = {}
         self.load_profiles()
-        print(platform.platform())
+        print(platform.system())
 
     def load_profiles(self):
         loaded_profiles = []
