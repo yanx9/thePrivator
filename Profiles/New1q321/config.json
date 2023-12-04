@@ -5,5 +5,6 @@
     "proxy_flag": 1,
     "proxy_url": "scasd",
     "proxy_user": "",
-    "proxy_pass": ""
+    "proxy_pass": "",
+    "auth_flag": 0
 }

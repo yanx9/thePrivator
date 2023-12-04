@@ -12,9 +12,9 @@ def get_folder_size(folder_path):
     if total_size < 1024:
         return f"{total_size} B"
     elif total_size < 1048576:
-        return f"{total_size/1024} kB"
+        return f"{round(total_size/1024)} kB"
     else:
-        return f"{total_size/1048576} MB"
+        return f"{round(total_size/1048576)} MB"
 
 
 def get_profile_path(profile) -> str:

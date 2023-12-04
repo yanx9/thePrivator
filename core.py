@@ -36,7 +36,8 @@ class Core():
                         config_data['proxy_flag'],
                         config_data['proxy_url'],
                         config_data['proxy_user'],
-                        config_data['proxy_pass']
+                        config_data['proxy_pass'],
+                        config_data['auth_flag']
                     )
 
                     # Append the Profile object to the loaded_profiles list
