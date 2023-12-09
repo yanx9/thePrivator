@@ -12,6 +12,7 @@ class Profile:
         self.proxy_pass = proxy_pass
         self.auth_flag = auth_flag
         self.proxy_port = proxy_port
+        
     def dump_config(self):
         return json.dumps(self.__dict__, indent = 4)
     

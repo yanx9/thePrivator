@@ -7,7 +7,10 @@ def get_folder_size(folder_path):
     for dirpath, dirnames, filenames in os.walk(folder_path):
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
-            total_size += os.path.getsize(filepath)
+            try:
+                total_size += os.path.getsize(filepath)
+            except(FileNotFoundError):
+                continue
     scale = "B"
     if total_size < 1024:
         return f"{total_size} B"

@@ -40,7 +40,7 @@ class Core():
                         config_data['proxy_user'],
                         config_data['proxy_pass'],
                         config_data['auth_flag'],
-                        config_data['proxy_port'],
+                        config_data['proxy_port']
                     )
 
                     # Append the Profile object to the loaded_profiles list
@@ -66,10 +66,12 @@ class Core():
         return args
 
     def new_profile(self, profile:Profile):
+        if not os.path.exists(Path(self.user_data_root)):
+            os.mkdir(os.path.join(os.getcwd(), self.user_data_root))
         if not os.path.exists(Path(f"Profiles/{profile.name}")):
-            os.mkdir(os.path.join(os.getcwd(), "Profiles", profile.name))
-            os.mkdir(os.path.join(os.getcwd(), "Profiles", profile.name, "user-data"))
-            with open(os.path.join(os.getcwd(), "Profiles", profile.name, "config.json"), 'w') as file:
+            os.mkdir(os.path.join(os.getcwd(), self.user_data_root, profile.name))
+            os.mkdir(os.path.join(os.getcwd(), self.user_data_root, profile.name, "user-data"))
+            with open(os.path.join(os.getcwd(), self.user_data_root, profile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
                 file.write(profile.dump_config())
         else:
@@ -88,18 +90,18 @@ class Core():
             pass
         print(oldProfile.name, newProfile.name)
 
-        print(os.path.join(os.getcwd(), "Profiles", newProfile.name))
-        os.rename(os.path.join(os.getcwd(), "Profiles", oldProfile.name),
-                    os.path.join(os.getcwd(), "Profiles", newProfile.name))
-        with open(os.path.join(os.getcwd(), "Profiles",
+        print(os.path.join(os.getcwd(), self.user_data_root, newProfile.name))
+        os.rename(os.path.join(os.getcwd(), self.user_data_root, oldProfile.name),
+                    os.path.join(os.getcwd(), self.user_data_root, newProfile.name))
+        with open(os.path.join(os.getcwd(), self.user_data_root,
                                 newProfile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
             file.write(newProfile.dump_config())
         return 0
     
     def delete_profile(self, profile:Profile):
-        if os.path.exists(f"Profiles/{profile.name}"):
-            shutil.rmtree(os.getcwd() + "/Profiles/" + profile.name)
+        if os.path.exists(os.path.join(f"{self.user_data_root}", f"{profile.name}")):
+            shutil.rmtree(os.path.join(os.getcwd(), f"{self.user_data_root}", profile.name))
         self.update_prof_list()
 
     def run_profile(self, profile:Profile):
@@ -117,6 +119,12 @@ class Core():
     def stop_profile(self, profile:Profile):
         self.active_processes[profile.name].terminate()
         self.active_processes.pop(profile.name)
+
+    def check_running_processes(self):
+        for instance in self.active_processes:
+            if self.active_processes[instance].poll() is None:
+                self.active_processes.pop(instance)
+                
 
 
 
