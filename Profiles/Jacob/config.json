@@ -1,0 +1,11 @@
+{
+    "name": "Jacob",
+    "chromium_version": "116",
+    "user_agent": "Default",
+    "proxy_flag": 0,
+    "proxy_url": "localhost",
+    "proxy_user": "",
+    "proxy_pass": "",
+    "auth_flag": 1,
+    "proxy_port": ""
+}

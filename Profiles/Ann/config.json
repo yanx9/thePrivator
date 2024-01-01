@@ -1,0 +1,11 @@
+{
+    "name": "Ann",
+    "chromium_version": "116",
+    "user_agent": "Default",
+    "proxy_flag": 1,
+    "proxy_url": "45.143.197.221",
+    "proxy_user": "",
+    "proxy_pass": "",
+    "auth_flag": 0,
+    "proxy_port": "3128"
+}
