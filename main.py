@@ -3,6 +3,7 @@ import customtkinter as ctk
 from core import Core
 from Model.Profile import Profile
 from UI.configure import Config
+from UI.settings import Settings
 import utils
 
 class App(ctk.CTk):
@@ -22,6 +23,8 @@ class App(ctk.CTk):
         self.searchBar.grid(row=0, column=0, padx=10, pady=(10, 10))
         self.createButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="New Profile", command=self.add_profile_callback)
         self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10))
+        self.settingsButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="Settings", command=self.settings_callback)
+        self.settingsButton.grid(row=0, column=2, padx=10, pady=(10, 10))
         self.profile_frames = {}
         self.start_buttons = {}
         self.edit_buttons = {}
@@ -97,6 +100,9 @@ class App(ctk.CTk):
         #self.wait_window(self.config_windows[profile.name])
 
         #self.config_windows[profile.name].protocol("WM_DELETE_WINDOW", self.update_list())
+
+    def settings_callback(self):
+        Settings()
 
     def delete_profile_callback(self, profile:Profile):
         self.core.delete_profile(profile=profile)

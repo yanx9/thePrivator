@@ -11,10 +11,13 @@ class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.loaded_profiles = []
-        if platform.system() == 'Windows':
-            self.chromium_path = 'E:\Studia\Praca\\thePrivator\local\chrome-win\chrome.exe'
-        else:
-            self.chromium_path = "/opt/homebrew/bin/chromium"
+        self.settings = self.getSettings()
+        self.chromium_path = self.settings["chromiumPath"]
+        if self.chromium_path == "":
+            if platform.system() == 'Windows':
+                self.settings.update({"chromiumPath": 'E:\Studia\Praca\thePrivator\chrome-win\chrome.exe'})
+            else:
+                self.settings.update({"chromiumPath": "/home/homebrew/bin/chromium"})
 
         self.active_processes = {}
         self.load_profiles()
@@ -48,11 +51,23 @@ class Core():
 
         self.loaded_profiles = loaded_profiles
 
+    def getSettings(self):
+        settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
+        print(settingsPath)
+        with open(settingsPath, 'r') as settings_file:
+            #print(settings_file.read())
+            return json.load(settings_file)
+
+    def setSettings(self, settingsDict):
+        settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
+        with open(settingsPath, 'w') as settings:
+            settings.write(json.dumps(settingsDict))
+
     def update_prof_list(self):
         self.loaded_profiles = self.load_profiles()
 
     def craft_command(self, profile:Profile):
-        args = self.chromium_path
+        args = self.settings["chromiumPath"]
         if profile.user_agent != "":
             args += f" --user-agent='{profile.user_agent}'"
         if profile.proxy_flag == 1:
@@ -105,6 +120,7 @@ class Core():
         self.update_prof_list()
 
     def run_profile(self, profile:Profile):
+        self.settings = self.getSettings()
         command_line = self.craft_command(profile=profile)
         if platform.system() == 'Windows':
             args = command_line
