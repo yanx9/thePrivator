@@ -79,7 +79,6 @@ class App(ctk.CTk):
 
     def run_profile_callback(self, profile:Profile):
         self.core.run_profile(profile)
-        print(f"START: {profile.name}")
         self.start_buttons[profile.name].configure(fg_color='red', text="⏹️",
                                                     command=lambda arg=profile: self.stop_profile_callback(arg))
     
