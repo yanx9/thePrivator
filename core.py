@@ -14,9 +14,10 @@ class Core():
         self.chromium_path = self.settings["chromiumPath"]
         if self.chromium_path == "":
             if platform.system() == 'Windows':
-                self.settings.update({"chromiumPath": 'E:\Studia\Praca\thePrivator\chrome-win\chrome.exe'})
+                self.settings.update({"chromiumPath": 'E:\Studia\Praca\\thePrivator\chrome-win\chrome.exe'})
             else:
                 self.settings.update({"chromiumPath": "/home/homebrew/bin/chromium"})
+            self.setSettings(self.settings)
 
         self.active_processes = {}
         self.load_profiles()
