@@ -1,4 +1,5 @@
 {
+    "rc_port": 9223,
     "name": "Ann",
     "chromium_version": "116",
     "user_agent": "Default",

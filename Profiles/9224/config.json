@@ -1,12 +1,12 @@
 {
-    "rc_port": 9222,
-    "name": "Jacob",
+    "name": "9224",
     "chromium_version": "116",
     "user_agent": "Default",
     "proxy_flag": 0,
-    "proxy_url": "localhost",
+    "proxy_url": "",
     "proxy_user": "",
     "proxy_pass": "",
-    "auth_flag": 1,
-    "proxy_port": ""
+    "auth_flag": 0,
+    "proxy_port": "",
+    "rc_port": 9224
 }

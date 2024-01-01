@@ -5,7 +5,6 @@ from Model.Profile import Profile
 import shlex, shutil
 import json
 from pathlib import Path
-import platform
 
 class Core():
     def __init__(self):
@@ -35,6 +34,7 @@ class Core():
                         config_data = json.load(config_file)
     # Create a Profile object from the loaded JSON data
                     profile = Profile(
+                        config_data['rc_port'],
                         config_data['name'],
                         config_data['chromium_version'],
                         config_data['user_agent'],
@@ -51,13 +51,24 @@ class Core():
 
         self.loaded_profiles = loaded_profiles
 
+    def get_next_rc_port(self) -> int:
+        ports = []
+        for profile in self.loaded_profiles:
+            ports.append(profile.rc_port)
+        ports.sort()
+        p = 9222
+        print(ports[p-9222])
+        while p <= ports[-1] and p == ports[p-9222]:
+            p += 1
+        return p
+
     def getSettings(self):
         settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
         print(settingsPath)
         with open(settingsPath, 'r') as settings_file:
             #print(settings_file.read())
             return json.load(settings_file)
-
+    
     def setSettings(self, settingsDict):
         settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
         with open(settingsPath, 'w') as settings:
@@ -77,7 +88,7 @@ class Core():
                 args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             
         datadir = Path(f"{os.getcwd()}/Profiles/{profile.name}/user-data")
-        args += f" --user-data-dir='{datadir}' --remote-debugging-port=9222"
+        args += f" --user-data-dir='{datadir}' --remote-debugging-port={profile.rc_port}"
         return args
 
     def new_profile(self, profile:Profile):

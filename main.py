@@ -113,7 +113,7 @@ class App(ctk.CTk):
         self.update_list()
 
     def add_profile_callback(self):
-        self.newConfigure = Config(profile=Profile(), update_callback=self.update_list, isNew=True)
+        self.newConfigure = Config(profile=Profile(rc_port=self.core.get_next_rc_port()), update_callback=self.update_list, isNew=True)
 
 
 if __name__ == "__main__":
