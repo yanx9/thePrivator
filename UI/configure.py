@@ -46,7 +46,7 @@ class Config(ctk.CTkToplevel):
         # self.proxySwitchLabel = ctk.CTkLabel(self.proxyFrame, text="Proxy: ")
         # self.proxySwitchLabel.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nw")
         self.proxySwitch = ctk.CTkSwitch(self.proxyFrame, text="Proxy", command=self.toggle_proxy_fields)
-        if profile.proxy_flag is 1:
+        if profile.proxy_flag == 1:
             self.proxySwitch.select()
         self.proxySwitch.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nsw")
         self.proxyUrlLabel = ctk.CTkLabel(self.proxyFrame, text="URL: ")
@@ -68,7 +68,7 @@ class Config(ctk.CTkToplevel):
         
 
         self.proxyAuthCheck = ctk.CTkCheckBox(self.proxyFrame, text="Auth?", command=self.toggle_auth_fields)
-        if profile.auth_flag is 1:
+        if profile.auth_flag == 1:
             self.proxyAuthCheck.select()
         self.proxyAuthCheck.grid(row=2, column=0, padx=10, pady=(10, 10), sticky="wsne")
         self.proxyUserEntry = ctk.CTkEntry(self.proxyFrame, width=250)
@@ -102,7 +102,6 @@ class Config(ctk.CTkToplevel):
         self.discardButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="nwse")
         self.changesFrame.columnconfigure(0, weight=1)
         self.changesFrame.columnconfigure(1, weight=1)
-        print(self.proxyAddressEntry._text_color)
 
         self.toggle_auth_fields()
         self.toggle_proxy_fields()
@@ -121,7 +120,6 @@ class Config(ctk.CTkToplevel):
         result.proxy_pass = self.proxyPassEntry.get()
         result.auth_flag = self.proxyAuthCheck.get()
         result.proxy_port = self.proxyPortEntry.get()
-        print(result.proxy_port)
         if self.isNew == True:
             res = self.core.new_profile(result)
         else:
@@ -134,7 +132,6 @@ class Config(ctk.CTkToplevel):
         self.destroy()
     
     def toggle_proxy_fields(self):
-        print(self.geometry())
         switch_state = self.proxySwitch.get()
 
         # Enable or disable other fields based on the switch state
@@ -154,7 +151,6 @@ class Config(ctk.CTkToplevel):
         if self.proxySwitch.get() == 0:
             pass
         switch_state = self.proxyAuthCheck.get()
-        print(self.proxyAuthCheck.get())
 
         # Enable or disable other fields based on the switch state
         if switch_state == 1:

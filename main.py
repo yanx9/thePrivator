@@ -13,7 +13,7 @@ class App(ctk.CTk):
         self.core = Core()
         # print(core.loaded_profiles)
         super().__init__(*args, **kwargs)
-        self.geometry(f"{1100}x{700}")
+        self.geometry(f"{600}x{450}")
         self.title("thePrivator")
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -26,9 +26,14 @@ class App(ctk.CTk):
         self.searchBar = ctk.CTkEntry(self.top_frame, height=30, placeholder_text="Search", border_width=0, textvariable=self.searchText)
         self.searchBar.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="wns")
         self.createButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="New Profile", command=self.add_profile_callback)
-        self.createButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="nse")
+        self.createButton.grid(row=0, column=2, padx=10, pady=(10, 10), sticky="nse")
         self.settingsButton = ctk.CTkButton(self.top_frame, width=30, height=30, text="Settings", command=self.settings_callback)
-        self.settingsButton.grid(row=0, column=2, padx=10, pady=(10, 10), sticky="nse")
+        self.settingsButton.grid(row=0, column=3, padx=10, pady=(10, 10), sticky="nse")
+        self.top_frame.columnconfigure(0, weight=1)
+        self.top_frame.columnconfigure(1, minsize=50, weight=0)
+        self.top_frame.columnconfigure(2, weight=0)
+        self.top_frame.columnconfigure(3, weight=0)
+
         # self.profile_frames = {}
         # self.start_buttons = {}
         # self.edit_buttons = {}
@@ -141,10 +146,6 @@ class App(ctk.CTk):
 
     def delete_profile_callback(self, profile:Profile):
         self.core.delete_profile(profile=profile)
-        self.profile_frames.pop(profile.name)
-        self.start_buttons.pop(profile.name)
-        self.edit_buttons.pop(profile.name)
-        self.delete_buttons.pop(profile.name)
         self.print_list()
 
     def add_profile_callback(self):
