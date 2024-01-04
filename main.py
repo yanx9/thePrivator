@@ -113,7 +113,7 @@ class App(ctk.CTk):
     def get_search_results(self):
         result = []
         for profile in self.core.loaded_profiles:
-            if self.searchText.get() in profile.name:
+            if self.searchText.get().lower() in profile.name.lower():
                 result.append(profile)
         return result
     

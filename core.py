@@ -28,7 +28,6 @@ class Core():
     def load_profiles(self):
         loaded_profiles = []
         for root, dirs, files in os.walk(os.path.join(self.project_dir, self.user_data_root)):
-            print(dirs)
             for filename in files:
                 if filename == 'config.json':
                     config_path = os.path.join(root, filename)
@@ -99,9 +98,9 @@ class Core():
         return args
 
     def new_profile(self, profile:Profile):
-        if not os.path.exists(Path(self.user_data_root)):
+        if not os.path.exists(os.path.join(self.project_dir, self.user_data_root)):
             os.mkdir(os.path.join(self.project_dir, self.user_data_root))
-        if not os.path.exists(Path(f"Profiles/{profile.name}")):
+        if not os.path.exists(os.path.join(self.project_dir, self.user_data_root, profile.name)):
             os.mkdir(os.path.join(self.project_dir, self.user_data_root, profile.name))
             os.mkdir(os.path.join(self.project_dir, self.user_data_root, profile.name, "user-data"))
             with open(os.path.join(self.project_dir, self.user_data_root, profile.name, "config.json"), 'w') as file:
@@ -118,7 +117,7 @@ class Core():
         # if os.path.exists(Path(f"Profiles/{newProfile.name}")):
         #     print("Profile with this name already exists!")
         #     return 1
-        if oldProfile.name != newProfile.name and os.path.exists(os.path.join(self.project_dir, "Profiles", newProfile.name)):
+        if oldProfile.name != newProfile.name and os.path.exists(os.path.join(self.project_dir, self.user_data_root, newProfile.name)):
             print("No to lipa")
             pass
         print(oldProfile.name, newProfile.name)
@@ -133,7 +132,7 @@ class Core():
         return 0
     
     def delete_profile(self, profile:Profile):
-        if os.path.exists(os.path.join(self.user_data_root, profile.name)):
+        if os.path.exists(os.path.join(self.project_dir, self.user_data_root, profile.name)):
             shutil.rmtree(os.path.join(self.project_dir, self.user_data_root, profile.name))
         self.update_prof_list()
 
