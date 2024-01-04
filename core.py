@@ -57,6 +57,8 @@ class Core():
     
     def get_next_rc_port(self) -> int:
         ports = []
+        if self.loaded_profiles == []:
+            return 9222
         for profile in self.loaded_profiles:
             ports.append(profile.rc_port)
         ports.sort()
