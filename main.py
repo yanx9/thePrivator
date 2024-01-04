@@ -152,7 +152,7 @@ class App(ctk.CTk):
         self.newConfigure = Config(profile=Profile(rc_port=self.core.get_next_rc_port()), update_callback=self.print_list, isNew=True)
     
     def get_profile_path(self, profile) -> str:
-        return os.path.join(os.getcwd(), self.user_data_root, profile.name)
+        return os.path.join(self.core.project_dir, self.user_data_root, profile.name)
 
 if __name__ == "__main__":
     app = App()

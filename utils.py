@@ -18,7 +18,3 @@ def get_folder_size(folder_path):
         return f"{round(total_size/1024)} kB"
     else:
         return f"{round(total_size/1048576)} MB"
-
-
-def get_profile_path(profile) -> str:
-    return os.path.join(os.getcwd(), Core().user_data_root, profile.name)

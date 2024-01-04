@@ -9,6 +9,8 @@ from pathlib import Path
 class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
+        self.project_dir = os.path.dirname(os.path.realpath(__file__))
+        print(self.project_dir)
         self.loaded_profiles = []
         self.settings = self.get_settings()
         self.chromium_path = self.settings["chromiumPath"]
@@ -25,7 +27,8 @@ class Core():
 
     def load_profiles(self):
         loaded_profiles = []
-        for root, dirs, files in os.walk(self.user_data_root):
+        for root, dirs, files in os.walk(os.path.join(self.project_dir, self.user_data_root)):
+            print(dirs)
             for filename in files:
                 if filename == 'config.json':
                     config_path = os.path.join(root, filename)
@@ -53,7 +56,7 @@ class Core():
         self.loaded_profiles = loaded_profiles
     
     def get_profile_path(self, profile) -> str:
-        return os.path.join(os.getcwd(), self.user_data_root, profile.name)
+        return os.path.join(self.project_dir, self.user_data_root, profile.name)
     
     def get_next_rc_port(self) -> int:
         ports = []
@@ -68,13 +71,13 @@ class Core():
         return p
 
     def get_settings(self):
-        settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
+        settingsPath = os.path.join(self.project_dir, "Model", "settings.json")
         with open(settingsPath, 'r') as settings_file:
             #print(settings_file.read())
             return json.load(settings_file)
     
     def set_settings(self, settingsDict):
-        settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
+        settingsPath = os.path.join(self.project_dir, "Model", "settings.json")
         with open(settingsPath, 'w') as settings:
             settings.write(json.dumps(settingsDict))
 
@@ -91,17 +94,17 @@ class Core():
             elif profile.auth_flag == 0:
                 args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             
-        datadir = Path(f"{os.getcwd()}/Profiles/{profile.name}/user-data")
+        datadir = Path(f"{self.project_dir}/Profiles/{profile.name}/user-data")
         args += f" --user-data-dir='{datadir}' --remote-debugging-port={profile.rc_port}"
         return args
 
     def new_profile(self, profile:Profile):
         if not os.path.exists(Path(self.user_data_root)):
-            os.mkdir(os.path.join(os.getcwd(), self.user_data_root))
+            os.mkdir(os.path.join(self.project_dir, self.user_data_root))
         if not os.path.exists(Path(f"Profiles/{profile.name}")):
-            os.mkdir(os.path.join(os.getcwd(), self.user_data_root, profile.name))
-            os.mkdir(os.path.join(os.getcwd(), self.user_data_root, profile.name, "user-data"))
-            with open(os.path.join(os.getcwd(), self.user_data_root, profile.name, "config.json"), 'w') as file:
+            os.mkdir(os.path.join(self.project_dir, self.user_data_root, profile.name))
+            os.mkdir(os.path.join(self.project_dir, self.user_data_root, profile.name, "user-data"))
+            with open(os.path.join(self.project_dir, self.user_data_root, profile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
                 file.write(profile.dump_config())
         else:
@@ -115,23 +118,23 @@ class Core():
         # if os.path.exists(Path(f"Profiles/{newProfile.name}")):
         #     print("Profile with this name already exists!")
         #     return 1
-        if oldProfile.name != newProfile.name and os.path.exists(os.path.join(os.getcwd(), "Profiles", newProfile.name)):
+        if oldProfile.name != newProfile.name and os.path.exists(os.path.join(self.project_dir, "Profiles", newProfile.name)):
             print("No to lipa")
             pass
         print(oldProfile.name, newProfile.name)
 
-        print(os.path.join(os.getcwd(), self.user_data_root, newProfile.name))
-        os.rename(os.path.join(os.getcwd(), self.user_data_root, oldProfile.name),
-                    os.path.join(os.getcwd(), self.user_data_root, newProfile.name))
-        with open(os.path.join(os.getcwd(), self.user_data_root,
+        print(os.path.join(self.project_dir, self.user_data_root, newProfile.name))
+        os.rename(os.path.join(self.project_dir, self.user_data_root, oldProfile.name),
+                    os.path.join(self.project_dir, self.user_data_root, newProfile.name))
+        with open(os.path.join(self.project_dir, self.user_data_root,
                                 newProfile.name, "config.json"), 'w') as file:
             # Step 2: Write data to the file
             file.write(newProfile.dump_config())
         return 0
     
     def delete_profile(self, profile:Profile):
-        if os.path.exists(os.path.join(f"{self.user_data_root}", f"{profile.name}")):
-            shutil.rmtree(os.path.join(os.getcwd(), f"{self.user_data_root}", profile.name))
+        if os.path.exists(os.path.join(self.user_data_root, profile.name)):
+            shutil.rmtree(os.path.join(self.project_dir, self.user_data_root, profile.name))
         self.update_prof_list()
 
     def run_profile(self, profile:Profile):
