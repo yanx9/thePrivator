@@ -8,7 +8,7 @@ class Settings(ctk.CTkToplevel):
         self.geometry("400x180")
         self.grid_columnconfigure(0, weight=1)
 
-        self.settings = self.core.getSettings()
+        self.settings = self.core.get_settings()
         self.mainFrame = ctk.CTkFrame(self, width=300, height=120)
         self.mainFrame.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="new")
         self.mainFrame.rowconfigure(0, weight=1)
@@ -39,7 +39,7 @@ class Settings(ctk.CTkToplevel):
                 "chromiumPath": self.chromiumPathEntry.get()
             }
                       )
-        self.core.setSettings(result)
+        self.core.set_settings(result)
         self.destroy()
 
     def discard_changes_callback(self):
