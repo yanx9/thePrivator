@@ -10,6 +10,7 @@ class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.project_dir = os.path.dirname(os.path.realpath(__file__))
+        self.title("Settings")
         print(self.project_dir)
         self.loaded_profiles = []
         self.settings = self.get_settings()
