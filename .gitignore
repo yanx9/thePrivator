@@ -6,4 +6,4 @@ dist/
 build/
 chrome-win/
 VSCoreCounter/
-Profiles/Profile2/
+Profiles/*

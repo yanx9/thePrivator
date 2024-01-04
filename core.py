@@ -10,14 +10,14 @@ class Core():
     def __init__(self):
         self.user_data_root = "Profiles"
         self.loaded_profiles = []
-        self.settings = self.getSettings()
+        self.settings = self.get_settings()
         self.chromium_path = self.settings["chromiumPath"]
         if self.chromium_path == "":
             if platform.system() == 'Windows':
                 self.settings.update({"chromiumPath": 'E:\Studia\Praca\\thePrivator\chrome-win\chrome.exe'})
             else:
                 self.settings.update({"chromiumPath": "/home/homebrew/bin/chromium"})
-            self.setSettings(self.settings)
+            self.get_settings(self.settings)
 
         self.active_processes = {}
         self.load_profiles()
@@ -25,7 +25,7 @@ class Core():
 
     def load_profiles(self):
         loaded_profiles = []
-        for root, dirs, files in os.walk("Profiles"):
+        for root, dirs, files in os.walk(self.user_data_root):
             for filename in files:
                 if filename == 'config.json':
                     config_path = os.path.join(root, filename)
@@ -51,26 +51,27 @@ class Core():
                     loaded_profiles.append(profile)
 
         self.loaded_profiles = loaded_profiles
-
+    
+    def get_profile_path(self, profile) -> str:
+        return os.path.join(os.getcwd(), self.user_data_root, profile.name)
+    
     def get_next_rc_port(self) -> int:
         ports = []
         for profile in self.loaded_profiles:
             ports.append(profile.rc_port)
         ports.sort()
         p = 9222
-        print(ports[p-9222])
         while p <= ports[-1] and p == ports[p-9222]:
             p += 1
         return p
 
-    def getSettings(self):
+    def get_settings(self):
         settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
-        print(settingsPath)
         with open(settingsPath, 'r') as settings_file:
             #print(settings_file.read())
             return json.load(settings_file)
     
-    def setSettings(self, settingsDict):
+    def set_settings(self, settingsDict):
         settingsPath = Path(f"{os.getcwd()}/Model/settings.json")
         with open(settingsPath, 'w') as settings:
             settings.write(json.dumps(settingsDict))
@@ -132,7 +133,7 @@ class Core():
         self.update_prof_list()
 
     def run_profile(self, profile:Profile):
-        self.settings = self.getSettings()
+        self.settings = self.get_settings()
         command_line = self.craft_command(profile=profile)
         if platform.system() == 'Windows':
             args = command_line

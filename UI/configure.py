@@ -86,8 +86,6 @@ class Config(ctk.CTkToplevel):
         self.proxyPassEntry.configure(state=ctk.NORMAL if self.proxyAuthCheck.get() == 1 else ctk.DISABLED, 
                                           text_color="white" if self.proxyAuthCheck.get() == 1 else "grey")
 
-        
-
         self.proxyFrame.columnconfigure(0, weight=1)
 
         if self.isNew == True:
