@@ -51,7 +51,7 @@ class Config(ctk.CTkToplevel):
         self.proxySwitch.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nsw")
         self.proxyUrlLabel = ctk.CTkLabel(self.proxyFrame, text="URL: ")
         self.proxyUrlLabel.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="nsw")
-        self.proxyInputFrame = ctk.CTkFrame(self.proxyFrame, height=50, bg_color="transparent")
+        self.proxyInputFrame = ctk.CTkFrame(self.proxyFrame, height=50, bg_color="transparent", fg_color="transparent")
         self.proxyInputFrame.grid(row=1, column=1, sticky="nswe")
         self.proxyAddressLabel = ctk.CTkLabel(self.proxyInputFrame, text="http://")
         self.proxyAddressLabel.grid(row=0, column=0, padx=3, pady=(10, 10), sticky="nesw")
