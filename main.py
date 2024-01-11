@@ -75,14 +75,18 @@ class App(ctk.CTk):
             
             label = ctk.CTkLabel(profile_frame, text=profile.name)
             label.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nsw")
-            if profile.name not in self.core.active_processes:
-                startButton = ctk.CTkButton(profile_frame,
+            # TODO: fix button reference
+            # if profile.name not in self.core.active_processes:
+            #     startButton = ctk.CTkButton(profile_frame,
+            #                                   fg_color='green', width=30, height=30, text="▶️",
+            #                                     command=lambda arg=profile: self.run_profile_callback(arg))
+            # else:
+            #     startButton = ctk.CTkButton(profile_frame,
+            #                                 fg_color='red', width=30, height=30, text="⏹️",
+            #                                         command=lambda arg=profile: self.stop_profile_callback(arg))
+            startButton = ctk.CTkButton(profile_frame,
                                               fg_color='green', width=30, height=30, text="▶️",
                                                 command=lambda arg=profile: self.run_profile_callback(arg))
-            else:
-                startButton = ctk.CTkButton(profile_frame,
-                                            fg_color='red', width=30, height=30, text="⏹️",
-                                                    command=lambda arg=profile: self.stop_profile_callback(arg))
             editButton = ctk.CTkButton(profile_frame,
                                               fg_color='blue', width=30, height=30, text="✏️",
                                                 command=lambda arg=profile: self.edit_profile_callback(arg))
