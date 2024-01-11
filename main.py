@@ -122,13 +122,13 @@ class App(ctk.CTk):
 
     def run_profile_callback(self, profile:Profile):
         self.core.run_profile(profile)
-        self.start_buttons[profile.name].configure(fg_color='red', text="⏹️",
-                                                    command=lambda arg=profile: self.stop_profile_callback(arg))
+    # TODO: fix button reference    self.start_buttons[profile.name].configure(fg_color='red', text="⏹️",
+    #                                                command=lambda arg=profile: self.stop_profile_callback(arg))
     
     def stop_profile_callback(self, profile:Profile):
         self.core.stop_profile(profile)
-        self.start_buttons[profile.name].configure(fg_color='green', text="▶️",
-                                                    command=lambda arg=profile: self.run_profile_callback(arg))
+    # TODO: fix button reference    self.start_buttons[profile.name].configure(fg_color='green', text="▶️",
+    #                                                command=lambda arg=profile: self.run_profile_callback(arg))
 
     def edit_profile_callback(self, profile:Profile):
         self.config_windows.update({profile.name: None})

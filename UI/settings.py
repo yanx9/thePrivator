@@ -5,7 +5,8 @@ class Settings(ctk.CTkToplevel):
     def __init__(self, *args, **kwargs):
         self.core = Core()
         super().__init__(*args, **kwargs)
-        self.geometry("400x180")
+        self.geometry("400x160")
+        self.title("Settings")
         self.grid_columnconfigure(0, weight=1)
 
         self.settings = self.core.get_settings()
