@@ -3,6 +3,7 @@ import customtkinter as ctk
 from Model.Profile import Profile
 from core import Core
 from copy import copy
+from utils import get_random_ua
 
 class Config(ctk.CTkToplevel):
     def __init__(self, profile:Profile, update_callback, isNew=False, *args, **kwargs):
@@ -32,13 +33,19 @@ class Config(ctk.CTkToplevel):
         self.nameEntry.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="ew")
         self.nameFrame.columnconfigure(0, weight=1)
 
+
         self.uaFrame = ctk.CTkFrame(self.mainFrame, height=50)
         self.uaFrame.grid(row=1, column=0, padx=10, pady=(10, 10), sticky="new")
         self.uaLabel = ctk.CTkLabel(self.uaFrame, text="User agent: ")
         self.uaLabel.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="nsw")
-        self.uaEntry = ctk.CTkEntry(self.uaFrame, width=250)
+        self.uaInnerFrame = ctk.CTkFrame(self.uaFrame, height=50, bg_color="transparent", fg_color="transparent")
+        self.uaInnerFrame.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="nsw")
+        self.uaEntry = ctk.CTkEntry(self.uaInnerFrame, width=200)
         self.uaEntry.insert(ctk.END, self.profile.user_agent)
-        self.uaEntry.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="ew")
+        self.uaEntry.grid(row=0, column=0, padx=10, pady=(10, 10), sticky="new")
+        self.uaResetButton = ctk.CTkButton(self.uaInnerFrame, fg_color='blue', width=30, height=30, text="🔄",
+                                                command=self.ua_reset_callback)
+        self.uaResetButton.grid(row=0, column=1, padx=10, pady=(10, 10), sticky="new")
         self.uaFrame.columnconfigure(0, weight=1)
 
         self.proxyFrame = ctk.CTkFrame(self.mainFrame, height=50)
@@ -160,3 +167,6 @@ class Config(ctk.CTkToplevel):
             self.proxyUserEntry.configure(state=ctk.DISABLED, text_color="grey")
             self.proxyPassEntry.configure(state=ctk.DISABLED, text_color="grey") 
             
+    def ua_reset_callback(self):
+        self.uaEntry.delete(0, ctk.END)
+        self.uaEntry.insert(ctk.END, get_random_ua(self.core.project_dir))

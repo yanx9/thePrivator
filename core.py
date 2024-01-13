@@ -4,7 +4,6 @@ import subprocess
 from Model.Profile import Profile
 import shlex, shutil
 import json
-from pathlib import Path
 
 class Core():
     def __init__(self):
@@ -76,6 +75,7 @@ class Core():
             return json.load(settings_file)
     
     def set_settings(self, settingsDict):
+        self.chromium_path = self.settings["chromiumPath"]
         settingsPath = os.path.join(self.project_dir, "Model", "settings.json")
         with open(settingsPath, 'w') as settings:
             settings.write(json.dumps(settingsDict))
@@ -84,16 +84,17 @@ class Core():
         self.loaded_profiles = self.load_profiles()
 
     def craft_command(self, profile:Profile):
-        args = self.settings["chromiumPath"]
+        args = self.chromium_path
         if profile.user_agent != "":
             args += f" --user-agent='{profile.user_agent}'"
         if profile.proxy_flag == 1:
             if profile.auth_flag == 1: 
-                args += f" --proxy-server=http://{profile.proxy_user}:{profile.proxy_pass}@{profile.proxy_url}:{profile.proxy_port}"
+                lport = 33000 + len(self.active_processes)
+                args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             elif profile.auth_flag == 0:
                 args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             
-        datadir = Path(f"{self.project_dir}/Profiles/{profile.name}/user-data")
+        datadir = os.path.join(self.project_dir, self.project_dir, profile.name, "user-data")
         args += f" --user-data-dir='{datadir}' --remote-debugging-port={profile.rc_port}"
         return args
 
@@ -118,7 +119,7 @@ class Core():
         #     print("Profile with this name already exists!")
         #     return 1
         if oldProfile.name != newProfile.name and os.path.exists(os.path.join(self.project_dir, self.user_data_root, newProfile.name)):
-            print("No to lipa")
+            print("Profile with this name already exists!")
             pass
         print(oldProfile.name, newProfile.name)
 

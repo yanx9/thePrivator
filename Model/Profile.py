@@ -1,6 +1,7 @@
 import json
+from utils import get_random_ua
 class Profile:
-    def __init__(self, rc_port, name="New", chromium_version="116", user_agent="Default",
+    def __init__(self, rc_port, name="New", chromium_version="116", user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36",
                   proxy_flag=0, proxy_url="", proxy_user="", proxy_pass="",
                   auth_flag=0, proxy_port=""):
         self.name = name
