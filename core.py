@@ -86,7 +86,7 @@ class Core():
     def craft_command(self, profile:Profile):
         args = self.chromium_path
         if profile.user_agent != "":
-            args += f" --user-agent='{profile.user_agent}'"
+            args += f" --user-agent=\"{profile.user_agent}\""
         if profile.proxy_flag == 1:
             if profile.auth_flag == 1: 
                 lport = 33000 + len(self.active_processes)
@@ -95,7 +95,7 @@ class Core():
                 args += f" --proxy-server=http://{profile.proxy_url}:{profile.proxy_port}"
             
         datadir = os.path.join(self.project_dir, self.project_dir, profile.name, "user-data")
-        args += f" --user-data-dir='{datadir}' --remote-debugging-port={profile.rc_port}"
+        args += f" --user-data-dir=\"{datadir}\" --remote-debugging-port={profile.rc_port}"
         return args
 
     def new_profile(self, profile:Profile):
