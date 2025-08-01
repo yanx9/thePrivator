@@ -158,6 +158,11 @@ class App(ctk.CTk):
     def get_profile_path(self, profile) -> str:
         return os.path.join(self.core.project_dir, self.user_data_root, profile.name)
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the GUI application."""
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
