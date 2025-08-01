@@ -1,9 +1,9 @@
 from typing import Optional, Tuple, Union
 import customtkinter as ctk
-from Model.Profile import Profile
-from core import Core
+from thePrivator.Model.Profile import Profile
+from thePrivator.core import Core
 from copy import copy
-from utils import get_random_ua
+from thePrivator.utils import get_random_ua
 
 class Config(ctk.CTkToplevel):
     def __init__(self, profile:Profile, update_callback, isNew=False, *args, **kwargs):

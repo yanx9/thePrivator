@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from core import Core
+from thePrivator.core import Core
 from copy import copy
 class Settings(ctk.CTkToplevel):
     def __init__(self, *args, **kwargs):

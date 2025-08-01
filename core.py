@@ -1,8 +1,9 @@
 import platform
 import os
 import subprocess
-from Model.Profile import Profile
-import shlex, shutil
+from thePrivator.Model.Profile import Profile
+import shlex
+import shutil
 import json
 
 class Core():

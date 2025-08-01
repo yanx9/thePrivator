@@ -1,11 +1,11 @@
 from typing import Optional, Tuple, Union
 import customtkinter as ctk
-from core import Core
-from Model.Profile import Profile
-from UI.configure import Config
-from UI.settings import Settings
+from thePrivator.core import Core
+from thePrivator.Model.Profile import Profile
+from thePrivator.UI.configure import Config
+from thePrivator.UI.settings import Settings
 import os
-import utils
+from thePrivator import utils
 
 class App(ctk.CTk):
     
@@ -155,9 +155,11 @@ class App(ctk.CTk):
     def add_profile_callback(self):
         self.newConfigure = Config(profile=Profile(rc_port=self.core.get_next_rc_port()), update_callback=self.print_list, isNew=True)
     
-    def get_profile_path(self, profile) -> str:
-        return os.path.join(self.core.project_dir, self.user_data_root, profile.name)
 
-if __name__ == "__main__":
+def main():
     app = App()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
