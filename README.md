@@ -183,7 +183,11 @@ We welcome contributions! Here's how to get started:
 
 ```bash
 # Fork and clone the repository
+<<<<<<< HEAD
 git clone https://github.com/YOUR_USERNAME/thePrivator.git
+=======
+git clone https://github.com/yanx9/thePrivator.git
+>>>>>>> 53e6d23d0919445d58d0b10860959a94d804cf40
 cd thePrivator
 
 # Install dependencies
