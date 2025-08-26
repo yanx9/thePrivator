@@ -49,6 +49,74 @@ class ProfileDialog(ctk.CTkToplevel):
         self.grab_set()
         self.focus()
 
+    def _bind_mousewheel_recursive(self, widget, canvas_widget):
+        """Recursively binds mouse wheel to widget and all its children."""
+        def _on_mousewheel(event):
+            # Calculate scroll amount
+            if event.delta:
+                # Windows
+                delta = -1 * (event.delta / 120)
+            else:
+                # Linux
+                if event.num == 4:
+                    delta = -1
+                elif event.num == 5:
+                    delta = 1
+                else:
+                    delta = 0
+            
+            # Scroll the target canvas
+            try:
+                if hasattr(canvas_widget, '_parent_canvas'):
+                    canvas_widget._parent_canvas.yview_scroll(int(delta), "units")
+                elif hasattr(canvas_widget, 'canvas'):
+                    canvas_widget.canvas.yview_scroll(int(delta), "units")
+            except Exception as e:
+                self.logger.debug(f"Scroll error: {e}")
+        
+        # Bind to current widget
+        widget.bind("<MouseWheel>", _on_mousewheel, "+")
+        widget.bind("<Button-4>", _on_mousewheel, "+")
+        widget.bind("<Button-5>", _on_mousewheel, "+")
+        
+        # Recursively bind to all children
+        try:
+            for child in widget.winfo_children():
+                self._bind_mousewheel_recursive(child, canvas_widget)
+        except:
+            pass
+
+    def _setup_scrolling_for_frame(self, scrollable_frame):
+        """Sets up comprehensive scrolling for a scrollable frame."""
+        # Initial binding to the scrollable frame itself
+        self._bind_mousewheel_recursive(scrollable_frame, scrollable_frame)
+        
+        # Also bind to the internal canvas directly
+        def delayed_bind():
+            try:
+                canvas = None
+                if hasattr(scrollable_frame, '_parent_canvas'):
+                    canvas = scrollable_frame._parent_canvas
+                elif hasattr(scrollable_frame, 'canvas'):
+                    canvas = scrollable_frame.canvas
+                    
+                if canvas:
+                    def canvas_scroll(event):
+                        if event.delta:
+                            delta = -1 * (event.delta / 120)
+                        else:
+                            delta = -1 if event.num == 4 else 1 if event.num == 5 else 0
+                        canvas.yview_scroll(int(delta), "units")
+                    
+                    canvas.bind("<MouseWheel>", canvas_scroll, "+")
+                    canvas.bind("<Button-4>", canvas_scroll, "+")
+                    canvas.bind("<Button-5>", canvas_scroll, "+")
+            except Exception as e:
+                self.logger.debug(f"Canvas binding error: {e}")
+        
+        # Delay to ensure canvas is created
+        scrollable_frame.after(100, delayed_bind)
+
     def _setup_dialog(self) -> None:
         """Configures dialog."""
         title = "Edit Profile" if self.profile else "New Profile"
@@ -203,6 +271,7 @@ class ProfileDialog(ctk.CTkToplevel):
             width=120
         )
         save_btn.pack(side="right", padx=10)
+        self._setup_scrolling_for_frame(scroll_frame)
 
     def _populate_fields(self) -> None:
         """Populates form fields."""
