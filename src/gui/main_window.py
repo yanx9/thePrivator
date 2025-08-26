@@ -40,7 +40,7 @@ class MainWindow(ctk.CTk):
         # Lightweight data structures only
         self.profile_widgets = {}  # profile_id -> widget references
         self.last_known_states = {}  # Last known running states
-        self.refresh_interval = 2000  # 2 seconds in milliseconds
+        self.refresh_interval = 1000  # 2 seconds in milliseconds
         
         self._setup_window()
         self._create_widgets()
@@ -260,16 +260,19 @@ class MainWindow(ctk.CTk):
             label.grid(row=0, column=col, padx=5, pady=8, sticky="ew")
             
     def _load_profiles(self) -> None:
-        """Loads profiles without heavy operations."""
+        """Loads profiles with alphabetical sorting."""
         try:
             start_time = time.time()
             
-            # Clear existing list
+            # Clear existing list only if needed
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
             self.profile_widgets.clear()
             
             profiles = self.profile_manager.get_all_profiles()
+            
+            # Sort profiles alphabetically by name (case-insensitive)
+            profiles.sort(key=lambda p: p.name.lower())
             
             # Get current running profiles
             running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
@@ -348,65 +351,70 @@ class MainWindow(ctk.CTk):
         }
         
     def _refresh_status(self) -> None:
-        """Auto-refresh that properly handles profile changes."""
+        """Lightweight status refresh that updates in-place."""
         try:
             self.logger.debug("Running status refresh cycle")
             
-            # Get current profile list
-            current_profiles = self.profile_manager.get_all_profiles()
-            current_profile_ids = {p.id for p in current_profiles}
-            widget_profile_ids = set(self.profile_widgets.keys())
-            
-            # Check if profiles were added or removed
-            profiles_changed = current_profile_ids != widget_profile_ids
-            
-            if profiles_changed:
-                # Full reload if profile list changed
-                self._load_profiles()
-                return
-            
-            # Clean up orphaned processes
+            # Clean up orphaned processes first
             self.chromium_launcher.cleanup_orphaned_processes()
             
             # Get current running profiles
             current_running = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
             
-            # Update status for existing profiles
-            changes = 0
-            for profile_id, widgets in self.profile_widgets.items():
-                if not widgets:
-                    continue
+            # Check if profile list structure changed (added/removed profiles)
+            current_profiles = self.profile_manager.get_all_profiles()
+            current_profile_ids = {p.id for p in current_profiles}
+            widget_profile_ids = set(self.profile_widgets.keys())
+            
+            if current_profile_ids != widget_profile_ids:
+                # Only reload if profiles were added/removed
+                self.logger.info("Profile list changed, reloading")
+                self._load_profiles()
+            else:
+                # Just update statuses in-place
+                changes = 0
+                for profile_id, widgets in self.profile_widgets.items():
+                    if not widgets:
+                        continue
+                        
+                    is_running_now = profile_id in current_running
+                    was_running = self.last_known_states.get(profile_id, False)
                     
-                is_running_now = profile_id in current_running
-                was_running = self.last_known_states.get(profile_id, False)
+                    if is_running_now != was_running:
+                        changes += 1
+                        self.last_known_states[profile_id] = is_running_now
+                        profile = widgets['profile']
+                        
+                        # Update only the changed elements
+                        try:
+                            if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
+                                widgets['name_btn'].configure(
+                                    text=f"{'🟢' if is_running_now else '⚫'} {profile.name}"
+                                )
+                            if 'status_label' in widgets and widgets['status_label'].winfo_exists():
+                                widgets['status_label'].configure(
+                                    text="🟢 Running" if is_running_now else "⚫ Stopped"
+                                )
+                        except Exception as e:
+                            self.logger.debug(f"Widget update error (likely destroyed): {e}")
+                        
+                        self.logger.debug(f"Profile '{profile.name}' status changed")
                 
-                if is_running_now != was_running:
-                    changes += 1
-                    self.last_known_states[profile_id] = is_running_now
-                    profile = widgets['profile']
-                    
-                    # Update UI elements
-                    if 'name_btn' in widgets:
-                        widgets['name_btn'].configure(text=f"{'🟢' if is_running_now else '⚫'} {profile.name}")
-                    if 'status_label' in widgets:
-                        widgets['status_label'].configure(text="🟢 Running" if is_running_now else "⚫ Stopped")
-                    
-                    self.logger.debug(f"Profile '{profile.name}' status changed")
+                if changes > 0:
+                    self._update_stats()
+                    self.logger.info(f"Status refresh: {changes} profile(s) changed")
             
-            if changes > 0:
-                self._update_stats()
-                self.logger.info(f"Status refresh: {changes} profile(s) changed")
-            
-            # Update selected profile buttons
-            if self.selected_profile_id and self.selected_profile_id in self.profile_widgets:
+            # Update selected profile buttons if needed
+            if self.selected_profile_id and self.selected_profile_id in current_running:
                 is_selected_running = self.selected_profile_id in current_running
-                self.launch_profile_btn.configure(state="disabled" if is_selected_running else "normal")
-                self.stop_profile_btn.configure(state="normal" if is_selected_running else "disabled")
-                
+                if self.launch_profile_btn.cget("state") != ("disabled" if is_selected_running else "normal"):
+                    self.launch_profile_btn.configure(state="disabled" if is_selected_running else "normal")
+                    self.stop_profile_btn.configure(state="normal" if is_selected_running else "disabled")
+                    
         except Exception as e:
             self.logger.error(f"Error in refresh cycle: {e}")
             
-        # Schedule next refresh
+        # Schedule next refresh (faster interval for better detection)
         self.after(self.refresh_interval, self._refresh_status)
             
     def _update_stats(self) -> None:

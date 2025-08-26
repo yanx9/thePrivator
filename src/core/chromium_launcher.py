@@ -240,13 +240,19 @@ class ChromiumLauncher:
             return None
             
     def cleanup_orphaned_processes(self) -> int:
-        """Cleans up orphaned processes."""
+        """Cleans up orphaned processes more efficiently."""
         cleaned = 0
-        for profile_id in list(self.running_processes.keys()):
-            if not self._is_process_running(self.running_processes[profile_id].pid):
-                del self.running_processes[profile_id]
+        to_remove = []
+        
+        for profile_id, process_info in self.running_processes.items():
+            if not self._is_process_running(process_info.pid):
+                to_remove.append(profile_id)
                 cleaned += 1
-                
+        
+        # Remove outside of iteration to avoid dict size change during iteration
+        for profile_id in to_remove:
+            del self.running_processes[profile_id]
+        
         if cleaned > 0:
             self.logger.info(f"Cleaned up {cleaned} orphaned processes")
             
@@ -365,24 +371,34 @@ class ChromiumLauncher:
         return args
         
     def _is_process_running(self, pid: int) -> bool:
-        """Checks if process is running."""
+        """Checks if process is running more efficiently."""
         try:
             if HAS_PSUTIL:
-                return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+                # Quick check if process exists
+                if not psutil.pid_exists(pid):
+                    return False
+                try:
+                    proc = psutil.Process(pid)
+                    # Check if it's actually running (not zombie)
+                    return proc.status() != psutil.STATUS_ZOMBIE
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    return False
             else:
                 # Fallback without psutil
                 if platform.system() == "Windows":
                     result = subprocess.run(
                         ["tasklist", "/FI", f"PID eq {pid}"],
                         capture_output=True,
-                        text=True
+                        text=True,
+                        timeout=1  # Add timeout to prevent hanging
                     )
                     return str(pid) in result.stdout
                 else:
-                    result = subprocess.run(
-                        ["kill", "-0", str(pid)],
-                        capture_output=True
-                    )
-                    return result.returncode == 0
-        except:
+                    try:
+                        os.kill(pid, 0)  # More efficient than subprocess
+                        return True
+                    except OSError:
+                        return False
+        except Exception as e:
+            self.logger.debug(f"Error checking process {pid}: {e}")
             return False

@@ -120,8 +120,9 @@ class ProfileManager:
         return None
         
     def get_all_profiles(self) -> List[ChromiumProfile]:
-        """Gets all profiles."""
-        return sorted(self._profiles.values(), key=lambda p: p.created_at, reverse=True)
+        """Gets all profiles sorted alphabetically by name."""
+        return sorted(self._profiles.values(), 
+                    key=lambda p: p.name.lower())  # Sort by name alphabetically
         
     def update_profile(self, profile_id: str, **kwargs) -> None:
         """Updates profile."""
