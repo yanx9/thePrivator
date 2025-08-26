@@ -337,15 +337,15 @@ class MainWindow(ctk.CTk):
         )
         name_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
         
-        # Add underline effect on hover
-        def on_enter(e):
-            name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=True))
+        # # Add underline effect on hover
+        # def on_enter(e):
+        #     name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=True))
             
-        def on_leave(e):
-            name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=False))
+        # def on_leave(e):
+        #     name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=False))
         
-        name_btn.bind("<Enter>", on_enter)
-        name_btn.bind("<Leave>", on_leave)
+        # name_btn.bind("<Enter>", on_enter)
+        # name_btn.bind("<Leave>", on_leave)
         
         # Tooltip: use a provider that reads the latest notes on demand
         def notes_provider(pid=profile.id, name=profile.name, pm=self.profile_manager):
