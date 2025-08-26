@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### UI optimization and sorting
 
 ### ✨ Added
+- **Note bubbles**: access your notes seamlessly by hovering over the profile name
 - **Sorting alphabetically**: the list is now being sorted alphabetically
 
 ### 🔄 Changed
