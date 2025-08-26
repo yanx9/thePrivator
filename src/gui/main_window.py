@@ -22,6 +22,7 @@ from core.config_manager import ConfigManager
 from utils.logger import get_logger
 from gui.profile_dialog import ProfileDialog
 from gui.legacy_import_dialog import LegacyImportDialog
+from gui.widgets.tooltip import ToolTip
 
 
 class MainWindow(ctk.CTk):
@@ -40,7 +41,8 @@ class MainWindow(ctk.CTk):
         # Lightweight data structures only
         self.profile_widgets = {}  # profile_id -> widget references
         self.last_known_states = {}  # Last known running states
-        self.refresh_interval = 1000  # 2 seconds in milliseconds
+        self.tooltips = {}  # Store tooltip references
+        self.refresh_interval = 1000  
         
         self._setup_window()
         self._create_widgets()
@@ -264,6 +266,12 @@ class MainWindow(ctk.CTk):
         try:
             start_time = time.time()
             
+            # Clean up existing tooltips
+            if hasattr(self, 'tooltips'):
+                for tooltip in self.tooltips.values():
+                    tooltip.hide()
+                self.tooltips.clear()
+            
             # Clear existing list only if needed
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
@@ -298,7 +306,7 @@ class MainWindow(ctk.CTk):
             self.status_label.configure(text="Error", text_color="red")
             
     def _create_profile_row(self, row: int, profile: ChromiumProfile, is_running: bool) -> None:
-        """Creates profile row without heavy operations."""
+        """Creates profile row with hover effects and tooltips."""
         fg_color = ("gray75", "gray25") if row % 2 == 0 else ("gray85", "gray15")
         
         frame = ctk.CTkFrame(self.profiles_scrollable, fg_color=fg_color)
@@ -310,18 +318,57 @@ class MainWindow(ctk.CTk):
         frame.grid_columnconfigure(2, weight=2)  # Proxy  
         frame.grid_columnconfigure(3, weight=1)  # Status
         
-        # Name
+        # Name button with enhanced styling
         def select_callback(pid=profile.id):
             return lambda: self._select_profile(pid)
         
+        # Create styled name button
         name_btn = ctk.CTkButton(
             frame,
             text=f"{'🟢' if is_running else '⚫'} {profile.name}",
             command=select_callback(),
             height=35,
-            anchor="w"
+            anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),  # Bold font
+            fg_color="transparent",  # Transparent background
+            hover_color=("gray65", "gray35"),  # Darker on hover
+            text_color=("gray10", "gray90"),  # Better contrast
+            border_width=0
         )
         name_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        
+        # Add underline effect on hover
+        def on_enter(e):
+            name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=True))
+            
+        def on_leave(e):
+            name_btn.configure(font=ctk.CTkFont(size=12, weight="bold", underline=False))
+        
+        name_btn.bind("<Enter>", on_enter)
+        name_btn.bind("<Leave>", on_leave)
+        
+        # Add tooltip if profile has notes
+        if hasattr(profile, 'notes') and profile.notes and profile.notes.strip():
+            # Format notes for tooltip
+            notes_text = profile.notes.strip()
+            if len(notes_text) > 300:  # Truncate very long notes
+                notes_text = notes_text[:297] + "..."
+            
+            # Add header to tooltip
+            tooltip_text = f"📝 Notes for {profile.name}:\n\n{notes_text}"
+            
+            # Create tooltip
+            tooltip = ToolTip(
+                name_btn, 
+                text=tooltip_text,
+                delay=400,  # Show after 400ms hover
+                wraplength=350  # Wider wrap for notes
+            )
+            
+            # Store tooltip reference for potential updates
+            if 'tooltips' not in self.__dict__:
+                self.tooltips = {}
+            self.tooltips[profile.id] = tooltip
         
         # User-Agent
         ua_text = profile.user_agent[:45] + "..." if len(profile.user_agent) > 45 else profile.user_agent
@@ -388,8 +435,11 @@ class MainWindow(ctk.CTk):
                         # Update only the changed elements
                         try:
                             if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
+                                # Keep the bold font and underline state
+                                is_underlined = hasattr(widgets['name_btn'], '_underlined') and widgets['name_btn']._underlined
                                 widgets['name_btn'].configure(
-                                    text=f"{'🟢' if is_running_now else '⚫'} {profile.name}"
+                                    text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
+                                    font=ctk.CTkFont(size=12, weight="bold", underline=is_underlined)
                                 )
                             if 'status_label' in widgets and widgets['status_label'].winfo_exists():
                                 widgets['status_label'].configure(
@@ -405,16 +455,19 @@ class MainWindow(ctk.CTk):
                     self.logger.info(f"Status refresh: {changes} profile(s) changed")
             
             # Update selected profile buttons if needed
-            if self.selected_profile_id and self.selected_profile_id in current_running:
+            if self.selected_profile_id:
                 is_selected_running = self.selected_profile_id in current_running
-                if self.launch_profile_btn.cget("state") != ("disabled" if is_selected_running else "normal"):
-                    self.launch_profile_btn.configure(state="disabled" if is_selected_running else "normal")
+                current_launch_state = self.launch_profile_btn.cget("state")
+                expected_launch_state = "disabled" if is_selected_running else "normal"
+                
+                if current_launch_state != expected_launch_state:
+                    self.launch_profile_btn.configure(state=expected_launch_state)
                     self.stop_profile_btn.configure(state="normal" if is_selected_running else "disabled")
                     
         except Exception as e:
             self.logger.error(f"Error in refresh cycle: {e}")
             
-        # Schedule next refresh (faster interval for better detection)
+        # Schedule next refresh
         self.after(self.refresh_interval, self._refresh_status)
             
     def _update_stats(self) -> None:
