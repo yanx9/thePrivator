@@ -261,50 +261,31 @@ class MainWindow(ctk.CTk):
             label.grid(row=0, column=col, padx=5, pady=8, sticky="ew")
             
     def _load_profiles(self) -> None:
-        """Loads profiles with alphabetical sorting."""
+        """Loads profiles without heavy operations."""
         try:
             start_time = time.time()
             
-            # Clean up existing tooltips
-            if hasattr(self, 'tooltips'):
-                for tooltip in self.tooltips.values():
-                    tooltip.hide()
-                self.tooltips.clear()
-            
-            # Clear existing list only if needed
+            # Clear existing list
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
             self.profile_widgets.clear()
             
             profiles = self.profile_manager.get_all_profiles()
             
-            # Sort profiles alphabetically by name (case-insensitive)
-            profiles.sort(key=lambda p: p.name.lower())
-            
             # Get current running profiles
             running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
             
-            # Filter by search
-            search_term = self.search_entry.get().lower() if hasattr(self, 'search_entry') else ""
-            if search_term:
-                profiles = [p for p in profiles if search_term in p.name.lower()]
-            
-            # Create rows
+            # Create rows for ALL profiles (don't filter here)
             for i, profile in enumerate(profiles, 1):
                 is_running = profile.id in running_profiles
                 self._create_profile_row(i, profile, is_running)
                 self.last_known_states[profile.id] = is_running
             
+            # Apply current search filter if any
+            if hasattr(self, 'search_entry'):
+                self._filter_profiles()
+            
             self._update_stats()
-
-            # Re-apply selection border if the selected row was rebuilt
-            if self.selected_profile_id and self.selected_profile_id in self.profile_widgets:
-                try:
-                    self.profile_widgets[self.selected_profile_id]['name_btn'].configure(
-                        border_width=1, border_color="white"
-                    )
-                except Exception:
-                    pass
             
             load_time = time.time() - start_time
             self.logger.debug(f"Loaded {len(profiles)} profiles in {load_time:.2f}s")
