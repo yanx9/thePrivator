@@ -715,13 +715,43 @@ class MainWindow(ctk.CTk):
                         msgbox.showerror("Export Error", f"Cannot export: {e}")
                         
     def _on_search(self, event=None) -> None:
-        """Handles search with debouncing."""
-        # Cancel any pending reload
+        """Handles search with efficient filtering."""
+        # Cancel any pending search
         if hasattr(self, '_search_timer'):
             self.after_cancel(self._search_timer)
         
-        # Schedule reload after 300ms of no typing
-        self._search_timer = self.after(300, self._load_profiles)
+        # Schedule search after 100ms of no typing (reduced from 300ms)
+        self._search_timer = self.after(100, self._filter_profiles)
+            
+    def _filter_profiles(self) -> None:
+        """Efficiently filters profiles without recreating widgets."""
+        try:
+            search_term = self.search_entry.get().lower().strip()
+            visible_count = 0
+            
+            # Show/hide existing widgets based on search
+            for profile_id, widgets in self.profile_widgets.items():
+                if not widgets or 'frame' not in widgets:
+                    continue
+                    
+                profile = widgets['profile']
+                frame = widgets['frame']
+                
+                # Check if profile matches search
+                if not search_term or search_term in profile.name.lower():
+                    frame.grid()  # Show widget
+                    visible_count += 1
+                else:
+                    frame.grid_remove()  # Hide widget (keeps in memory)
+            
+            # Update scrollable frame label
+            if search_term:
+                self.profiles_scrollable.configure(label_text=f"Profiles ({visible_count} shown)")
+            else:
+                self.profiles_scrollable.configure(label_text="Chromium Profiles")
+                
+        except Exception as e:
+            self.logger.error(f"Error filtering profiles: {e}")
         
     def _on_profile_launched(self, profile: ChromiumProfile) -> None:
         """Callback after profile launch."""
