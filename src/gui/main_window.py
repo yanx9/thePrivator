@@ -195,7 +195,51 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=12)
         )
         self.status_label.grid(row=11, column=0, padx=20, pady=(10, 20))
+    
+    def _bind_mousewheel(self, widget):
+        """Binds mouse wheel events for cross-platform scrolling."""
+        def _on_mousewheel(event):
+            # Calculate scroll amount
+            if event.delta:
+                # Windows
+                delta = -1 * (event.delta / 120)
+            else:
+                # Linux
+                if event.num == 4:
+                    delta = -1
+                elif event.num == 5:
+                    delta = 1
+                else:
+                    delta = 0
+            
+            # Scroll the canvas
+            try:
+                widget._parent_canvas.yview_scroll(int(delta), "units")
+            except:
+                # Fallback for different CustomTkinter versions
+                try:
+                    widget.canvas.yview_scroll(int(delta), "units")
+                except:
+                    pass
         
+        # Bind events for both Windows and Linux
+        widget.bind("<MouseWheel>", _on_mousewheel)  # Windows
+        widget.bind("<Button-4>", _on_mousewheel)    # Linux scroll up
+        widget.bind("<Button-5>", _on_mousewheel)    # Linux scroll down
+        
+        # Also bind to the internal canvas if accessible
+        try:
+            if hasattr(widget, '_parent_canvas'):
+                widget._parent_canvas.bind("<MouseWheel>", _on_mousewheel)
+                widget._parent_canvas.bind("<Button-4>", _on_mousewheel)
+                widget._parent_canvas.bind("<Button-5>", _on_mousewheel)
+            elif hasattr(widget, 'canvas'):
+                widget.canvas.bind("<MouseWheel>", _on_mousewheel)
+                widget.canvas.bind("<Button-4>", _on_mousewheel)
+                widget.canvas.bind("<Button-5>", _on_mousewheel)
+        except:
+            pass
+
     def _create_main_panel(self) -> None:
         """Creates main panel."""
         self.main_frame = ctk.CTkFrame(self)
@@ -230,6 +274,9 @@ class MainWindow(ctk.CTk):
         )
         self.profiles_scrollable.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
         self.profiles_scrollable.grid_columnconfigure(0, weight=1)
+        
+        # Bind mouse wheel for Linux compatibility
+        self._bind_mousewheel(self.profiles_scrollable)
         
         # Table header - without size column
         self._create_table_header()
