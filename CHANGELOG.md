@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### UI optimization and sorting
 
 ### ✨ Added
-- **Note bubbles**: access your notes seamlessly by hovering over the profile name
-- **Sorting alphabetically**: the list is now being sorted alphabetically
+- **Note bubbles**: Access your notes seamlessly by hovering over the profile name
+- **Sorting alphabetically**: The list is now being sorted alphabetically
+- **Random User-Agent**: Downloads and sets the latest user agents on-demand
 
 ### 🔄 Changed
-- **User Interface**: the main UI was optimized
+- **User Interface**: The main UI was optimized
 
 ### 🐛 Fixed
-- **Status detection**: improved detection of current profile status
+- **Status detection**: Improved detection of current profile status
 
 ## [2.0.1]
 
@@ -25,12 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This update added support for importing profiles from the legacy version (1.0), and added several fixes and optimizations.
 
 ### ✨ Added
-- **Legacy import**: easily import your old profiles using the wizard
-- **Performance fixes**: numerous fixes for fast startup and quick actions
+- **Legacy import**: Easily import your old profiles using the wizard
+- **Performance fixes**: Numerous fixes for fast startup and quick actions
 
 ### 🗑️ Removed
 
-- **Profile statistics**: temporarily removed due to poor performance
+- **Profile statistics**: Temporarily removed due to poor performance
 
 ## [2.0.0]
 
