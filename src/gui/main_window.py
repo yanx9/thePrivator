@@ -181,7 +181,6 @@ class MainWindow(ctk.CTk):
             self.sidebar,
             text="📤 Export",
             command=self._export_profile,
-            state="disabled",
             height=35,
             fg_color="gray",
             hover_color="darkgray"
@@ -635,7 +634,6 @@ class MainWindow(ctk.CTk):
                         self.selected_profile_id = None
                         self.edit_profile_btn.configure(state="disabled")
                         self.delete_profile_btn.configure(state="disabled")
-                        self.export_btn.configure(state="disabled")
                         self.launch_profile_btn.configure(state="disabled")
                         self.stop_profile_btn.configure(state="disabled")
 
@@ -716,25 +714,6 @@ class MainWindow(ctk.CTk):
         
         threading.Thread(target=stop_thread, daemon=True).start()
                     
-    def _import_profile(self) -> None:
-        """Imports profile from file."""
-        import tkinter.filedialog as filedialog
-        
-        file_path = filedialog.askopenfilename(
-            title="Select profile file",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if file_path:
-            try:
-                profile = self.profile_manager.import_profile(Path(file_path))
-                self._load_profiles()
-                self.status_label.configure(text=f"Imported: {profile.name}")
-                self.logger.info(f"Imported profile: {profile.name}")
-            except Exception as e:
-                import tkinter.messagebox as msgbox
-                msgbox.showerror("Import Error", f"Cannot import: {e}")
-                
     def _import_legacy_profiles(self) -> None:
         """Opens legacy profile import dialog."""
         try:
@@ -749,27 +728,82 @@ class MainWindow(ctk.CTk):
             msgbox.showerror("Error", f"Cannot open import: {e}")
             
     def _export_profile(self) -> None:
-        """Exports selected profile."""
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
-            profile = self.profile_manager.get_profile(self.selected_profile_id)
-            if profile:
-                import tkinter.filedialog as filedialog
-                
-                file_path = filedialog.asksaveasfilename(
-                    title="Save profile as",
-                    defaultextension=".json",
-                    filetypes=[("JSON files", "*.json")],
-                    initialvalue=f"{profile.name}.json"
+        """Opens export dialog for profile selection."""
+        try:
+            # Import the dialog here to avoid circular imports
+            from gui.export_dialog import ExportDialog
+            
+            dialog = ExportDialog(self, self.profile_manager)
+            self.wait_window(dialog)
+            
+            if dialog.result:
+                self.status_label.configure(
+                    text=f"Exported {dialog.result} profile(s)", 
+                    text_color="green"
                 )
                 
-                if file_path:
-                    try:
-                        self.profile_manager.export_profile(profile.id, Path(file_path))
-                        self.status_label.configure(text="Exported")
-                        self.logger.info(f"Exported profile: {profile.name}")
-                    except Exception as e:
-                        import tkinter.messagebox as msgbox
-                        msgbox.showerror("Export Error", f"Cannot export: {e}")
+        except Exception as e:
+            self.logger.error(f"Error opening export dialog: {e}")
+            import tkinter.messagebox as msgbox
+            msgbox.showerror("Error", f"Cannot open export dialog: {e}")
+
+    def _import_profile(self) -> None:
+        """Imports profiles from file or archive."""
+        import tkinter.filedialog as filedialog
+        import tkinter.messagebox as msgbox
+        
+        file_path = filedialog.askopenfilename(
+            title="Select profile file or archive",
+            filetypes=[
+                ("Privator Archive", "*.privator"),
+                ("JSON files", "*.json"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            try:
+                file_path = Path(file_path)
+                
+                # Show progress
+                self.status_label.configure(text="Importing...", text_color="yellow")
+                self.update_idletasks()
+                
+                if file_path.suffix.lower() == '.privator':
+                    # New compressed format - bulk import
+                    profiles = self.profile_manager.import_profiles_bulk(file_path)
+                    
+                    # Force full reload of profile list
+                    self._load_profiles()
+                    self._update_stats()
+                    
+                    msgbox.showinfo(
+                        "Import Successful",
+                        f"Successfully imported {len(profiles)} profile(s)"
+                    )
+                    
+                    self.status_label.configure(
+                        text=f"Imported {len(profiles)} profile(s)", 
+                        text_color="green"
+                    )
+                    
+                else:
+                    # Old single profile JSON format (backward compatibility)
+                    profile = self.profile_manager.import_profile(file_path)
+                    
+                    # Force reload
+                    self._load_profiles()
+                    self._update_stats()
+                    
+                    self.status_label.configure(
+                        text=f"Imported: {profile.name}", 
+                        text_color="green"
+                    )
+                    
+            except Exception as e:
+                msgbox.showerror("Import Error", f"Cannot import profiles:\n{e}")
+                self.status_label.configure(text="Import failed", text_color="red")
+                self.logger.error(f"Import error: {e}")
                         
     def _on_search(self, event=None) -> None:
         """Handles search with efficient filtering."""
