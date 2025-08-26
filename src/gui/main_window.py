@@ -303,7 +303,7 @@ class MainWindow(ctk.CTk):
             
         except Exception as e:
             self.logger.error(f"Error loading profiles: {e}")
-            self.status_label.configure(text="Error", text_color="red")
+            self.status_label.configure(text="Error", text_color="white")
             
     def _create_profile_row(self, row: int, profile: ChromiumProfile, is_running: bool) -> None:
         """Creates profile row with hover effects and tooltips."""
@@ -500,7 +500,7 @@ class MainWindow(ctk.CTk):
                 self.launch_profile_btn.configure(state="normal")
                 self.stop_profile_btn.configure(state="disabled")
             
-            self.status_label.configure(text=f"Selected: {profile.name}", text_color="blue")
+            self.status_label.configure(text=f"Selected: {profile.name}", text_color="white")
             
     def _create_new_profile(self) -> None:
         """Creates new profile."""
@@ -508,7 +508,7 @@ class MainWindow(ctk.CTk):
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
             if dialog.result:
                 # Don't reload everything - let refresh pick it up
-                self.status_label.configure(text="Created profile", text_color="green")
+                self.status_label.configure(text="Created profile", text_color="white")
                 # Force immediate refresh
                 self.after(100, self._refresh_status)
         except Exception as e:
@@ -525,7 +525,7 @@ class MainWindow(ctk.CTk):
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
                     if dialog.result:
                         self._load_profiles()
-                        self.status_label.configure(text="Updated profile", text_color="green")
+                        self.status_label.configure(text="Updated profile", text_color="white")
                 except Exception as e:
                     self.logger.error(f"Error editing profile: {e}")
                     import tkinter.messagebox as msgbox
@@ -566,7 +566,7 @@ class MainWindow(ctk.CTk):
                         self.launch_profile_btn.configure(state="disabled")
                         self.stop_profile_btn.configure(state="disabled")
 
-                        self.status_label.configure(text="Deleted profile", text_color="orange")
+                        self.status_label.configure(text="Deleted profile", text_color="white")
                         self._update_stats()
                         self.logger.info(f"Deleted profile: {profile.name}")
                     except Exception as e:
@@ -592,7 +592,7 @@ class MainWindow(ctk.CTk):
                         self.after(100, lambda: self._on_launch_error(str(e)))
                         
                 threading.Thread(target=launch, daemon=True).start()
-                self.status_label.configure(text="Launching...", text_color="yellow")
+                self.status_label.configure(text="Launching...", text_color="white")
                 self.logger.info(f"Launching profile: {profile.name}")
                 
     def _stop_profile(self) -> None:
@@ -606,7 +606,7 @@ class MainWindow(ctk.CTk):
         
         # Disable button immediately to prevent double-clicks
         self.stop_profile_btn.configure(state="disabled")
-        self.status_label.configure(text="Stopping...", text_color="yellow")
+        self.status_label.configure(text="Stopping...", text_color="white")
         
         def stop_thread():
             try:
@@ -626,12 +626,12 @@ class MainWindow(ctk.CTk):
                                 widgets['status_label'].configure(text="⚫ Stopped")
                         
                         self.launch_profile_btn.configure(state="normal")
-                        self.status_label.configure(text="Stopped profile", text_color="orange")
+                        self.status_label.configure(text="Stopped profile", text_color="white")
                         self._update_stats()
                         self.logger.info(f"Stopped profile: {profile.name}")
                     else:
                         self.stop_profile_btn.configure(state="normal")
-                        self.status_label.configure(text="Failed to stop", text_color="red")
+                        self.status_label.configure(text="Failed to stop", text_color="white")
                         import tkinter.messagebox as msgbox
                         msgbox.showerror("Error", "Cannot stop profile")
                 
@@ -639,7 +639,7 @@ class MainWindow(ctk.CTk):
                 
             except Exception as e:
                 self.logger.error(f"Error stopping profile: {e}")
-                self.after(0, lambda: self.status_label.configure(text="Error", text_color="red"))
+                self.after(0, lambda: self.status_label.configure(text="Error", text_color="white"))
         
         threading.Thread(target=stop_thread, daemon=True).start()
                     
@@ -656,7 +656,7 @@ class MainWindow(ctk.CTk):
             try:
                 profile = self.profile_manager.import_profile(Path(file_path))
                 self._load_profiles()
-                self.status_label.configure(text=f"Imported: {profile.name}", text_color="green")
+                self.status_label.configure(text=f"Imported: {profile.name}", text_color="white")
                 self.logger.info(f"Imported profile: {profile.name}")
             except Exception as e:
                 import tkinter.messagebox as msgbox
@@ -692,7 +692,7 @@ class MainWindow(ctk.CTk):
                 if file_path:
                     try:
                         self.profile_manager.export_profile(profile.id, Path(file_path))
-                        self.status_label.configure(text="Exported", text_color="green")
+                        self.status_label.configure(text="Exported", text_color="white")
                         self.logger.info(f"Exported profile: {profile.name}")
                     except Exception as e:
                         import tkinter.messagebox as msgbox
@@ -725,13 +725,13 @@ class MainWindow(ctk.CTk):
             self.stop_profile_btn.configure(state="normal")
         
         self._update_stats()
-        self.status_label.configure(text=f"Launched: {profile.name}", text_color="green")
+        self.status_label.configure(text=f"Launched: {profile.name}", text_color="white")
         
     def _on_launch_error(self, error: str) -> None:
         """Callback on launch error."""
         import tkinter.messagebox as msgbox
         msgbox.showerror("Launch Error", error)
-        self.status_label.configure(text="Launch error", text_color="red")
+        self.status_label.configure(text="Launch error", text_color="white")
         self.logger.error(f"Launch error: {error}")
             
 
