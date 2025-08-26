@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🔄 Changed
 - **User Interface**: The main UI was optimized
+- **Search Mechanic**: Filtering profile is faster than ever before, so is the initial list load
 
 ### 🐛 Fixed
 - **Status detection**: Improved detection of current profile status
