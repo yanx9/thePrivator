@@ -347,28 +347,27 @@ class MainWindow(ctk.CTk):
         name_btn.bind("<Enter>", on_enter)
         name_btn.bind("<Leave>", on_leave)
         
-        # Add tooltip if profile has notes
-        if hasattr(profile, 'notes') and profile.notes and profile.notes.strip():
-            # Format notes for tooltip
-            notes_text = profile.notes.strip()
-            if len(notes_text) > 300:  # Truncate very long notes
-                notes_text = notes_text[:297] + "..."
-            
-            # Add header to tooltip
-            tooltip_text = f"📝 Notes for {profile.name}:\n\n{notes_text}"
-            
-            # Create tooltip
-            tooltip = ToolTip(
-                name_btn, 
-                text=tooltip_text,
-                delay=400,  # Show after 400ms hover
-                wraplength=350  # Wider wrap for notes
-            )
-            
-            # Store tooltip reference for potential updates
-            if 'tooltips' not in self.__dict__:
-                self.tooltips = {}
-            self.tooltips[profile.id] = tooltip
+        # Tooltip: use a provider that reads the latest notes on demand
+        def notes_provider(pid=profile.id, name=profile.name, pm=self.profile_manager):
+            p = pm.get_profile(pid)
+            notes = (getattr(p, 'notes', '') or '').strip()
+            if not notes:
+                return ""
+            if len(notes) > 300:
+                notes = notes[:297] + "..."
+            return f"📝 Notes for {name}:\n\n{notes}"
+
+        tooltip = ToolTip(
+            name_btn,
+            text=notes_provider,   # callable evaluated right before showing
+            delay=400,
+            wraplength=350
+        )
+
+        # Store tooltip reference for potential updates (optional)
+        if 'tooltips' not in self.__dict__:
+            self.tooltips = {}
+        self.tooltips[profile.id] = tooltip
         
         # User-Agent
         ua_text = profile.user_agent[:45] + "..." if len(profile.user_agent) > 45 else profile.user_agent
@@ -435,7 +434,7 @@ class MainWindow(ctk.CTk):
                         # Update only the changed elements
                         try:
                             if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                # Keep the bold font and underline state
+                                # Keep the bold font and underline state if you track it elsewhere
                                 is_underlined = hasattr(widgets['name_btn'], '_underlined') and widgets['name_btn']._underlined
                                 widgets['name_btn'].configure(
                                     text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
