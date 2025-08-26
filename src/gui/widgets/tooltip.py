@@ -65,7 +65,7 @@ class ToolTip:
             corner_radius=6,
             text_color=("gray10", "gray90"),
             font=ctk.CTkFont(size=11),
-            bg_color=("transparent","transparent")
+            bg_color="transparent"
         )
         label.pack(ipadx=8, ipady=6)
         
