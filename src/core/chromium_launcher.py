@@ -1,4 +1,4 @@
-"""Chromium launcher with better error handling and optimization."""
+"""Chromium launcher with fixed profile isolation."""
 
 import subprocess
 import shutil
@@ -25,8 +25,6 @@ except ImportError:
 
 from utils.logger import get_logger
 from utils.exceptions import LaunchError
-
-# Import after adding src to path
 from core.profile_manager import ChromiumProfile
 
 
@@ -292,20 +290,40 @@ class ChromiumLauncher:
         
     def _build_chromium_args(self, profile: ChromiumProfile, additional_args: List[str],
                            headless: bool = False, incognito: bool = False) -> List[str]:
-        """Builds Chromium arguments."""
+        """Builds Chromium arguments with proper profile isolation."""
         args = [self._chromium_path]
         
-        # User data directory
+        # CRITICAL FIX: Ensure user data directory is absolute and properly formatted
         if profile.user_data_dir and not incognito:
-            args.extend(['--user-data-dir', profile.user_data_dir])
+            # Convert to absolute path
+            user_data_path = Path(profile.user_data_dir).absolute()
+            
+            # Ensure directory exists
+            user_data_path.mkdir(parents=True, exist_ok=True)
+            
+            # Use the absolute path string
+            user_data_str = str(user_data_path)
+            
+            # On Windows, ensure proper formatting
+            if platform.system() == "Windows":
+                user_data_str = user_data_str.replace('/', '\\')
+            
+            args.append(f'--user-data-dir={user_data_str}')
+            
+            # Also set profile directory name (usually Default)
+            args.append('--profile-directory=Default')
+            
+            self.logger.info(f"Using user data directory: {user_data_str}")
+        else:
+            self.logger.warning(f"No user data directory for profile: {profile.name}")
             
         # User-Agent
         if profile.user_agent:
-            args.extend(['--user-agent', profile.user_agent])
+            args.append(f'--user-agent={profile.user_agent}')
             
         # Proxy
         if profile.proxy:
-            args.extend(['--proxy-server', profile.proxy])
+            args.append(f'--proxy-server={profile.proxy}')
             
         # Incognito mode
         if incognito:
@@ -325,15 +343,11 @@ class ChromiumLauncher:
             '--disable-background-networking',
             '--disable-sync',
             '--disable-translate',
+            '--disable-features=TranslateUI',
             '--disable-ipc-flooding-protection',
             '--memory-pressure-off',
             '--max_old_space_size=4096',
-            '--no-default-browser-check',
-            '--disable-web-security',
-            '--disable-features=TranslateUI',
-            '--disable-extensions-http-throttling',
-            '--aggressive-cache-discard',
-            '--disable-background-downloads'
+            '--no-default-browser-check'
         ]
         
         args.extend(security_args)

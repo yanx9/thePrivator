@@ -4,8 +4,21 @@ All notable changes to thePrivator will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [2.0.1]
 
-## [2.0.0] - 2024-01-XX
+### Fixes, legacy, fixes...
+
+This update added support for importing profiles from the legacy version (1.0), and added several fixes and optimizations.
+
+### ✨ Added
+- **Legacy import** - easily import your old profiles using the wizard
+- **Performance fixes** - numerous fixes for fast startup and quick actions
+
+### 🗑️ Removed
+
+- **Profile statistics** - temporarily removed due to poor performance
+
+## [2.0.0]
 
 ### 🚀 Major Release - Complete Rewrite
 
@@ -90,7 +103,7 @@ Automatic migration from v1.x:
 
 ---
 
-## [1.2.1] - 2023-08-15
+## [1.2.1]
 
 ### 🐛 Fixed
 - Profile deletion confirmation dialog
@@ -103,7 +116,7 @@ Automatic migration from v1.x:
 
 ---
 
-## [1.2.0] - 2023-07-10
+## [1.2.0]
 
 ### ✨ Added
 - Dark/light theme toggle
