@@ -32,6 +32,10 @@ A modern, robust application for managing multiple Chromium profiles with enhanc
 - Input validation and sanitization
 - No data collection or telemetry
 
+## Screenshots
+
+![alt text](img/main.png)
+
 ## 🚀 Quick Start
 
 ### Requirements
