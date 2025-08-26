@@ -348,9 +348,22 @@ class MainWindow(ctk.CTk):
         }
         
     def _refresh_status(self) -> None:
-        """Lightweight status refresh."""
+        """Auto-refresh that properly handles profile changes."""
         try:
             self.logger.debug("Running status refresh cycle")
+            
+            # Get current profile list
+            current_profiles = self.profile_manager.get_all_profiles()
+            current_profile_ids = {p.id for p in current_profiles}
+            widget_profile_ids = set(self.profile_widgets.keys())
+            
+            # Check if profiles were added or removed
+            profiles_changed = current_profile_ids != widget_profile_ids
+            
+            if profiles_changed:
+                # Full reload if profile list changed
+                self._load_profiles()
+                return
             
             # Clean up orphaned processes
             self.chromium_launcher.cleanup_orphaned_processes()
@@ -358,10 +371,8 @@ class MainWindow(ctk.CTk):
             # Get current running profiles
             current_running = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
             
-            # Count changes
+            # Update status for existing profiles
             changes = 0
-            
-            # Update only profiles that changed status
             for profile_id, widgets in self.profile_widgets.items():
                 if not widgets:
                     continue
@@ -369,46 +380,28 @@ class MainWindow(ctk.CTk):
                 is_running_now = profile_id in current_running
                 was_running = self.last_known_states.get(profile_id, False)
                 
-                # Only update if status changed
                 if is_running_now != was_running:
                     changes += 1
                     self.last_known_states[profile_id] = is_running_now
                     profile = widgets['profile']
                     
-                    # Update name button
+                    # Update UI elements
                     if 'name_btn' in widgets:
-                        new_text = f"{'🟢' if is_running_now else '⚫'} {profile.name}"
-                        try:
-                            widgets['name_btn'].configure(text=new_text)
-                        except:
-                            pass
-                    
-                    # Update status label
+                        widgets['name_btn'].configure(text=f"{'🟢' if is_running_now else '⚫'} {profile.name}")
                     if 'status_label' in widgets:
-                        status_text = "🟢 Running" if is_running_now else "⚫ Stopped"
-                        try:
-                            widgets['status_label'].configure(text=status_text)
-                        except:
-                            pass
+                        widgets['status_label'].configure(text="🟢 Running" if is_running_now else "⚫ Stopped")
                     
-                    self.logger.debug(f"Profile '{profile.name}' status changed: {'Running' if is_running_now else 'Stopped'}")
+                    self.logger.debug(f"Profile '{profile.name}' status changed")
             
-            # Update stats if there were changes
             if changes > 0:
                 self._update_stats()
-                self.logger.info(f"Status refresh: {changes} profile(s) changed state")
+                self.logger.info(f"Status refresh: {changes} profile(s) changed")
             
-            # Update button states for selected profile
-            if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
+            # Update selected profile buttons
+            if self.selected_profile_id and self.selected_profile_id in self.profile_widgets:
                 is_selected_running = self.selected_profile_id in current_running
-                if is_selected_running:
-                    if self.launch_profile_btn.cget("state") != "disabled":
-                        self.launch_profile_btn.configure(state="disabled")
-                        self.stop_profile_btn.configure(state="normal")
-                else:
-                    if self.stop_profile_btn.cget("state") != "disabled":
-                        self.launch_profile_btn.configure(state="normal")
-                        self.stop_profile_btn.configure(state="disabled")
+                self.launch_profile_btn.configure(state="disabled" if is_selected_running else "normal")
+                self.stop_profile_btn.configure(state="normal" if is_selected_running else "disabled")
                 
         except Exception as e:
             self.logger.error(f"Error in refresh cycle: {e}")
@@ -454,8 +447,10 @@ class MainWindow(ctk.CTk):
         try:
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
             if dialog.result:
-                self._load_profiles()
+                # Don't reload everything - let refresh pick it up
                 self.status_label.configure(text="Created profile", text_color="green")
+                # Force immediate refresh
+                self.after(100, self._refresh_status)
         except Exception as e:
             self.logger.error(f"Error creating profile: {e}")
             import tkinter.messagebox as msgbox
@@ -493,9 +488,26 @@ class MainWindow(ctk.CTk):
                         if profile.id in self.last_known_states:
                             del self.last_known_states[profile.id]
                             
+                        # After successful deletion
                         self.profile_manager.delete_profile(self.selected_profile_id)
-                        self._load_profiles()
+
+                        # Remove widget immediately
+                        if self.selected_profile_id in self.profile_widgets:
+                            widgets = self.profile_widgets[self.selected_profile_id]
+                            if 'frame' in widgets:
+                                widgets['frame'].destroy()
+                            del self.profile_widgets[self.selected_profile_id]
+
+                        # Clear selection
+                        self.selected_profile_id = None
+                        self.edit_profile_btn.configure(state="disabled")
+                        self.delete_profile_btn.configure(state="disabled")
+                        self.export_btn.configure(state="disabled")
+                        self.launch_profile_btn.configure(state="disabled")
+                        self.stop_profile_btn.configure(state="disabled")
+
                         self.status_label.configure(text="Deleted profile", text_color="orange")
+                        self._update_stats()
                         self.logger.info(f"Deleted profile: {profile.name}")
                     except Exception as e:
                         msgbox.showerror("Error", f"Cannot delete: {e}")
@@ -524,30 +536,52 @@ class MainWindow(ctk.CTk):
                 self.logger.info(f"Launching profile: {profile.name}")
                 
     def _stop_profile(self) -> None:
-        """Stops selected profile."""
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
-            profile = self.profile_manager.get_profile(self.selected_profile_id)
-            if profile:
-                if self.chromium_launcher.terminate_profile(self.selected_profile_id):
-                    self.profile_manager.set_active_status(profile.id, False)
-                    # Update state immediately
-                    self.last_known_states[profile.id] = False
-                    # Force immediate UI update
-                    if profile.id in self.profile_widgets:
-                        widgets = self.profile_widgets[profile.id]
-                        if 'name_btn' in widgets:
-                            widgets['name_btn'].configure(text=f"⚫ {profile.name}")
-                        if 'status_label' in widgets:
-                            widgets['status_label'].configure(text="⚫ Stopped")
-                    
-                    self.launch_profile_btn.configure(state="normal")
-                    self.stop_profile_btn.configure(state="disabled")
-                    self.status_label.configure(text="Stopped profile", text_color="orange")
-                    self._update_stats()
-                    self.logger.info(f"Stopped profile: {profile.name}")
-                else:
-                    import tkinter.messagebox as msgbox
-                    msgbox.showerror("Error", "Cannot stop profile")
+        """Stops selected profile in background thread."""
+        if not (hasattr(self, 'selected_profile_id') and self.selected_profile_id):
+            return
+            
+        profile = self.profile_manager.get_profile(self.selected_profile_id)
+        if not profile:
+            return
+        
+        # Disable button immediately to prevent double-clicks
+        self.stop_profile_btn.configure(state="disabled")
+        self.status_label.configure(text="Stopping...", text_color="yellow")
+        
+        def stop_thread():
+            try:
+                success = self.chromium_launcher.terminate_profile(profile.id)
+                
+                def update_ui():
+                    if success:
+                        self.profile_manager.set_active_status(profile.id, False)
+                        self.last_known_states[profile.id] = False
+                        
+                        # Update UI
+                        if profile.id in self.profile_widgets:
+                            widgets = self.profile_widgets[profile.id]
+                            if 'name_btn' in widgets:
+                                widgets['name_btn'].configure(text=f"⚫ {profile.name}")
+                            if 'status_label' in widgets:
+                                widgets['status_label'].configure(text="⚫ Stopped")
+                        
+                        self.launch_profile_btn.configure(state="normal")
+                        self.status_label.configure(text="Stopped profile", text_color="orange")
+                        self._update_stats()
+                        self.logger.info(f"Stopped profile: {profile.name}")
+                    else:
+                        self.stop_profile_btn.configure(state="normal")
+                        self.status_label.configure(text="Failed to stop", text_color="red")
+                        import tkinter.messagebox as msgbox
+                        msgbox.showerror("Error", "Cannot stop profile")
+                
+                self.after(0, update_ui)
+                
+            except Exception as e:
+                self.logger.error(f"Error stopping profile: {e}")
+                self.after(0, lambda: self.status_label.configure(text="Error", text_color="red"))
+        
+        threading.Thread(target=stop_thread, daemon=True).start()
                     
     def _import_profile(self) -> None:
         """Imports profile from file."""
