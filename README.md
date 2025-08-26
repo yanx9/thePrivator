@@ -1,4 +1,4 @@
-# 🌐 thePrivator 2.0
+# 🌐 thePrivator 2.0.1
 
 **Chromium multi-instance manager with enhanced features and modern architecture**
 
@@ -183,11 +183,7 @@ We welcome contributions! Here's how to get started:
 
 ```bash
 # Fork and clone the repository
-<<<<<<< HEAD
-git clone https://github.com/YOUR_USERNAME/thePrivator.git
-=======
 git clone https://github.com/yanx9/thePrivator.git
->>>>>>> 53e6d23d0919445d58d0b10860959a94d804cf40
 cd thePrivator
 
 # Install dependencies
@@ -216,25 +212,6 @@ python src/main.py --debug
 | Profile Creation | 850ms | 340ms | **↓ 60%** |
 | UI Responsiveness | Good | Excellent | **↑ 80%** |
 
-## 🔮 Roadmap
-
-### v2.1 (Coming Soon)
-- [ ] Settings dialog
-- [ ] Profile templates
-- [ ] Batch operations
-- [ ] Advanced fingerprinting
-
-### v2.2 (Future)
-- [ ] Plugin system
-- [ ] Cloud sync for profiles
-- [ ] Performance dashboard
-- [ ] Multi-language support
-
-### v3.0 (Future)
-- [ ] Web interface
-- [ ] Enterprise features
-- [ ] AI-powered profile optimization
-- [ ] Advanced automation
 
 ## 📄 License
 

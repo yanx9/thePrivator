@@ -71,7 +71,7 @@ class ConfigManager:
         """Saves configuration."""
         try:
             config_data = {
-                'version': '2.0',
+                'version': '2.0.1',
                 'config': self._config.to_dict()
             }
             
