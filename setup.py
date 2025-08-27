@@ -34,7 +34,7 @@ dev_requires = read_requirements("requirements-dev.txt")
 
 setup(
     name="theprivator",
-    version=about.get("__version__", "2.0.0"),
+    version=about.get("__version__", "2.1.0"),
     description="Chromium multi-instance manager with configurable fingerprints",
     long_description=long_description,
     long_description_content_type="text/markdown",

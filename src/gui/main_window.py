@@ -23,6 +23,7 @@ from utils.logger import get_logger
 from gui.profile_dialog import ProfileDialog
 from gui.legacy_import_dialog import LegacyImportDialog
 from gui.widgets.tooltip import ToolTip
+from utils.profile_io import ProfileIOManager
 
 
 class MainWindow(ctk.CTk):
@@ -33,10 +34,11 @@ class MainWindow(ctk.CTk):
         
         self.logger = get_logger(__name__)
         self.config_manager = ConfigManager(config_dir)
-        self.profile_manager = ProfileManager(config_dir)
-        self.chromium_launcher = ChromiumLauncher()
+        self.profile_manager = ProfileManager(config_dir, self.config_manager)
+        self.chromium_launcher = ChromiumLauncher(self.config_manager)
+        self.profile_io = ProfileIOManager(self.profile_manager, self.chromium_launcher)
         
-        self.selected_profile_id: Optional[str] = None
+        self.selected_profile_ids: set = set()  # Changed to support multiple selections
         
         # Lightweight data structures only
         self.profile_widgets = {}  # profile_id -> widget references
@@ -187,13 +189,24 @@ class MainWindow(ctk.CTk):
         )
         self.export_btn.grid(row=10, column=0, padx=20, pady=2, sticky="ew")
         
+        # Configuration button
+        self.config_btn = ctk.CTkButton(
+            self.sidebar,
+            text="⚙️ Configuration",
+            command=self._open_configuration,
+            height=35,
+            fg_color="gray",
+            hover_color="darkgray"
+        )
+        self.config_btn.grid(row=11, column=0, padx=20, pady=2, sticky="ew")
+        
         # Status
         self.status_label = ctk.CTkLabel(
             self.sidebar,
             text="Ready",
             font=ctk.CTkFont(size=12)
         )
-        self.status_label.grid(row=11, column=0, padx=20, pady=(10, 20))
+        self.status_label.grid(row=12, column=0, padx=20, pady=(10, 20))
         
     def _create_main_panel(self) -> None:
         """Creates main panel."""
@@ -288,6 +301,7 @@ class MainWindow(ctk.CTk):
                 self._filter_profiles()
             
             self._update_stats()
+            self._update_action_buttons()  # Update button states after loading
             
             load_time = time.time() - start_time
             self.logger.debug(f"Loaded {len(profiles)} profiles in {load_time:.2f}s")
@@ -382,6 +396,13 @@ class MainWindow(ctk.CTk):
             'status_label': status_label,
             'profile': profile
         }
+        
+        # Apply selection styling if this profile is selected
+        if profile.id in self.selected_profile_ids:
+            try:
+                name_btn.configure(border_width=1, border_color="white")
+            except Exception:
+                pass
 
     def _bind_mousewheel_recursive(self, widget, canvas_widget):
         """Recursively binds mouse wheel to widget and all its children."""
@@ -489,11 +510,9 @@ class MainWindow(ctk.CTk):
                         # Update only the changed elements
                         try:
                             if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                # Keep the bold font and underline state if you track it elsewhere
-                                is_underlined = hasattr(widgets['name_btn'], '_underlined') and widgets['name_btn']._underlined
                                 widgets['name_btn'].configure(
                                     text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
-                                    font=ctk.CTkFont(size=12, weight="bold", underline=is_underlined)
+                                    font=ctk.CTkFont(size=12, weight="bold")
                                 )
                             if 'status_label' in widgets and widgets['status_label'].winfo_exists():
                                 widgets['status_label'].configure(
@@ -509,14 +528,8 @@ class MainWindow(ctk.CTk):
                     self.logger.info(f"Status refresh: {changes} profile(s) changed")
             
             # Update selected profile buttons if needed
-            if self.selected_profile_id:
-                is_selected_running = self.selected_profile_id in current_running
-                current_launch_state = self.launch_profile_btn.cget("state")
-                expected_launch_state = "disabled" if is_selected_running else "normal"
-                
-                if current_launch_state != expected_launch_state:
-                    self.launch_profile_btn.configure(state=expected_launch_state)
-                    self.stop_profile_btn.configure(state="normal" if is_selected_running else "disabled")
+            if self.selected_profile_ids:
+                self._update_action_buttons()
                     
         except Exception as e:
             self.logger.error(f"Error in refresh cycle: {e}")
@@ -537,20 +550,19 @@ class MainWindow(ctk.CTk):
             self.logger.warning(f"Error updating stats: {e}")
             
     def _select_profile(self, profile_id: str) -> None:
-        """Selects profile and visually marks the selected row."""
-        # Remove border from previously selected (if any)
-        prev_id = getattr(self, 'selected_profile_id', None)
-        if prev_id and prev_id in self.profile_widgets:
+        """Selects/deselects profile and visually marks the selected rows."""
+        # Toggle selection
+        if profile_id in self.selected_profile_ids:
+            # Deselect profile
+            self.selected_profile_ids.remove(profile_id)
             try:
-                self.profile_widgets[prev_id]['name_btn'].configure(border_width=0)
+                if profile_id in self.profile_widgets:
+                    self.profile_widgets[profile_id]['name_btn'].configure(border_width=0)
             except Exception:
                 pass
-
-        self.selected_profile_id = profile_id
-        profile = self.profile_manager.get_profile(profile_id)
-        
-        if profile:
-            # Apply thin white border to the newly selected name_btn
+        else:
+            # Select profile
+            self.selected_profile_ids.add(profile_id)
             try:
                 if profile_id in self.profile_widgets:
                     self.profile_widgets[profile_id]['name_btn'].configure(
@@ -558,21 +570,79 @@ class MainWindow(ctk.CTk):
                     )
             except Exception:
                 pass
-
+        
+        # Update button states based on selection
+        self._update_action_buttons()
+    
+    def _update_action_buttons(self) -> None:
+        """Updates action button states based on current selections."""
+        if not self.selected_profile_ids:
+            # No selection - disable all buttons
+            self.edit_profile_btn.configure(state="disabled")
+            self.delete_profile_btn.configure(state="disabled")
+            self.launch_profile_btn.configure(state="disabled")
+            self.stop_profile_btn.configure(state="disabled")
+            self.export_btn.configure(state="disabled")
+            self.status_label.configure(text="Ready")
+            return
+        
+        # Enable buttons based on selection count and states
+        selected_count = len(self.selected_profile_ids)
+        
+        # Edit button only works with single selection
+        if selected_count == 1:
             self.edit_profile_btn.configure(state="normal")
-            self.delete_profile_btn.configure(state="normal")
-            self.export_btn.configure(state="normal")
+        else:
+            self.edit_profile_btn.configure(state="disabled")
+        
+        # Delete and export always work with any number of selections
+        self.delete_profile_btn.configure(state="normal")
+        self.export_btn.configure(state="normal")
+        
+        # Check running states for launch/stop buttons
+        running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
+        selected_running = [pid for pid in self.selected_profile_ids if pid in running_profiles]
+        selected_stopped = [pid for pid in self.selected_profile_ids if pid not in running_profiles]
+        
+        # Launch button enabled if any selected profiles are stopped
+        self.launch_profile_btn.configure(state="normal" if selected_stopped else "disabled")
+        
+        # Stop button enabled if any selected profiles are running  
+        self.stop_profile_btn.configure(state="normal" if selected_running else "disabled")
+        
+        # Update status text
+        if selected_count == 1:
+            profile = self.profile_manager.get_profile(next(iter(self.selected_profile_ids)))
+            if profile:
+                self.status_label.configure(text=f"Selected: {profile.name}")
+        else:
+            self.status_label.configure(text=f"Selected: {selected_count} profiles")
+    
+    def _refresh_row_colors(self) -> None:
+        """Refreshes alternating row colors after profile deletion or filtering."""
+        try:
+            # Get all frames that are currently gridded (visible in layout)
+            visible_frames = []
             
-            is_running = self.chromium_launcher.is_profile_running(profile_id)
+            # Iterate through all children of the scrollable frame (skip header at row 0)
+            for child in self.profiles_scrollable.winfo_children()[1:]:
+                # Check if the frame is actually gridded (not removed via grid_remove())
+                grid_info = child.grid_info()
+                if grid_info:  # Non-empty dict means it's gridded
+                    visible_frames.append(child)
             
-            if is_running:
-                self.launch_profile_btn.configure(state="disabled")
-                self.stop_profile_btn.configure(state="normal")
-            else:
-                self.launch_profile_btn.configure(state="normal")
-                self.stop_profile_btn.configure(state="disabled")
+            # Sort frames by their grid row to maintain proper order
+            visible_frames.sort(key=lambda frame: frame.grid_info().get('row', 0))
             
-            self.status_label.configure(text=f"Selected: {profile.name}")
+            # Re-apply alternating colors based on position in visible list
+            for i, frame in enumerate(visible_frames):
+                # Row index starts at 1 (after header), so we use i+1 for proper alternation
+                row_index = i + 1
+                fg_color = ("gray75", "gray25") if row_index % 2 == 0 else ("gray85", "gray15")
+                frame.configure(fg_color=fg_color)
+                
+        except Exception as e:
+            self.logger.debug(f"Error refreshing row colors: {e}")
             
     def _create_new_profile(self) -> None:
         """Creates new profile."""
@@ -589,9 +659,10 @@ class MainWindow(ctk.CTk):
             msgbox.showerror("Error", f"Cannot create profile: {e}")
             
     def _edit_profile(self) -> None:
-        """Edits selected profile."""
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
-            profile = self.profile_manager.get_profile(self.selected_profile_id)
+        """Edits selected profile (only works with single selection)."""
+        if len(self.selected_profile_ids) == 1:
+            profile_id = next(iter(self.selected_profile_ids))
+            profile = self.profile_manager.get_profile(profile_id)
             if profile:
                 try:
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
@@ -604,75 +675,121 @@ class MainWindow(ctk.CTk):
                     msgbox.showerror("Error", f"Cannot edit profile: {e}")
                     
     def _delete_profile(self) -> None:
-        """Deletes selected profile."""
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
-            profile = self.profile_manager.get_profile(self.selected_profile_id)
-            if profile:
-                if self.chromium_launcher.is_profile_running(profile.id):
-                    import tkinter.messagebox as msgbox
-                    msgbox.showwarning("Profile Running", f"Stop '{profile.name}' before deletion.")
-                    return
-                
-                import tkinter.messagebox as msgbox
-                if msgbox.askyesno("Confirmation", f"Delete profile '{profile.name}'?\n\nThis will permanently remove all profile data."):
-                    try:
-                        # Remove from known states
-                        if profile.id in self.last_known_states:
-                            del self.last_known_states[profile.id]
-                            
-                        # After successful deletion
-                        self.profile_manager.delete_profile(self.selected_profile_id)
-
-                        # Remove widget immediately
-                        if self.selected_profile_id in self.profile_widgets:
-                            widgets = self.profile_widgets[self.selected_profile_id]
-                            if 'frame' in widgets:
-                                widgets['frame'].destroy()
-                            del self.profile_widgets[self.selected_profile_id]
-
-                        # Clear selection
-                        self.selected_profile_id = None
-                        self.edit_profile_btn.configure(state="disabled")
-                        self.delete_profile_btn.configure(state="disabled")
-                        self.launch_profile_btn.configure(state="disabled")
-                        self.stop_profile_btn.configure(state="disabled")
-
-                        self.status_label.configure(text="Deleted profile")
-                        self._update_stats()
-                        self.logger.info(f"Deleted profile: {profile.name}")
-                    except Exception as e:
-                        msgbox.showerror("Error", f"Cannot delete: {e}")
-                        
-    def _launch_profile(self) -> None:
-        """Launches selected profile."""
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id:
-            profile = self.profile_manager.get_profile(self.selected_profile_id)
-            if profile:
-                if not self.chromium_launcher._chromium_path:
-                    import tkinter.messagebox as msgbox
-                    msgbox.showerror("Chromium Not Found", "Please install Chrome/Chromium")
-                    return
-                
-                def launch():
-                    try:
-                        self.chromium_launcher.launch_profile(profile)
-                        self.profile_manager.mark_as_used(profile.id)
-                        self.profile_manager.set_active_status(profile.id, True)
-                        self.after(100, lambda: self._on_profile_launched(profile))
-                    except Exception as e:
-                        self.after(100, lambda: self._on_launch_error(str(e)))
-                        
-                threading.Thread(target=launch, daemon=True).start()
-                self.status_label.configure(text="Launching...")
-                self.logger.info(f"Launching profile: {profile.name}")
-                
-    def _stop_profile(self) -> None:
-        """Stops selected profile in background thread."""
-        if not (hasattr(self, 'selected_profile_id') and self.selected_profile_id):
+        """Deletes selected profiles."""
+        if not self.selected_profile_ids:
             return
             
-        profile = self.profile_manager.get_profile(self.selected_profile_id)
-        if not profile:
+        profiles_to_delete = []
+        running_profiles = []
+        
+        for profile_id in self.selected_profile_ids:
+            profile = self.profile_manager.get_profile(profile_id)
+            if profile:
+                if self.chromium_launcher.is_profile_running(profile.id):
+                    running_profiles.append(profile.name)
+                else:
+                    profiles_to_delete.append(profile)
+        
+        if running_profiles:
+            import tkinter.messagebox as msgbox
+            msgbox.showwarning("Profiles Running", f"Stop the following profiles before deletion:\n{', '.join(running_profiles)}")
+            return
+        
+        if not profiles_to_delete:
+            return
+            
+        import tkinter.messagebox as msgbox
+        profile_names = [p.name for p in profiles_to_delete]
+        if msgbox.askyesno("Confirmation", f"Delete {len(profiles_to_delete)} profile(s)?\n\n{', '.join(profile_names)}\n\nThis will permanently remove all profile data."):
+            try:
+                deleted_count = 0
+                for profile in profiles_to_delete:
+                    # Remove from known states
+                    if profile.id in self.last_known_states:
+                        del self.last_known_states[profile.id]
+                        
+                    # Delete profile
+                    self.profile_manager.delete_profile(profile.id)
+
+                    # Remove widget immediately
+                    if profile.id in self.profile_widgets:
+                        widgets = self.profile_widgets[profile.id]
+                        if 'frame' in widgets:
+                            widgets['frame'].destroy()
+                        del self.profile_widgets[profile.id]
+                    
+                    deleted_count += 1
+                    self.logger.info(f"Deleted profile: {profile.name}")
+
+                # Clear selections for deleted profiles
+                deleted_ids = {p.id for p in profiles_to_delete}
+                self.selected_profile_ids -= deleted_ids
+                self._update_action_buttons()
+                
+                # Fix alternating row colors after deletion
+                self._refresh_row_colors()
+                
+                self.status_label.configure(text=f"Deleted {deleted_count} profile(s)")
+                self._update_stats()
+            except Exception as e:
+                msgbox.showerror("Error", f"Cannot delete: {e}")
+                        
+    def _launch_profile(self) -> None:
+        """Launches selected profiles."""
+        if not self.selected_profile_ids:
+            return
+            
+        profiles_to_launch = []
+        for profile_id in self.selected_profile_ids:
+            profile = self.profile_manager.get_profile(profile_id)
+            if profile and not self.chromium_launcher.is_profile_running(profile.id):
+                profiles_to_launch.append(profile)
+        
+        if not profiles_to_launch:
+            return
+            
+        if not self.chromium_launcher._chromium_path:
+            import tkinter.messagebox as msgbox
+            msgbox.showerror("Chromium Not Found", "Please install Chrome/Chromium")
+            return
+        
+        def launch_multiple():
+            launched_count = 0
+            errors = []
+            
+            for profile in profiles_to_launch:
+                try:
+                    self.chromium_launcher.launch_profile(profile)
+                    self.profile_manager.mark_as_used(profile.id)
+                    self.profile_manager.set_active_status(profile.id, True)
+                    launched_count += 1
+                    self.after(100, lambda p=profile: self._on_profile_launched(p))
+                except Exception as e:
+                    errors.append(f"{profile.name}: {str(e)}")
+            
+            if errors:
+                error_msg = "\n".join(errors)
+                self.after(100, lambda: self._on_launch_error(f"Failed to launch some profiles:\n{error_msg}"))
+            else:
+                self.after(100, lambda: self.status_label.configure(text=f"Launched {launched_count} profile(s)"))
+                        
+        threading.Thread(target=launch_multiple, daemon=True).start()
+        self.status_label.configure(text="Launching...")
+        profile_names = [p.name for p in profiles_to_launch]
+        self.logger.info(f"Launching profiles: {', '.join(profile_names)}")
+                
+    def _stop_profile(self) -> None:
+        """Stops selected profiles in background thread."""
+        if not self.selected_profile_ids:
+            return
+            
+        profiles_to_stop = []
+        for profile_id in self.selected_profile_ids:
+            profile = self.profile_manager.get_profile(profile_id)
+            if profile and self.chromium_launcher.is_profile_running(profile.id):
+                profiles_to_stop.append(profile)
+        
+        if not profiles_to_stop:
             return
         
         # Disable button immediately to prevent double-clicks
@@ -680,10 +797,12 @@ class MainWindow(ctk.CTk):
         self.status_label.configure(text="Stopping...")
         
         def stop_thread():
-            try:
-                success = self.chromium_launcher.terminate_profile(profile.id)
-                
-                def update_ui():
+            stopped_count = 0
+            errors = []
+            
+            for profile in profiles_to_stop:
+                try:
+                    success = self.chromium_launcher.terminate_profile(profile.id)
                     if success:
                         self.profile_manager.set_active_status(profile.id, False)
                         self.last_known_states[profile.id] = False
@@ -696,21 +815,27 @@ class MainWindow(ctk.CTk):
                             if 'status_label' in widgets:
                                 widgets['status_label'].configure(text="⚫ Stopped")
                         
-                        self.launch_profile_btn.configure(state="normal")
-                        self.status_label.configure(text="Stopped profile")
-                        self._update_stats()
+                        stopped_count += 1
                         self.logger.info(f"Stopped profile: {profile.name}")
                     else:
-                        self.stop_profile_btn.configure(state="normal")
-                        self.status_label.configure(text="Failed to stop")
-                        import tkinter.messagebox as msgbox
-                        msgbox.showerror("Error", "Cannot stop profile")
+                        errors.append(profile.name)
+                except Exception as e:
+                    errors.append(f"{profile.name}: {str(e)}")
+                    self.logger.error(f"Error stopping profile {profile.name}: {e}")
+            
+            def update_ui():
+                if errors:
+                    error_msg = "\n".join(errors)
+                    self.status_label.configure(text="Some profiles failed to stop")
+                    import tkinter.messagebox as msgbox
+                    msgbox.showerror("Error", f"Cannot stop some profiles:\n{error_msg}")
+                else:
+                    self.status_label.configure(text=f"Stopped {stopped_count} profile(s)")
                 
-                self.after(0, update_ui)
-                
-            except Exception as e:
-                self.logger.error(f"Error stopping profile: {e}")
-                self.after(0, lambda: self.status_label.configure(text="Error"))
+                self._update_stats()
+                self._update_action_buttons()
+            
+            self.after(0, update_ui)
         
         threading.Thread(target=stop_thread, daemon=True).start()
                     
@@ -728,82 +853,55 @@ class MainWindow(ctk.CTk):
             msgbox.showerror("Error", f"Cannot open import: {e}")
             
     def _export_profile(self) -> None:
-        """Opens export dialog for profile selection."""
+        """Exports selected profiles using ProfileIOManager."""
+        if not self.selected_profile_ids:
+            import tkinter.messagebox as msgbox
+            msgbox.showwarning("No Selection", "Please select at least one profile to export")
+            return
+            
         try:
-            # Import the dialog here to avoid circular imports
-            from gui.export_dialog import ExportDialog
+            result = self.profile_io.export_selected_profiles(
+                list(self.selected_profile_ids), 
+                parent_window=self
+            )
             
-            dialog = ExportDialog(self, self.profile_manager)
-            self.wait_window(dialog)
-            
-            if dialog.result:
+            if result:
                 self.status_label.configure(
-                    text=f"Exported {dialog.result} profile(s)", 
+                    text=f"Exported {result['profile_count']} profile(s)", 
                     text_color="green"
                 )
                 
         except Exception as e:
-            self.logger.error(f"Error opening export dialog: {e}")
+            self.logger.error(f"Error exporting profiles: {e}")
             import tkinter.messagebox as msgbox
-            msgbox.showerror("Error", f"Cannot open export dialog: {e}")
+            msgbox.showerror("Error", f"Cannot export profiles: {e}")
 
     def _import_profile(self) -> None:
-        """Imports profiles from file or archive."""
-        import tkinter.filedialog as filedialog
-        import tkinter.messagebox as msgbox
-        
-        file_path = filedialog.askopenfilename(
-            title="Select profile file or archive",
-            filetypes=[
-                ("Privator Archive", "*.privator"),
-                ("JSON files", "*.json"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        if file_path:
-            try:
-                file_path = Path(file_path)
+        """Imports profiles using ProfileIOManager."""
+        try:
+            # Show progress
+            self.status_label.configure(text="Importing...", text_color="yellow")
+            self.update_idletasks()
+            
+            result = self.profile_io.import_profiles(parent_window=self)
+            
+            if result:
+                # Force full reload of profile list
+                self._load_profiles()
+                self._update_stats()
                 
-                # Show progress
-                self.status_label.configure(text="Importing...", text_color="yellow")
-                self.update_idletasks()
-                
-                if file_path.suffix.lower() == '.privator':
-                    # New compressed format - bulk import
-                    profiles = self.profile_manager.import_profiles_bulk(file_path)
+                self.status_label.configure(
+                    text=f"Imported {result['profile_count']} profile(s)", 
+                    text_color="green"
+                )
+            else:
+                self.status_label.configure(text="Ready")
                     
-                    # Force full reload of profile list
-                    self._load_profiles()
-                    self._update_stats()
-                    
-                    msgbox.showinfo(
-                        "Import Successful",
-                        f"Successfully imported {len(profiles)} profile(s)"
-                    )
-                    
-                    self.status_label.configure(
-                        text=f"Imported {len(profiles)} profile(s)", 
-                        text_color="green"
-                    )
-                    
-                else:
-                    # Old single profile JSON format (backward compatibility)
-                    profile = self.profile_manager.import_profile(file_path)
-                    
-                    # Force reload
-                    self._load_profiles()
-                    self._update_stats()
-                    
-                    self.status_label.configure(
-                        text=f"Imported: {profile.name}", 
-                        text_color="green"
-                    )
-                    
-            except Exception as e:
-                msgbox.showerror("Import Error", f"Cannot import profiles:\n{e}")
-                self.status_label.configure(text="Import failed", text_color="red")
-                self.logger.error(f"Import error: {e}")
+        except Exception as e:
+            import tkinter.messagebox as msgbox
+            msgbox.showerror("Import Error", f"Cannot import profiles:\n{e}")
+            self.status_label.configure(text="Import failed", text_color="red")
+            self.logger.error(f"Import error: {e}")
                         
     def _on_search(self, event=None) -> None:
         """Handles search with efficient filtering."""
@@ -840,6 +938,9 @@ class MainWindow(ctk.CTk):
                 self.profiles_scrollable.configure(label_text=f"Profiles ({visible_count} shown)")
             else:
                 self.profiles_scrollable.configure(label_text="Chromium Profiles")
+            
+            # Refresh row colors after filtering to maintain alternating pattern
+            self._refresh_row_colors()
                 
         except Exception as e:
             self.logger.error(f"Error filtering profiles: {e}")
@@ -857,9 +958,8 @@ class MainWindow(ctk.CTk):
             if 'status_label' in widgets:
                 widgets['status_label'].configure(text="🟢 Running")
         
-        if hasattr(self, 'selected_profile_id') and self.selected_profile_id == profile.id:
-            self.launch_profile_btn.configure(state="disabled")
-            self.stop_profile_btn.configure(state="normal")
+        if profile.id in self.selected_profile_ids:
+            self._update_action_buttons()
         
         self._update_stats()
         self.status_label.configure(text=f"Launched: {profile.name}")
@@ -870,7 +970,30 @@ class MainWindow(ctk.CTk):
         msgbox.showerror("Launch Error", error)
         self.status_label.configure(text="Launch error")
         self.logger.error(f"Launch error: {error}")
+    
+    def _open_configuration(self) -> None:
+        """Opens the configuration dialog."""
+        try:
+            from gui.config_dialog import ConfigDialog
             
+            dialog = ConfigDialog(self, self.config_manager)
+            self.wait_window(dialog)
+            
+            # If settings were changed, we might need to refresh components
+            if dialog.get_result():
+                self.status_label.configure(
+                    text="Configuration updated",
+                    text_color="green"
+                )
+                self.logger.info("Configuration dialog completed with changes")
+                
+                # Refresh chromium path in launcher
+                self.chromium_launcher._chromium_path = self.chromium_launcher._find_chromium_executable()
+                
+        except Exception as e:
+            self.logger.error(f"Error opening configuration dialog: {e}")
+            import tkinter.messagebox as msgbox
+            msgbox.showerror("Error", f"Cannot open configuration dialog: {e}")
 
     def _on_closing(self) -> None:
         """Handles window closing."""

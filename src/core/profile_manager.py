@@ -60,9 +60,21 @@ class ChromiumProfile:
 class ProfileManager:
     """Manages Chromium profiles."""
     
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir: Optional[Path] = None, config_manager=None):
         self.logger = get_logger(__name__)
-        self.config_dir = config_dir or Path.home() / ".theprivator"
+        self.config_manager = config_manager
+        
+        # Use custom data directory if specified
+        if config_manager:
+            custom_dir = config_manager.get('custom_data_directory', '').strip()
+            if custom_dir:
+                self.config_dir = Path(custom_dir)
+                self.logger.info(f"Using custom data directory: {self.config_dir}")
+            else:
+                self.config_dir = config_dir or Path.home() / ".theprivator"
+        else:
+            self.config_dir = config_dir or Path.home() / ".theprivator"
+            
         self.config_dir.mkdir(exist_ok=True)
         self.profiles_file = self.config_dir / "profiles.json"
         self.profiles_dir = self.config_dir / "profiles"

@@ -101,7 +101,7 @@ Usage examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="thePrivator 2.0.0"
+        version="thePrivator 2.1.0"
     )
     
     parser.add_argument(

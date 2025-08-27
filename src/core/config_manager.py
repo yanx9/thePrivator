@@ -28,6 +28,8 @@ class AppConfig:
     # Chromium settings
     default_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     auto_cleanup: bool = True
+    custom_chromium_path: str = ""  # Custom chromium executable path
+    custom_data_directory: str = ""  # Custom data directory (overrides ~/.thePrivator)
     
     # Advanced settings
     max_concurrent_profiles: int = 10
