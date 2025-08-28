@@ -7,7 +7,7 @@ from pathlib import Path
 # Read version from __init__.py
 here = Path(__file__).parent
 about = {}
-with open(here / "src" / "__init__.py", encoding="utf-8") as f:
+with open(here / "theprivator" / "__init__.py", encoding="utf-8") as f:
     for line in f:
         if line.startswith("__version__"):
             exec(line, about)
@@ -52,7 +52,7 @@ setup(
     },
     
     # Package info
-    packages=find_packages(exclude=["tests", "*.tests", "*.tests.*", "tests.*"]),
+    packages=find_packages(),
     python_requires=">=3.8",
     
     # Dependencies
