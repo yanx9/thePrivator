@@ -634,25 +634,58 @@ class MainWindow(ctk.CTk):
     def _refresh_row_colors(self) -> None:
         """Refreshes alternating row colors after profile deletion or filtering."""
         try:
-            # Get all frames that are currently gridded (visible in layout)
+            import time
+            start_time = time.time()
+            print(f"[DEBUG] _refresh_row_colors: Starting (OPTIMIZED)")
+            
+            # OPTIMIZED: Use cached widget references instead of expensive winfo_children() calls
             visible_frames = []
             
-            # Iterate through all children of the scrollable frame (skip header at row 0)
-            for child in self.profiles_scrollable.winfo_children()[1:]:
-                # Check if the frame is actually gridded (not removed via grid_remove())
-                grid_info = child.grid_info()
-                if grid_info:  # Non-empty dict means it's gridded
-                    visible_frames.append(child)
+            print(f"[DEBUG] _refresh_row_colors: Using cached widgets: {time.time() - start_time:.3f}s")
             
-            # Sort frames by their grid row to maintain proper order
-            visible_frames.sort(key=lambda frame: frame.grid_info().get('row', 0))
+            # Get visible frames from our cached profile_widgets (much faster than GUI traversal)
+            for profile_id, widgets in self.profile_widgets.items():
+                if not widgets or 'frame' not in widgets:
+                    continue
+                    
+                frame = widgets['frame']
+                
+                # OPTIMIZED: Check if frame is visible using grid_info() only once
+                try:
+                    grid_info = frame.grid_info()
+                    if grid_info:  # Non-empty dict means it's gridded (visible)
+                        # Store both frame and its row for sorting
+                        visible_frames.append((frame, grid_info.get('row', 0)))
+                except Exception:
+                    # Frame might be destroyed, skip it
+                    continue
             
-            # Re-apply alternating colors based on position in visible list
-            for i, frame in enumerate(visible_frames):
+            print(f"[DEBUG] _refresh_row_colors: Found {len(visible_frames)} visible frames: {time.time() - start_time:.3f}s")
+            
+            # OPTIMIZED: Sort by row number (already extracted above)
+            visible_frames.sort(key=lambda item: item[1])
+            print(f"[DEBUG] _refresh_row_colors: Sorted frames: {time.time() - start_time:.3f}s")
+            
+            # OPTIMIZED: Apply colors without additional system calls
+            for i, (frame, _) in enumerate(visible_frames):
+                if i % 10 == 0 and i > 0:  # Log every 10th frame
+                    print(f"[DEBUG] _refresh_row_colors: Configured {i} frames: {time.time() - start_time:.3f}s")
+                    
                 # Row index starts at 1 (after header), so we use i+1 for proper alternation
                 row_index = i + 1
                 fg_color = ("gray75", "gray25") if row_index % 2 == 0 else ("gray85", "gray15")
-                frame.configure(fg_color=fg_color)
+                
+                # OPTIMIZED: Only configure if color actually needs to change
+                try:
+                    current_color = frame.cget('fg_color')
+                    if current_color != fg_color:
+                        frame.configure(fg_color=fg_color)
+                except Exception:
+                    # Frame might be destroyed, skip it
+                    continue
+            
+            total_time = time.time() - start_time
+            print(f"[DEBUG] _refresh_row_colors: Completed in {total_time:.3f}s")
                 
         except Exception as e:
             self.logger.debug(f"Error refreshing row colors: {e}")
@@ -928,9 +961,14 @@ class MainWindow(ctk.CTk):
     def _filter_profiles(self) -> None:
         """Efficiently filters profiles without recreating widgets."""
         try:
+            import time
+            start_time = time.time()
+            print(f"[DEBUG] _filter_profiles: Starting")
+            
             search_term = self.search_entry.get().lower().strip()
             visible_count = 0
             
+            print(f"[DEBUG] _filter_profiles: Showing/hiding widgets: {time.time() - start_time:.3f}s")
             # Show/hide existing widgets based on search
             for profile_id, widgets in self.profile_widgets.items():
                 if not widgets or 'frame' not in widgets:
@@ -946,14 +984,23 @@ class MainWindow(ctk.CTk):
                 else:
                     frame.grid_remove()  # Hide widget (keeps in memory)
             
+            print(f"[DEBUG] _filter_profiles: Updating label: {time.time() - start_time:.3f}s")
             # Update scrollable frame label
             if search_term:
                 self.profiles_scrollable.configure(label_text=f"Profiles ({visible_count} shown)")
             else:
                 self.profiles_scrollable.configure(label_text="Chromium Profiles")
             
-            # Refresh row colors after filtering to maintain alternating pattern
-            self._refresh_row_colors()
+            print(f"[DEBUG] _filter_profiles: About to call _refresh_row_colors: {time.time() - start_time:.3f}s")
+            # OPTIMIZED: Only refresh row colors if we actually filtered (not during initial load)
+            if search_term:
+                print(f"[DEBUG] _filter_profiles: Calling _refresh_row_colors (search term present)")
+                self._refresh_row_colors()
+            else:
+                print(f"[DEBUG] _filter_profiles: Skipping _refresh_row_colors (no search term - initial load)")
+            
+            total_time = time.time() - start_time
+            print(f"[DEBUG] _filter_profiles: Completed in {total_time:.3f}s")
                 
         except Exception as e:
             self.logger.error(f"Error filtering profiles: {e}")
