@@ -121,8 +121,11 @@ class ProfileManager:
         
     def get_all_profiles(self) -> List[ChromiumProfile]:
         """Gets all profiles sorted alphabetically by name."""
-        return sorted(self._profiles.values(), 
+        print(f"[DEBUG] get_all_profiles: Have {len(self._profiles)} profiles in memory")
+        result = sorted(self._profiles.values(), 
                     key=lambda p: p.name.lower())  # Sort by name alphabetically
+        print(f"[DEBUG] get_all_profiles: Returning {len(result)} sorted profiles")
+        return result
         
     def update_profile(self, profile_id: str, **kwargs) -> None:
         """Updates profile."""

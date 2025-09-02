@@ -265,43 +265,59 @@ class MainWindow(ctk.CTk):
         """Loads profiles with alphabetical sorting."""
         try:
             start_time = time.time()
+            print(f"[DEBUG] Starting _load_profiles at {time.time()}")
             
             # Clean up existing tooltips
+            print(f"[DEBUG] Cleaning tooltips: {time.time() - start_time:.3f}s")
             if hasattr(self, 'tooltips'):
                 for tooltip in self.tooltips.values():
                     tooltip.hide()
                 self.tooltips.clear()
             
             # Clear existing list only if needed
+            print(f"[DEBUG] Clearing widgets: {time.time() - start_time:.3f}s")
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
             self.profile_widgets.clear()
             
+            print(f"[DEBUG] Getting all profiles: {time.time() - start_time:.3f}s")
             profiles = self.profile_manager.get_all_profiles()
+            print(f"[DEBUG] Got {len(profiles)} profiles: {time.time() - start_time:.3f}s")
             
             # Sort profiles alphabetically by name (case-insensitive)
+            print(f"[DEBUG] Sorting profiles: {time.time() - start_time:.3f}s")
             profiles.sort(key=lambda p: p.name.lower())
             
             # Get current running profiles
+            print(f"[DEBUG] Getting running profiles: {time.time() - start_time:.3f}s")
             running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
+            print(f"[DEBUG] Found {len(running_profiles)} running profiles: {time.time() - start_time:.3f}s")
             
             # Filter by search
+            print(f"[DEBUG] Filtering by search: {time.time() - start_time:.3f}s")
             search_term = self.search_entry.get().lower() if hasattr(self, 'search_entry') else ""
             if search_term:
                 profiles = [p for p in profiles if search_term in p.name.lower()]
+                print(f"[DEBUG] Filtered to {len(profiles)} profiles: {time.time() - start_time:.3f}s")
             
             # Create rows
+            print(f"[DEBUG] Creating rows for {len(profiles)} profiles: {time.time() - start_time:.3f}s")
             for i, profile in enumerate(profiles, 1):
+                if i % 10 == 0:  # Log every 10th profile
+                    print(f"[DEBUG] Created {i} rows: {time.time() - start_time:.3f}s")
                 is_running = profile.id in running_profiles
                 self._create_profile_row(i, profile, is_running)
                 self.last_known_states[profile.id] = is_running
             
+            print(f"[DEBUG] Updating stats: {time.time() - start_time:.3f}s")
             self._update_stats()
             
             load_time = time.time() - start_time
+            print(f"[DEBUG] _load_profiles completed in {load_time:.3f}s")
             self.logger.debug(f"Loaded {len(profiles)} profiles in {load_time:.2f}s")
             
         except Exception as e:
+            print(f"[DEBUG] ERROR in _load_profiles: {e}")
             self.logger.error(f"Error loading profiles: {e}")
             self.status_label.configure(text="Error", text_color="red")
             
