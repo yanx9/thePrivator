@@ -4,7 +4,6 @@ import subprocess
 import shutil
 import platform
 import os
-import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -120,7 +119,7 @@ class ChromiumLauncher:
             raise LaunchError(f"Error launching profile: {e}")
             
     def terminate_profile(self, profile_id: str, force: bool = False) -> bool:
-        """Terminates profile process with optimized performance."""
+        """Terminates profile process."""
         if profile_id not in self.running_processes:
             return False
             
@@ -130,65 +129,40 @@ class ChromiumLauncher:
             if HAS_PSUTIL and self._is_process_running(process_info.pid):
                 try:
                     parent = psutil.Process(process_info.pid)
+                    children = parent.children(recursive=True)
                     
                     if force:
-                        # Aggressive termination for fastest response
-                        try:
-                            # Try to kill parent first - often kills children automatically
-                            parent.kill()
-                            # Short wait to see if children die too
-                            parent.wait(timeout=1)
-                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
-                            # If parent still exists or children remain, kill all
-                            try:
-                                children = parent.children(recursive=True)
-                                for child in children:
-                                    try:
-                                        child.kill()
-                                    except psutil.NoSuchProcess:
-                                        pass
-                                parent.kill()
-                            except psutil.NoSuchProcess:
-                                pass
+                        # Force termination
+                        for child in children:
+                            child.kill()
+                        parent.kill()
+                        psutil.wait_procs([parent] + children, timeout=3)
                     else:
-                        # Graceful termination with faster timeout
-                        children = parent.children(recursive=True)
-                        all_procs = [parent] + children
+                        # Graceful termination
+                        for child in children:
+                            child.terminate()
+                        parent.terminate()
                         
-                        # Send terminate signal to all
-                        for proc in all_procs:
-                            try:
-                                proc.terminate()
-                            except psutil.NoSuchProcess:
-                                pass
+                        # Wait for termination
+                        gone, alive = psutil.wait_procs([parent] + children, timeout=10)
                         
-                        # Wait for termination with shorter timeout
-                        gone, alive = psutil.wait_procs(all_procs, timeout=3)  # Reduced from 10
-                        
-                        # Kill any remaining processes
+                        # If some processes are still alive, kill them
                         for p in alive:
-                            try:
-                                p.kill()
-                            except psutil.NoSuchProcess:
-                                pass
+                            p.kill()
                             
                 except psutil.NoSuchProcess:
                     # Process already doesn't exist
                     pass
             else:
-                # Optimized fallback without psutil
+                # Fallback without psutil
                 try:
                     if platform.system() == "Windows":
-                        # Use taskkill with force and tree options for faster cleanup
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process_info.pid)], 
-                                     capture_output=True, timeout=3)
+                        subprocess.run(["taskkill", "/F", "/PID", str(process_info.pid)], 
+                                     capture_output=True)
                     else:
-                        # Use kill with process group
                         subprocess.run(["kill", "-9", str(process_info.pid)], 
-                                     capture_output=True, timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.logger.warning(f"Process termination timed out for PID {process_info.pid}")
-                except Exception:
+                                     capture_output=True)
+                except:
                     pass
                     
             del self.running_processes[profile_id]
@@ -197,9 +171,6 @@ class ChromiumLauncher:
             
         except Exception as e:
             self.logger.error(f"Error terminating process: {e}")
-            # Remove from tracking even on error to avoid getting stuck
-            if profile_id in self.running_processes:
-                del self.running_processes[profile_id]
             return False
             
     def terminate_all_profiles(self) -> int:
@@ -411,66 +382,34 @@ class ChromiumLauncher:
         return args
         
     def _is_process_running(self, pid: int) -> bool:
-        """Highly optimized process running check with caching."""
-        # Cache results for a few seconds to reduce system calls
-        if not hasattr(self, '_process_cache'):
-            self._process_cache = {}
-            self._cache_timestamps = {}
-        
-        cache_ttl = 2  # Cache for 2 seconds
-        current_time = time.time()
-        
-        # Check cache first
-        if pid in self._process_cache:
-            if current_time - self._cache_timestamps.get(pid, 0) < cache_ttl:
-                return self._process_cache[pid]
-        
+        """Checks if process is running more efficiently."""
         try:
-            is_running = False
-            
             if HAS_PSUTIL:
-                # Most efficient check - just check if PID exists
-                is_running = psutil.pid_exists(pid)
-                # Only do detailed check if it exists
-                if is_running:
-                    try:
-                        proc = psutil.Process(pid)
-                        is_running = proc.status() != psutil.STATUS_ZOMBIE
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        is_running = False
+                # Quick check if process exists
+                if not psutil.pid_exists(pid):
+                    return False
+                try:
+                    proc = psutil.Process(pid)
+                    # Check if it's actually running (not zombie)
+                    return proc.status() != psutil.STATUS_ZOMBIE
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    return False
             else:
-                # Optimized fallback
+                # Fallback without psutil
                 if platform.system() == "Windows":
-                    # Use faster wmic query instead of tasklist
-                    try:
-                        result = subprocess.run(
-                            ["wmic", "process", "where", f"ProcessId={pid}", "get", "ProcessId"],
-                            capture_output=True,
-                            text=True,
-                            timeout=0.5,  # Very short timeout
-                            creationflags=subprocess.CREATE_NO_WINDOW
-                        )
-                        is_running = str(pid) in result.stdout
-                    except (subprocess.TimeoutExpired, FileNotFoundError):
-                        # Fallback to os.kill check
-                        try:
-                            os.kill(pid, 0)
-                            is_running = True
-                        except OSError:
-                            is_running = False
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=1  # Add timeout to prevent hanging
+                    )
+                    return str(pid) in result.stdout
                 else:
                     try:
-                        os.kill(pid, 0)  # Most efficient on Unix-like systems
-                        is_running = True
+                        os.kill(pid, 0)  # More efficient than subprocess
+                        return True
                     except OSError:
-                        is_running = False
-            
-            # Update cache
-            self._process_cache[pid] = is_running
-            self._cache_timestamps[pid] = current_time
-            
-            return is_running
-            
+                        return False
         except Exception as e:
             self.logger.debug(f"Error checking process {pid}: {e}")
             return False

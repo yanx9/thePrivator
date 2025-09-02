@@ -276,68 +276,35 @@ class MainWindow(ctk.CTk):
             label.grid(row=0, column=col, padx=5, pady=8, sticky="ew")
             
     def _load_profiles(self) -> None:
-        """Loads profiles with optimized async operations."""
+        """Loads profiles without heavy operations."""
         try:
             start_time = time.time()
             
-            # Show loading state immediately
-            self.status_label.configure(text="Loading profiles...")
-            
-            # Clear existing list efficiently
+            # Clear existing list
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
             self.profile_widgets.clear()
             
-            # Get profiles (this is fast - just JSON loading)
             profiles = self.profile_manager.get_all_profiles()
             
-            # Create rows immediately with default state (show stopped)
+            # Get current running profiles
+            running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
+            
+            # Create rows for ALL profiles (don't filter here)
             for i, profile in enumerate(profiles, 1):
-                # Initially show as stopped - update running state asynchronously
-                self._create_profile_row(i, profile, is_running=False)
-                self.last_known_states[profile.id] = False
+                is_running = profile.id in running_profiles
+                self._create_profile_row(i, profile, is_running)
+                self.last_known_states[profile.id] = is_running
             
             # Apply current search filter if any
             if hasattr(self, 'search_entry'):
                 self._filter_profiles()
             
             self._update_stats()
-            self._update_action_buttons()
+            self._update_action_buttons()  # Update button states after loading
             
             load_time = time.time() - start_time
             self.logger.debug(f"Loaded {len(profiles)} profiles in {load_time:.2f}s")
-            self.status_label.configure(text="Ready")
-            
-            # Update running states asynchronously to avoid blocking UI
-            def update_running_states():
-                try:
-                    # This is the potentially expensive operation
-                    running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
-                    
-                    # Schedule UI updates for any running profiles
-                    def update_ui_states():
-                        for profile_id in running_profiles:
-                            if profile_id in self.profile_widgets:
-                                self.last_known_states[profile_id] = True
-                                widgets = self.profile_widgets[profile_id]
-                                profile = widgets['profile']
-                                
-                                if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                    widgets['name_btn'].configure(text=f"🟢 {profile.name}")
-                                if 'status_label' in widgets and widgets['status_label'].winfo_exists():
-                                    widgets['status_label'].configure(text="🟢 Running")
-                        
-                        # Update stats with correct running count
-                        self._update_stats()
-                    
-                    # Update UI on main thread
-                    self.after(0, update_ui_states)
-                    
-                except Exception as e:
-                    self.logger.warning(f"Error updating running states: {e}")
-            
-            # Run expensive operation in background
-            threading.Thread(target=update_running_states, daemon=True).start()
             
         except Exception as e:
             self.logger.error(f"Error loading profiles: {e}")
@@ -506,70 +473,62 @@ class MainWindow(ctk.CTk):
         scrollable_frame.after(100, delayed_bind)
 
     def _refresh_status(self) -> None:
-        """Optimized lightweight status refresh with reduced CPU usage."""
+        """Lightweight status refresh that updates in-place."""
         try:
-            # Only run expensive operations every few cycles
-            if not hasattr(self, '_refresh_cycle_count'):
-                self._refresh_cycle_count = 0
+            self.logger.debug("Running status refresh cycle")
             
-            self._refresh_cycle_count += 1
+            # Clean up orphaned processes first
+            self.chromium_launcher.cleanup_orphaned_processes()
             
-            # Clean up orphaned processes only every 10 cycles (10 seconds)
-            if self._refresh_cycle_count % 10 == 0:
-                self.chromium_launcher.cleanup_orphaned_processes()
+            # Get current running profiles
+            current_running = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
             
-            # Check for profile structure changes only every 5 cycles (5 seconds)  
-            if self._refresh_cycle_count % 5 == 0:
-                current_profiles = self.profile_manager.get_all_profiles()
-                current_profile_ids = {p.id for p in current_profiles}
-                widget_profile_ids = set(self.profile_widgets.keys())
-                
-                if current_profile_ids != widget_profile_ids:
-                    self.logger.info("Profile list changed, reloading")
-                    self._load_profiles()
-                    return  # Skip status update since _load_profiles handles it
+            # Check if profile list structure changed (added/removed profiles)
+            current_profiles = self.profile_manager.get_all_profiles()
+            current_profile_ids = {p.id for p in current_profiles}
+            widget_profile_ids = set(self.profile_widgets.keys())
             
-            # Quick status check - this is the most frequent operation
-            try:
-                # Only check running profiles if we have any widgets
-                if self.profile_widgets:
-                    current_running = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
-                    
-                    changes = 0
-                    for profile_id, widgets in self.profile_widgets.items():
-                        if not widgets:
-                            continue
-                            
-                        is_running_now = profile_id in current_running
-                        was_running = self.last_known_states.get(profile_id, False)
+            if current_profile_ids != widget_profile_ids:
+                # Only reload if profiles were added/removed
+                self.logger.info("Profile list changed, reloading")
+                self._load_profiles()
+            else:
+                # Just update statuses in-place
+                changes = 0
+                for profile_id, widgets in self.profile_widgets.items():
+                    if not widgets:
+                        continue
                         
-                        if is_running_now != was_running:
-                            changes += 1
-                            self.last_known_states[profile_id] = is_running_now
-                            profile = widgets['profile']
-                            
-                            # Update only the changed elements with error handling
-                            try:
-                                if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                    widgets['name_btn'].configure(
-                                        text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
-                                        font=ctk.CTkFont(size=12, weight="bold")
-                                    )
-                                if 'status_label' in widgets and widgets['status_label'].winfo_exists():
-                                    widgets['status_label'].configure(
-                                        text="🟢 Running" if is_running_now else "⚫ Stopped"
-                                    )
-                            except Exception as e:
-                                self.logger.debug(f"Widget update error: {e}")
+                    is_running_now = profile_id in current_running
+                    was_running = self.last_known_states.get(profile_id, False)
                     
-                    if changes > 0:
-                        self._update_stats()
-                        self.logger.debug(f"Status refresh: {changes} profile(s) changed")
-            except Exception as e:
-                self.logger.warning(f"Error checking running profiles: {e}")
+                    if is_running_now != was_running:
+                        changes += 1
+                        self.last_known_states[profile_id] = is_running_now
+                        profile = widgets['profile']
+                        
+                        # Update only the changed elements
+                        try:
+                            if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
+                                widgets['name_btn'].configure(
+                                    text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
+                                    font=ctk.CTkFont(size=12, weight="bold")
+                                )
+                            if 'status_label' in widgets and widgets['status_label'].winfo_exists():
+                                widgets['status_label'].configure(
+                                    text="🟢 Running" if is_running_now else "⚫ Stopped"
+                                )
+                        except Exception as e:
+                            self.logger.debug(f"Widget update error (likely destroyed): {e}")
+                        
+                        self.logger.debug(f"Profile '{profile.name}' status changed")
+                
+                if changes > 0:
+                    self._update_stats()
+                    self.logger.info(f"Status refresh: {changes} profile(s) changed")
             
-            # Update selected profile buttons only if needed and not too frequently
-            if self.selected_profile_ids and self._refresh_cycle_count % 3 == 0:
+            # Update selected profile buttons if needed
+            if self.selected_profile_ids:
                 self._update_action_buttons()
                     
         except Exception as e:
@@ -686,30 +645,21 @@ class MainWindow(ctk.CTk):
             self.logger.debug(f"Error refreshing row colors: {e}")
             
     def _create_new_profile(self) -> None:
-        """Creates new profile with optimized UI updates."""
+        """Creates new profile."""
         try:
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
             if dialog.result:
-                # Add the new profile to UI immediately instead of full reload
-                new_profile = dialog.result
-                row = len(self.profile_widgets) + 1  # After existing profiles
-                self._create_profile_row(row, new_profile, is_running=False)
-                self.last_known_states[new_profile.id] = False
-                
-                # Apply search filter to the new profile
-                if hasattr(self, 'search_entry'):
-                    self._filter_profiles()
-                
-                self._update_stats()
+                # Don't reload everything - let refresh pick it up
                 self.status_label.configure(text="Created profile")
-                self.logger.info(f"Added new profile to UI: {new_profile.name}")
+                # Force immediate refresh
+                self.after(100, self._refresh_status)
         except Exception as e:
             self.logger.error(f"Error creating profile: {e}")
             import tkinter.messagebox as msgbox
             msgbox.showerror("Error", f"Cannot create profile: {e}")
             
     def _edit_profile(self) -> None:
-        """Edits selected profile with optimized UI updates."""
+        """Edits selected profile (only works with single selection)."""
         if len(self.selected_profile_ids) == 1:
             profile_id = next(iter(self.selected_profile_ids))
             profile = self.profile_manager.get_profile(profile_id)
@@ -717,41 +667,15 @@ class MainWindow(ctk.CTk):
                 try:
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
                     if dialog.result:
-                        # Update existing widget instead of full reload
-                        updated_profile = dialog.result
-                        if profile_id in self.profile_widgets:
-                            widgets = self.profile_widgets[profile_id]
-                            is_running = self.last_known_states.get(profile_id, False)
-                            
-                            # Update profile reference
-                            widgets['profile'] = updated_profile
-                            
-                            # Update name button
-                            if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                status_icon = "🟢" if is_running else "⚫"
-                                widgets['name_btn'].configure(text=f"{status_icon} {updated_profile.name}")
-                            
-                            # Find and update other fields if the widget structure supports it
-                            frame = widgets['frame']
-                            children = frame.winfo_children()
-                            if len(children) >= 3:  # UA and Proxy labels
-                                # Update User-Agent
-                                ua_text = updated_profile.user_agent[:45] + "..." if len(updated_profile.user_agent) > 45 else updated_profile.user_agent
-                                children[1].configure(text=ua_text)
-                                
-                                # Update Proxy 
-                                proxy_text = updated_profile.proxy[:30] + "..." if updated_profile.proxy and len(updated_profile.proxy) > 30 else (updated_profile.proxy or "None")
-                                children[2].configure(text=proxy_text)
-                        
+                        self._load_profiles()
                         self.status_label.configure(text="Updated profile")
-                        self.logger.info(f"Updated profile in UI: {updated_profile.name}")
                 except Exception as e:
                     self.logger.error(f"Error editing profile: {e}")
                     import tkinter.messagebox as msgbox
                     msgbox.showerror("Error", f"Cannot edit profile: {e}")
                     
     def _delete_profile(self) -> None:
-        """Deletes selected profiles with optimized async operations."""
+        """Deletes selected profiles."""
         if not self.selected_profile_ids:
             return
             
@@ -777,57 +701,38 @@ class MainWindow(ctk.CTk):
         import tkinter.messagebox as msgbox
         profile_names = [p.name for p in profiles_to_delete]
         if msgbox.askyesno("Confirmation", f"Delete {len(profiles_to_delete)} profile(s)?\n\n{', '.join(profile_names)}\n\nThis will permanently remove all profile data."):
-            
-            # Update UI immediately to show deletion in progress
-            self.status_label.configure(text="Deleting...")
-            
-            # Remove widgets and update UI immediately
-            deleted_count = 0
-            for profile in profiles_to_delete:
-                # Remove from known states
-                if profile.id in self.last_known_states:
-                    del self.last_known_states[profile.id]
-                
-                # Remove widget immediately for responsive UI
-                if profile.id in self.profile_widgets:
-                    widgets = self.profile_widgets[profile.id]
-                    if 'frame' in widgets:
-                        widgets['frame'].destroy()
-                    del self.profile_widgets[profile.id]
-                
-                deleted_count += 1
-            
-            # Clear selections for deleted profiles
-            deleted_ids = {p.id for p in profiles_to_delete}
-            self.selected_profile_ids -= deleted_ids
-            self._update_action_buttons()
-            
-            # Fix alternating row colors after deletion
-            self._refresh_row_colors()
-            self._update_stats()
-            
-            self.status_label.configure(text=f"Deleted {deleted_count} profile(s)")
-            
-            # Delete actual profile data and files in background thread
-            def delete_files():
-                errors = []
+            try:
+                deleted_count = 0
                 for profile in profiles_to_delete:
-                    try:
-                        self.profile_manager.delete_profile(profile.id)
-                        self.logger.info(f"Deleted profile data: {profile.name}")
-                    except Exception as e:
-                        errors.append(f"{profile.name}: {str(e)}")
-                        self.logger.error(f"Error deleting profile {profile.name}: {e}")
+                    # Remove from known states
+                    if profile.id in self.last_known_states:
+                        del self.last_known_states[profile.id]
+                        
+                    # Delete profile
+                    self.profile_manager.delete_profile(profile.id)
+
+                    # Remove widget immediately
+                    if profile.id in self.profile_widgets:
+                        widgets = self.profile_widgets[profile.id]
+                        if 'frame' in widgets:
+                            widgets['frame'].destroy()
+                        del self.profile_widgets[profile.id]
+                    
+                    deleted_count += 1
+                    self.logger.info(f"Deleted profile: {profile.name}")
+
+                # Clear selections for deleted profiles
+                deleted_ids = {p.id for p in profiles_to_delete}
+                self.selected_profile_ids -= deleted_ids
+                self._update_action_buttons()
                 
-                # Show errors if any occurred
-                if errors:
-                    def show_errors():
-                        import tkinter.messagebox as msgbox
-                        msgbox.showerror("Deletion Errors", f"Some profile data could not be deleted:\n\n" + "\n".join(errors))
-                    self.after(0, show_errors)
-            
-            # Run file deletion in background to avoid blocking UI
-            threading.Thread(target=delete_files, daemon=True).start()
+                # Fix alternating row colors after deletion
+                self._refresh_row_colors()
+                
+                self.status_label.configure(text=f"Deleted {deleted_count} profile(s)")
+                self._update_stats()
+            except Exception as e:
+                msgbox.showerror("Error", f"Cannot delete: {e}")
                         
     def _launch_profile(self) -> None:
         """Launches selected profiles."""
@@ -874,7 +779,7 @@ class MainWindow(ctk.CTk):
         self.logger.info(f"Launching profiles: {', '.join(profile_names)}")
                 
     def _stop_profile(self) -> None:
-        """Stops selected profiles with optimized async operations."""
+        """Stops selected profiles in background thread."""
         if not self.selected_profile_ids:
             return
             
@@ -891,57 +796,32 @@ class MainWindow(ctk.CTk):
         self.stop_profile_btn.configure(state="disabled")
         self.status_label.configure(text="Stopping...")
         
-        # Update UI immediately to show stopping state
-        for profile in profiles_to_stop:
-            if profile.id in self.profile_widgets:
-                widgets = self.profile_widgets[profile.id]
-                if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                    widgets['name_btn'].configure(text=f"⏸️ {profile.name}")
-                if 'status_label' in widgets and widgets['status_label'].winfo_exists():
-                    widgets['status_label'].configure(text="⏸️ Stopping")
-        
         def stop_thread():
             stopped_count = 0
             errors = []
             
-            # Batch process termination for efficiency
             for profile in profiles_to_stop:
                 try:
-                    # Use force termination for faster response
-                    success = self.chromium_launcher.terminate_profile(profile.id, force=True)
+                    success = self.chromium_launcher.terminate_profile(profile.id)
                     if success:
-                        # Update state immediately without file I/O
+                        self.profile_manager.set_active_status(profile.id, False)
                         self.last_known_states[profile.id] = False
+                        
+                        # Update UI
+                        if profile.id in self.profile_widgets:
+                            widgets = self.profile_widgets[profile.id]
+                            if 'name_btn' in widgets:
+                                widgets['name_btn'].configure(text=f"⚫ {profile.name}")
+                            if 'status_label' in widgets:
+                                widgets['status_label'].configure(text="⚫ Stopped")
+                        
                         stopped_count += 1
                         self.logger.info(f"Stopped profile: {profile.name}")
-                        
-                        # Schedule UI update
-                        def update_profile_ui(prof_id=profile.id, prof_name=profile.name):
-                            if prof_id in self.profile_widgets:
-                                widgets = self.profile_widgets[prof_id]
-                                if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                    widgets['name_btn'].configure(text=f"⚫ {prof_name}")
-                                if 'status_label' in widgets and widgets['status_label'].winfo_exists():
-                                    widgets['status_label'].configure(text="⚫ Stopped")
-                        
-                        self.after(0, update_profile_ui)
                     else:
                         errors.append(profile.name)
                 except Exception as e:
                     errors.append(f"{profile.name}: {str(e)}")
                     self.logger.error(f"Error stopping profile {profile.name}: {e}")
-            
-            # Batch update profile manager states (async file I/O)
-            def batch_update_states():
-                for profile in profiles_to_stop:
-                    try:
-                        if self.last_known_states.get(profile.id) is False:
-                            self.profile_manager.set_active_status(profile.id, False)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to update profile state: {e}")
-            
-            # Run state updates in separate thread to avoid blocking
-            threading.Thread(target=batch_update_states, daemon=True).start()
             
             def update_ui():
                 if errors:
