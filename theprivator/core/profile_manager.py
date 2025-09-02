@@ -267,7 +267,7 @@ class ProfileManager:
             'active_profiles': active_count,
             'inactive_profiles': len(profiles) - active_count,
             'last_created': profiles[0].created_at if profiles else None,
-            'total_size': self._calculate_total_size()
+            # 'total_size': self._calculate_total_size()  # Removed - was causing 20s delay due to filesystem traversal
         }
         
     def export_profiles_bulk(self, profile_ids: List[str], export_path: Path) -> None:
