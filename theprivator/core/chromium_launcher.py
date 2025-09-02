@@ -257,13 +257,26 @@ class ChromiumLauncher:
             
     def cleanup_orphaned_processes(self) -> int:
         """Cleans up orphaned processes more efficiently."""
+        import time
+        start_time = time.time()
+        print(f"[DEBUG] cleanup_orphaned_processes: Starting with {len(self.running_processes)} tracked")
+        
         cleaned = 0
         to_remove = []
         
-        for profile_id, process_info in self.running_processes.items():
+        for i, (profile_id, process_info) in enumerate(self.running_processes.items()):
+            check_start = time.time()
+            print(f"[DEBUG] cleanup_orphaned_processes: Checking process {i+1}/{len(self.running_processes)}: PID {process_info.pid}")
+            
             if not self._is_process_running(process_info.pid):
                 to_remove.append(profile_id)
                 cleaned += 1
+                print(f"[DEBUG] cleanup_orphaned_processes: PID {process_info.pid} is orphaned - will remove")
+            else:
+                print(f"[DEBUG] cleanup_orphaned_processes: PID {process_info.pid} is still running")
+                
+            check_time = time.time() - check_start
+            print(f"[DEBUG] cleanup_orphaned_processes: Process check took {check_time:.3f}s")
         
         # Remove outside of iteration to avoid dict size change during iteration
         for profile_id in to_remove:
@@ -271,6 +284,9 @@ class ChromiumLauncher:
         
         if cleaned > 0:
             self.logger.info(f"Cleaned up {cleaned} orphaned processes")
+        
+        total_time = time.time() - start_time
+        print(f"[DEBUG] cleanup_orphaned_processes: Completed in {total_time:.3f}s, cleaned {cleaned}")
             
         return cleaned
         
