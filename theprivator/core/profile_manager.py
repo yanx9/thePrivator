@@ -80,6 +80,7 @@ class ProfileManager:
         self.profiles_dir = self.config_dir / "profiles"
         self.profiles_dir.mkdir(exist_ok=True)
         self._profiles: Dict[str, ChromiumProfile] = {}
+        self._batch_save_timer = None
         self._load_profiles()
         
     def create_profile(self, name: str, user_agent: str, proxy: Optional[str] = None, notes: str = "") -> ChromiumProfile:
@@ -194,11 +195,12 @@ class ProfileManager:
             self._save_profiles()
             
     def set_active_status(self, profile_id: str, is_active: bool) -> None:
-        """Sets profile activity status."""
+        """Sets profile activity status with batched saves."""
         profile = self.get_profile(profile_id)
         if profile:
             profile.is_active = is_active
-            self._save_profiles()
+            # Schedule batch save instead of immediate save
+            self._schedule_batch_save()
             
     def export_profile(self, profile_id: str, export_path: Path) -> None:
         """Exports profile to file."""
@@ -418,9 +420,27 @@ class ProfileManager:
                 self.profiles_file.rename(backup_file)
                 self.logger.info(f"Created backup of corrupted file: {backup_file}")
             
+    def _schedule_batch_save(self) -> None:
+        """Schedules a batch save to reduce file I/O."""
+        import threading
+        
+        # Cancel existing timer if any
+        if self._batch_save_timer:
+            self._batch_save_timer.cancel()
+        
+        # Schedule save after 2 seconds of inactivity
+        self._batch_save_timer = threading.Timer(2.0, self._save_profiles)
+        self._batch_save_timer.daemon = True
+        self._batch_save_timer.start()
+    
     def _save_profiles(self) -> None:
-        """Saves profiles to file."""
+        """Saves profiles to file with error handling."""
         try:
+            # Clear the timer since we're saving now
+            if self._batch_save_timer:
+                self._batch_save_timer.cancel()
+                self._batch_save_timer = None
+            
             data = {
                 'version': '2.0',
                 'created_at': datetime.now().isoformat(),
@@ -432,6 +452,7 @@ class ProfileManager:
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             temp_file.replace(self.profiles_file)
+            self.logger.debug("Profiles saved to disk")
             
         except Exception as e:
             self.logger.error(f"Error saving profiles: {e}")
