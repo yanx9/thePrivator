@@ -279,62 +279,36 @@ class MainWindow(ctk.CTk):
         """Loads profiles without heavy operations."""
         try:
             start_time = time.time()
-            print(f"[DEBUG] Starting _load_profiles at {time.time()}")
             
             # Clear existing list
-            print(f"[DEBUG] Clearing widgets: {time.time() - start_time:.3f}s")
             for widget in self.profiles_scrollable.winfo_children()[1:]:
                 widget.destroy()
             self.profile_widgets.clear()
             
-            print(f"[DEBUG] Getting all profiles: {time.time() - start_time:.3f}s")
             profiles = self.profile_manager.get_all_profiles()
-            print(f"[DEBUG] Got {len(profiles)} profiles: {time.time() - start_time:.3f}s")
             
             # Get current running profiles
-            print(f"[DEBUG] Getting running profiles: {time.time() - start_time:.3f}s")
             running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
-            print(f"[DEBUG] Found {len(running_profiles)} running profiles: {time.time() - start_time:.3f}s")
             
             # Create rows for ALL profiles (don't filter here)
-            print(f"[DEBUG] Creating rows for {len(profiles)} profiles: {time.time() - start_time:.3f}s")
             for i, profile in enumerate(profiles, 1):
-                if i % 10 == 0:  # Log every 10th profile
-                    print(f"[DEBUG] Created {i} rows: {time.time() - start_time:.3f}s")
                 is_running = profile.id in running_profiles
                 self._create_profile_row(i, profile, is_running)
                 self.last_known_states[profile.id] = is_running
             
             # Apply current search filter if any
-            print(f"[DEBUG] Applying search filter: {time.time() - start_time:.3f}s")
             if hasattr(self, 'search_entry'):
                 self._filter_profiles()
             
-            print(f"[DEBUG] Updating stats: {time.time() - start_time:.3f}s")
             self._update_stats()
-            print(f"[DEBUG] Stats updated: {time.time() - start_time:.3f}s")
-            
-            print(f"[DEBUG] About to call _update_action_buttons: {time.time() - start_time:.3f}s")
             self._update_action_buttons()  # Update button states after loading
-            print(f"[DEBUG] Action buttons updated: {time.time() - start_time:.3f}s")
             
-            print(f"[DEBUG] About to calculate load_time: {time.time() - start_time:.3f}s")
             load_time = time.time() - start_time
-            print(f"[DEBUG] Load time calculated: {load_time:.3f}s")
-            
-            print(f"[DEBUG] About to log completion: {time.time() - start_time:.3f}s")
-            print(f"[DEBUG] _load_profiles completed in {load_time:.3f}s")
             self.logger.debug(f"Loaded {len(profiles)} profiles in {load_time:.2f}s")
-            print(f"[DEBUG] Logger debug called: {time.time() - start_time:.3f}s")
-            
-            print(f"[DEBUG] About to exit _load_profiles method: {time.time() - start_time:.3f}s")
             
         except Exception as e:
-            print(f"[DEBUG] ERROR in _load_profiles: {e}")
             self.logger.error(f"Error loading profiles: {e}")
             self.status_label.configure(text="Error")
-            
-        print(f"[DEBUG] _load_profiles method ending: {time.time() - start_time:.3f}s")
             
     def _create_profile_row(self, row: int, profile: ChromiumProfile, is_running: bool) -> None:
         """Creates profile row with hover effects and tooltips."""
@@ -501,29 +475,18 @@ class MainWindow(ctk.CTk):
     def _refresh_status(self) -> None:
         """Lightweight status refresh that updates in-place."""
         try:
-            import time
-            start_time = time.time()
-            print(f"[DEBUG] _refresh_status: Starting")
             self.logger.debug("Running status refresh cycle")
             
             # Clean up orphaned processes first
-            print(f"[DEBUG] _refresh_status: About to cleanup orphaned processes: {time.time() - start_time:.3f}s")
             self.chromium_launcher.cleanup_orphaned_processes()
-            print(f"[DEBUG] _refresh_status: Orphaned processes cleaned: {time.time() - start_time:.3f}s")
             
             # Get current running profiles
-            print(f"[DEBUG] _refresh_status: About to get running profiles: {time.time() - start_time:.3f}s")
             current_running = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
-            print(f"[DEBUG] _refresh_status: Got running profiles: {time.time() - start_time:.3f}s")
             
             # Check if profile list structure changed (added/removed profiles)
-            print(f"[DEBUG] _refresh_status: About to get all profiles: {time.time() - start_time:.3f}s")
             current_profiles = self.profile_manager.get_all_profiles()
-            print(f"[DEBUG] _refresh_status: Got all profiles: {time.time() - start_time:.3f}s")
-            
             current_profile_ids = {p.id for p in current_profiles}
             widget_profile_ids = set(self.profile_widgets.keys())
-            print(f"[DEBUG] _refresh_status: Calculated profile ID sets: {time.time() - start_time:.3f}s")
             
             if current_profile_ids != widget_profile_ids:
                 # Only reload if profiles were added/removed
@@ -613,13 +576,7 @@ class MainWindow(ctk.CTk):
     
     def _update_action_buttons(self) -> None:
         """Updates action button states based on current selections."""
-        import time
-        start_time = time.time()
-        print(f"[DEBUG] _update_action_buttons: Starting")
-        
-        print(f"[DEBUG] _update_action_buttons: Checking selection count: {time.time() - start_time:.3f}s")
         if not self.selected_profile_ids:
-            print(f"[DEBUG] _update_action_buttons: No selection - disabling buttons: {time.time() - start_time:.3f}s")
             # No selection - disable all buttons
             self.edit_profile_btn.configure(state="disabled")
             self.delete_profile_btn.configure(state="disabled")
@@ -627,64 +584,45 @@ class MainWindow(ctk.CTk):
             self.stop_profile_btn.configure(state="disabled")
             self.export_btn.configure(state="disabled")
             self.status_label.configure(text="Ready")
-            print(f"[DEBUG] _update_action_buttons: Completed (no selection) in {time.time() - start_time:.3f}s")
             return
         
         # Enable buttons based on selection count and states
         selected_count = len(self.selected_profile_ids)
-        print(f"[DEBUG] _update_action_buttons: Selected count = {selected_count}: {time.time() - start_time:.3f}s")
         
         # Edit button only works with single selection
         if selected_count == 1:
             self.edit_profile_btn.configure(state="normal")
         else:
             self.edit_profile_btn.configure(state="disabled")
-        print(f"[DEBUG] _update_action_buttons: Configured edit button: {time.time() - start_time:.3f}s")
         
         # Delete and export always work with any number of selections
         self.delete_profile_btn.configure(state="normal")
         self.export_btn.configure(state="normal")
-        print(f"[DEBUG] _update_action_buttons: Configured delete/export buttons: {time.time() - start_time:.3f}s")
         
         # Check running states for launch/stop buttons
-        print(f"[DEBUG] _update_action_buttons: About to call get_running_profiles: {time.time() - start_time:.3f}s")
         running_profiles = {p.profile_id for p in self.chromium_launcher.get_running_profiles()}
-        print(f"[DEBUG] _update_action_buttons: Got running profiles: {time.time() - start_time:.3f}s")
-        
         selected_running = [pid for pid in self.selected_profile_ids if pid in running_profiles]
         selected_stopped = [pid for pid in self.selected_profile_ids if pid not in running_profiles]
-        print(f"[DEBUG] _update_action_buttons: Calculated running/stopped: {time.time() - start_time:.3f}s")
         
         # Launch button enabled if any selected profiles are stopped
         self.launch_profile_btn.configure(state="normal" if selected_stopped else "disabled")
         
         # Stop button enabled if any selected profiles are running  
         self.stop_profile_btn.configure(state="normal" if selected_running else "disabled")
-        print(f"[DEBUG] _update_action_buttons: Configured launch/stop buttons: {time.time() - start_time:.3f}s")
         
         # Update status text
         if selected_count == 1:
-            print(f"[DEBUG] _update_action_buttons: Getting profile for status: {time.time() - start_time:.3f}s")
             profile = self.profile_manager.get_profile(next(iter(self.selected_profile_ids)))
             if profile:
                 self.status_label.configure(text=f"Selected: {profile.name}")
         else:
             self.status_label.configure(text=f"Selected: {selected_count} profiles")
-        
-        total_time = time.time() - start_time
-        print(f"[DEBUG] _update_action_buttons: Completed in {total_time:.3f}s")
     
     def _refresh_row_colors(self) -> None:
         """Refreshes alternating row colors after profile deletion or filtering."""
         try:
-            import time
-            start_time = time.time()
-            print(f"[DEBUG] _refresh_row_colors: Starting (OPTIMIZED)")
-            
             # OPTIMIZED: Use cached widget references instead of expensive winfo_children() calls
             visible_frames = []
-            
-            print(f"[DEBUG] _refresh_row_colors: Using cached widgets: {time.time() - start_time:.3f}s")
             
             # Get visible frames from our cached profile_widgets (much faster than GUI traversal)
             for profile_id, widgets in self.profile_widgets.items():
@@ -703,17 +641,11 @@ class MainWindow(ctk.CTk):
                     # Frame might be destroyed, skip it
                     continue
             
-            print(f"[DEBUG] _refresh_row_colors: Found {len(visible_frames)} visible frames: {time.time() - start_time:.3f}s")
-            
             # OPTIMIZED: Sort by row number (already extracted above)
             visible_frames.sort(key=lambda item: item[1])
-            print(f"[DEBUG] _refresh_row_colors: Sorted frames: {time.time() - start_time:.3f}s")
             
             # OPTIMIZED: Apply colors without additional system calls
             for i, (frame, _) in enumerate(visible_frames):
-                if i % 10 == 0 and i > 0:  # Log every 10th frame
-                    print(f"[DEBUG] _refresh_row_colors: Configured {i} frames: {time.time() - start_time:.3f}s")
-                    
                 # Row index starts at 1 (after header), so we use i+1 for proper alternation
                 row_index = i + 1
                 fg_color = ("gray75", "gray25") if row_index % 2 == 0 else ("gray85", "gray15")
@@ -726,9 +658,6 @@ class MainWindow(ctk.CTk):
                 except Exception:
                     # Frame might be destroyed, skip it
                     continue
-            
-            total_time = time.time() - start_time
-            print(f"[DEBUG] _refresh_row_colors: Completed in {total_time:.3f}s")
                 
         except Exception as e:
             self.logger.debug(f"Error refreshing row colors: {e}")
@@ -1004,14 +933,8 @@ class MainWindow(ctk.CTk):
     def _filter_profiles(self) -> None:
         """Efficiently filters profiles without recreating widgets."""
         try:
-            import time
-            start_time = time.time()
-            print(f"[DEBUG] _filter_profiles: Starting")
-            
             search_term = self.search_entry.get().lower().strip()
             visible_count = 0
-            
-            print(f"[DEBUG] _filter_profiles: Showing/hiding widgets: {time.time() - start_time:.3f}s")
             # Show/hide existing widgets based on search
             for profile_id, widgets in self.profile_widgets.items():
                 if not widgets or 'frame' not in widgets:
@@ -1027,23 +950,15 @@ class MainWindow(ctk.CTk):
                 else:
                     frame.grid_remove()  # Hide widget (keeps in memory)
             
-            print(f"[DEBUG] _filter_profiles: Updating label: {time.time() - start_time:.3f}s")
             # Update scrollable frame label
             if search_term:
                 self.profiles_scrollable.configure(label_text=f"Profiles ({visible_count} shown)")
             else:
                 self.profiles_scrollable.configure(label_text="Chromium Profiles")
             
-            print(f"[DEBUG] _filter_profiles: About to call _refresh_row_colors: {time.time() - start_time:.3f}s")
             # OPTIMIZED: Only refresh row colors if we actually filtered (not during initial load)
             if search_term:
-                print(f"[DEBUG] _filter_profiles: Calling _refresh_row_colors (search term present)")
                 self._refresh_row_colors()
-            else:
-                print(f"[DEBUG] _filter_profiles: Skipping _refresh_row_colors (no search term - initial load)")
-            
-            total_time = time.time() - start_time
-            print(f"[DEBUG] _filter_profiles: Completed in {total_time:.3f}s")
                 
         except Exception as e:
             self.logger.error(f"Error filtering profiles: {e}")

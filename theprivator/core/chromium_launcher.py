@@ -186,30 +186,15 @@ class ChromiumLauncher:
         
     def get_running_profiles(self) -> List[ChromiumProcess]:
         """Gets list of running profiles."""
-        import time
-        start_time = time.time()
-        print(f"[DEBUG] get_running_profiles: Starting with {len(self.running_processes)} tracked processes")
-        
         # Clean up inactive processes
         inactive_profiles = []
-        for i, (profile_id, process_info) in enumerate(self.running_processes.items()):
-            check_start = time.time()
-            print(f"[DEBUG] Checking process {i+1}/{len(self.running_processes)}: PID {process_info.pid}")
-            
+        for profile_id, process_info in self.running_processes.items():
             if not self._is_process_running(process_info.pid):
                 inactive_profiles.append(profile_id)
-                print(f"[DEBUG] Process {process_info.pid} is NOT running - will remove")
-            else:
-                print(f"[DEBUG] Process {process_info.pid} is running OK")
-            
-            check_time = time.time() - check_start
-            print(f"[DEBUG] Process check took {check_time:.3f}s")
                 
         for profile_id in inactive_profiles:
             del self.running_processes[profile_id]
             
-        total_time = time.time() - start_time
-        print(f"[DEBUG] get_running_profiles: Completed in {total_time:.3f}s, returning {len(self.running_processes)} active processes")
         return list(self.running_processes.values())
         
     def get_profile_process(self, profile_id: str) -> Optional[ChromiumProcess]:
@@ -257,26 +242,13 @@ class ChromiumLauncher:
             
     def cleanup_orphaned_processes(self) -> int:
         """Cleans up orphaned processes more efficiently."""
-        import time
-        start_time = time.time()
-        print(f"[DEBUG] cleanup_orphaned_processes: Starting with {len(self.running_processes)} tracked")
-        
         cleaned = 0
         to_remove = []
         
-        for i, (profile_id, process_info) in enumerate(self.running_processes.items()):
-            check_start = time.time()
-            print(f"[DEBUG] cleanup_orphaned_processes: Checking process {i+1}/{len(self.running_processes)}: PID {process_info.pid}")
-            
+        for profile_id, process_info in self.running_processes.items():
             if not self._is_process_running(process_info.pid):
                 to_remove.append(profile_id)
                 cleaned += 1
-                print(f"[DEBUG] cleanup_orphaned_processes: PID {process_info.pid} is orphaned - will remove")
-            else:
-                print(f"[DEBUG] cleanup_orphaned_processes: PID {process_info.pid} is still running")
-                
-            check_time = time.time() - check_start
-            print(f"[DEBUG] cleanup_orphaned_processes: Process check took {check_time:.3f}s")
         
         # Remove outside of iteration to avoid dict size change during iteration
         for profile_id in to_remove:
@@ -284,9 +256,6 @@ class ChromiumLauncher:
         
         if cleaned > 0:
             self.logger.info(f"Cleaned up {cleaned} orphaned processes")
-        
-        total_time = time.time() - start_time
-        print(f"[DEBUG] cleanup_orphaned_processes: Completed in {total_time:.3f}s, cleaned {cleaned}")
             
         return cleaned
         
@@ -414,55 +383,33 @@ class ChromiumLauncher:
         
     def _is_process_running(self, pid: int) -> bool:
         """Checks if process is running more efficiently."""
-        import time
-        start_time = time.time()
-        
         try:
-            print(f"[DEBUG] _is_process_running: Checking PID {pid}, HAS_PSUTIL={HAS_PSUTIL}")
-            
             if HAS_PSUTIL:
                 # Quick check if process exists
-                pid_check_start = time.time()
                 if not psutil.pid_exists(pid):
-                    print(f"[DEBUG] PID {pid} does not exist (psutil.pid_exists): {time.time() - start_time:.3f}s")
                     return False
-                print(f"[DEBUG] PID {pid} exists check took: {time.time() - pid_check_start:.3f}s")
-                
                 try:
-                    proc_start = time.time()
                     proc = psutil.Process(pid)
-                    status = proc.status()
-                    result = status != psutil.STATUS_ZOMBIE
-                    print(f"[DEBUG] PID {pid} status check ({status}) took: {time.time() - proc_start:.3f}s, result={result}")
-                    return result
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                    print(f"[DEBUG] PID {pid} psutil exception: {e}, took: {time.time() - start_time:.3f}s")
+                    # Check if it's actually running (not zombie)
+                    return proc.status() != psutil.STATUS_ZOMBIE
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     return False
             else:
                 # Fallback without psutil
                 if platform.system() == "Windows":
-                    print(f"[DEBUG] Windows fallback for PID {pid}")
-                    cmd_start = time.time()
                     result = subprocess.run(
                         ["tasklist", "/FI", f"PID eq {pid}"],
                         capture_output=True,
                         text=True,
                         timeout=1  # Add timeout to prevent hanging
                     )
-                    is_running = str(pid) in result.stdout
-                    print(f"[DEBUG] Windows tasklist for PID {pid} took: {time.time() - cmd_start:.3f}s, result={is_running}")
-                    return is_running
+                    return str(pid) in result.stdout
                 else:
-                    print(f"[DEBUG] Unix fallback for PID {pid}")
                     try:
-                        kill_start = time.time()
                         os.kill(pid, 0)  # More efficient than subprocess
-                        print(f"[DEBUG] Unix kill check for PID {pid} took: {time.time() - kill_start:.3f}s, result=True")
                         return True
-                    except OSError as e:
-                        print(f"[DEBUG] Unix kill check for PID {pid} failed: {e}, took: {time.time() - start_time:.3f}s")
+                    except OSError:
                         return False
         except Exception as e:
-            print(f"[DEBUG] _is_process_running: Exception for PID {pid}: {e}, took: {time.time() - start_time:.3f}s")
             self.logger.debug(f"Error checking process {pid}: {e}")
             return False
