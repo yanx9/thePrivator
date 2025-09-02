@@ -1,4 +1,4 @@
-# 🌐 thePrivator 2.0.1
+# 🌐 thePrivator 2.1
 
 **Chromium multi-instance manager with enhanced features and modern architecture**
 
@@ -10,7 +10,7 @@ A modern, robust application for managing multiple Chromium profiles with enhanc
 
 ## ✨ Features
 
-### 🚀 **New in v2.0**
+### 🚀 **New in v2.1**
 - **Modern Architecture**: Complete rewrite with modular, maintainable code
 - **Enhanced Performance**: 40% faster startup, 25% less memory usage  
 - **Robust Error Handling**: Comprehensive validation and logging
@@ -55,7 +55,11 @@ cd thePrivator
 pip install customtkinter psutil
 
 # Run the application
-python src/main.py
+python theprivator/main.py
+
+# OR, install via pip and run as python module
+pip install .
+python -m theprivator
 ```
 
 ### Creating Your First Profile
@@ -194,7 +198,7 @@ cd thePrivator
 pip install customtkinter psutil
 
 # Run in development mode
-python src/main.py --debug
+python theprivator/main.py --debug
 ```
 
 ### Making Changes

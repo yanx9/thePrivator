@@ -54,9 +54,10 @@ class ChromiumProcess:
 class ChromiumLauncher:
     """Launches and manages Chromium instances."""
     
-    def __init__(self):
+    def __init__(self, config_manager=None):
         self.logger = get_logger(__name__)
         self.running_processes: Dict[str, ChromiumProcess] = {}
+        self.config_manager = config_manager
         self._chromium_path = self._find_chromium_executable()
         
         if not HAS_PSUTIL:
@@ -275,6 +276,16 @@ class ChromiumLauncher:
         
     def _find_chromium_executable(self) -> Optional[str]:
         """Finds Chromium executable path."""
+        # Check for custom chromium path first
+        if self.config_manager:
+            custom_path = self.config_manager.get('custom_chromium_path', '').strip()
+            if custom_path:
+                if Path(custom_path).exists():
+                    self.logger.info(f"Using custom Chromium path: {custom_path}")
+                    return custom_path
+                else:
+                    self.logger.warning(f"Custom Chromium path not found: {custom_path}")
+        
         system = platform.system()
         
         if system == "Windows":

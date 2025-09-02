@@ -4,18 +4,86 @@ All notable changes to thePrivator will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.1.0] - 2025-08-27
+
+### Multi-select functionality and UI improvements
+
+This release introduces comprehensive multi-select functionality, streamlined import/export operations, and various UI improvements for better user experience.
+
+### ✨ Added
+- **Multi-select profiles**: Select multiple profiles at once for batch operations (launch, stop, delete)
+- **Batch operations**: Launch, stop, and delete multiple profiles simultaneously
+- **Configuration window**: Settings dialog for custom Chromium path and data directory
+- **Custom Chromium path**: Override default Chromium executable with custom path
+- **Custom data directory**: Override default ~/.thePrivator directory with custom location
+- **Profile integrity validation**: Checksum validation for export/import operations to ensure data integrity
+- **Smart export filenames**: Automatic filename generation based on profile names and timestamps
+- **Running profile warnings**: Alerts when trying to export profiles that are currently running
+
+### 🔄 Changed  
+- **Export workflow**: Now uses main window profile selection instead of separate dialog
+- **Import/Export logic**: Moved from main window to dedicated utility module (`utils/profile_io.py`)
+- **Export button behavior**: Only enabled when profiles are selected, works with multi-select
+- **Action buttons**: Smart enabling/disabling based on current profile states and selection count
+- **Edit functionality**: Restricted to single profile selection for better UX
+
+### 🛠️ Improved
+- **Code organization**: Moved import/export logic from main window to utils for better separation of concerns
+- **UI responsiveness**: Fixed alternating row colors after profile deletion and search operations
+- **Error handling**: Enhanced error messages and user feedback during import/export operations
+- **Performance**: Removed unused code artifacts and optimized profile row color management
+
+### 🐛 Fixed
+- **Row coloring**: Fixed alternating light/dark row colors after profile deletion
+- **Profile selection**: Proper selection state maintenance during profile list operations
+- **Button states**: Accurate enabling/disabling of action buttons based on profile states
+- **Memory cleanup**: Removed unused import/export classes and obsolete underline code
+
+### 🗑️ Removed
+- **Export dialog**: Removed separate export dialog window (`gui/export_dialog.py`)
+- **Unused utilities**: Removed obsolete `utils/import_export.py` file
+- **Dead code**: Cleaned up unused underline styling code
+- **Old artifacts**: Various unused code patterns and imports
+
+### 🔧 Technical Details
+- **New ProfileIOManager**: Centralized import/export operations with checksum validation
+- **Configuration system**: Extended AppConfig with custom path settings
+- **Manager integration**: ProfileManager and ChromiumLauncher now use custom directories/paths
+- **Enhanced file dialogs**: Better integration with main window for file operations  
+- **Improved selection logic**: Toggle-based multi-select with visual feedback
+- **Row color management**: Dynamic color adjustment for proper alternating display
+
+### 📊 User Experience
+- **One-click batch operations**: Select multiple profiles and perform actions with single clicks
+- **Visual feedback**: Clear indication of selected profiles with thin white borders
+- **Customizable setup**: Easy configuration of Chromium path and data directory through GUI
+- **Path validation**: Automatic validation of custom paths with helpful error messages
+- **Status updates**: Real-time status updates for batch operations
+- **Integrity assurance**: Export/import operations with data validation for peace of mind
+
+## [2.0.3]
+
+### Re-implementation of import/export mechanic
+
+### 🐛 Fixed
+- **Import/Export**: Completely redefined import/export with additional compression
+
 ## [2.0.2]
 
 ### UI optimization and sorting
 
 ### ✨ Added
-- **Sorting alphabetically**: the list is now being sorted alphabetically
+- **Note bubbles**: Access your notes seamlessly by hovering over the profile name
+- **Sorting alphabetically**: The list is now being sorted alphabetically
+- **Random User-Agent**: Downloads and sets the latest user agents on-demand
 
 ### 🔄 Changed
-- **User Interface**: the main UI was optimized
+- **User Interface**: The main UI was optimized
+- **Search Mechanic**: Filtering profile is faster than ever before, so is the initial list load
 
 ### 🐛 Fixed
-- **Status detection**: improved detection of current profile status
+- **Status detection**: Improved detection of current profile status
 
 ## [2.0.1]
 
@@ -24,12 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This update added support for importing profiles from the legacy version (1.0), and added several fixes and optimizations.
 
 ### ✨ Added
-- **Legacy import**: easily import your old profiles using the wizard
-- **Performance fixes**: numerous fixes for fast startup and quick actions
+- **Legacy import**: Easily import your old profiles using the wizard
+- **Performance fixes**: Numerous fixes for fast startup and quick actions
 
 ### 🗑️ Removed
 
-- **Profile statistics**: temporarily removed due to poor performance
+- **Profile statistics**: Temporarily removed due to poor performance
 
 ## [2.0.0]
 

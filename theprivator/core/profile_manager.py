@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import sys
+import shutil
 
 # Add src to path
 src_dir = Path(__file__).parent.parent.absolute()
@@ -59,9 +60,21 @@ class ChromiumProfile:
 class ProfileManager:
     """Manages Chromium profiles."""
     
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir: Optional[Path] = None, config_manager=None):
         self.logger = get_logger(__name__)
-        self.config_dir = config_dir or Path.home() / ".theprivator"
+        self.config_manager = config_manager
+        
+        # Use custom data directory if specified
+        if config_manager:
+            custom_dir = config_manager.get('custom_data_directory', '').strip()
+            if custom_dir:
+                self.config_dir = Path(custom_dir)
+                self.logger.info(f"Using custom data directory: {self.config_dir}")
+            else:
+                self.config_dir = config_dir or Path.home() / ".theprivator"
+        else:
+            self.config_dir = config_dir or Path.home() / ".theprivator"
+            
         self.config_dir.mkdir(exist_ok=True)
         self.profiles_file = self.config_dir / "profiles.json"
         self.profiles_dir = self.config_dir / "profiles"
@@ -257,6 +270,123 @@ class ProfileManager:
             'total_size': self._calculate_total_size()
         }
         
+    def export_profiles_bulk(self, profile_ids: List[str], export_path: Path) -> None:
+        """Exports multiple profiles with their data to a compressed archive."""
+        import zipfile
+        import tempfile
+        
+        try:
+            # Create temporary directory for staging
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Prepare export data
+                export_data = {
+                    'version': '2.0.2',
+                    'exported_at': datetime.now().isoformat(),
+                    'profiles': []
+                }
+                
+                # Export each profile
+                for profile_id in profile_ids:
+                    profile = self.get_profile(profile_id)
+                    if not profile:
+                        continue
+                        
+                    profile_data = profile.to_dict()
+                    export_data['profiles'].append(profile_data)
+                    
+                    # Copy user data if exists
+                    if profile.user_data_dir and Path(profile.user_data_dir).exists():
+                        profile_data_dir = temp_path / f"userdata_{profile_id}"
+                        shutil.copytree(
+                            Path(profile.user_data_dir), 
+                            profile_data_dir,
+                            ignore=shutil.ignore_patterns('*.log', '*.tmp', 'Crash Reports')
+                        )
+                
+                # Save metadata
+                metadata_file = temp_path / "profiles.json"
+                with open(metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, indent=2, ensure_ascii=False)
+                
+                # Create compressed archive with maximum compression
+                with zipfile.ZipFile(export_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+                    for file_path in temp_path.rglob('*'):
+                        if file_path.is_file():
+                            arcname = file_path.relative_to(temp_path)
+                            zipf.write(file_path, arcname)
+                            
+            self.logger.info(f"Exported {len(profile_ids)} profiles to: {export_path}")
+            
+        except Exception as e:
+            raise ProfileError(f"Error exporting profiles: {e}")
+
+    def import_profiles_bulk(self, import_path: Path) -> List[ChromiumProfile]:
+        """Imports multiple profiles from compressed archive."""
+        import zipfile
+        import tempfile
+        
+        try:
+            imported_profiles = []
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Extract archive
+                with zipfile.ZipFile(import_path, 'r') as zipf:
+                    zipf.extractall(temp_path)
+                
+                # Load metadata
+                metadata_file = temp_path / "profiles.json"
+                if not metadata_file.exists():
+                    raise ValidationError("Invalid import file: missing profiles.json")
+                    
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if 'profiles' not in data:
+                    raise ValidationError("Invalid import file format")
+                
+                # Import each profile
+                for profile_data in data['profiles']:
+                    old_id = profile_data['id']
+                    
+                    # Generate new ID to avoid conflicts
+                    profile_data['id'] = str(uuid.uuid4())
+                    
+                    # Check for name conflicts
+                    original_name = profile_data['name']
+                    counter = 1
+                    while self.get_profile_by_name(profile_data['name']):
+                        profile_data['name'] = f"{original_name} (imported {counter})"
+                        counter += 1
+                    
+                    # Create profile
+                    profile = ChromiumProfile.from_dict(profile_data)
+                    
+                    # Create data directory
+                    user_data_dir = self.profiles_dir / profile.id
+                    user_data_dir.mkdir(parents=True, exist_ok=True)
+                    profile.user_data_dir = str(user_data_dir)
+                    
+                    # Copy user data if exists
+                    old_data_dir = temp_path / f"userdata_{old_id}"
+                    if old_data_dir.exists():
+                        shutil.copytree(old_data_dir, user_data_dir, dirs_exist_ok=True)
+                        self.logger.info(f"Copied user data for profile: {profile.name}")
+                    
+                    self._profiles[profile.id] = profile
+                    imported_profiles.append(profile)
+                    
+                self._save_profiles()
+                self.logger.info(f"Imported {len(imported_profiles)} profiles")
+                
+            return imported_profiles
+            
+        except Exception as e:
+            raise ProfileError(f"Error importing profiles: {e}")
+
     def _calculate_total_size(self) -> int:
         """Calculates total size of profile directories."""
         total_size = 0
