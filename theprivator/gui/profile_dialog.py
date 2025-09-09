@@ -362,7 +362,8 @@ class ProfileDialog(ctk.CTkToplevel):
                     proxy=proxy,
                     notes=notes
                 )
-                self.result = self.profile
+                # Get the updated profile from the manager
+                self.result = self.profile_manager.get_profile(self.profile.id)
             else:
                 # Create new profile
                 self.result = self.profile_manager.create_profile(

@@ -89,6 +89,7 @@ Usage examples:
   python main.py                    # Run GUI
   python main.py --config-dir /path # Use custom config directory
   python main.py --version          # Show version
+  python main.py --api-port 8080    # Run API server on port 8080
         """
     )
     
@@ -110,6 +111,12 @@ Usage examples:
         help="Enable debug mode"
     )
     
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        help="Start API server on specified port instead of GUI"
+    )
+    
     return parser.parse_args()
 
 
@@ -121,8 +128,25 @@ def main() -> None:
     if args.debug:
         logging.getLogger('theprivator').setLevel(logging.DEBUG)
     
-    app = ThePrivatorApp(config_dir=args.config_dir)
-    app.run()
+    # Check if API server mode is requested
+    if args.api_port:
+        try:
+            from api_server import run_api_server
+            print(f"Starting thePrivator API server on port {args.api_port}")
+            print(f"API documentation available at: http://127.0.0.1:{args.api_port}/docs")
+            print("Press Ctrl+C to stop the server")
+            run_api_server(port=args.api_port, config_dir=args.config_dir)
+        except ImportError as e:
+            print(f"Error: API server dependencies not installed: {e}")
+            print("Install with: pip install fastapi uvicorn")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\nAPI server stopped.")
+            sys.exit(0)
+    else:
+        # Run GUI application
+        app = ThePrivatorApp(config_dir=args.config_dir)
+        app.run()
 
 
 if __name__ == "__main__":

@@ -393,6 +393,8 @@ class MainWindow(ctk.CTk):
         self.profile_widgets[profile.id] = {
             'frame': frame,
             'name_btn': name_btn,
+            'ua_label': ua_label,
+            'proxy_label': proxy_label,
             'status_label': status_label,
             'profile': profile
         }
@@ -473,7 +475,7 @@ class MainWindow(ctk.CTk):
         scrollable_frame.after(100, delayed_bind)
 
     def _refresh_status(self) -> None:
-        """Lightweight status refresh that updates in-place."""
+        """Refresh all profile data in-place every second."""
         try:
             self.logger.debug("Running status refresh cycle")
             
@@ -493,39 +495,45 @@ class MainWindow(ctk.CTk):
                 self.logger.info("Profile list changed, reloading")
                 self._load_profiles()
             else:
-                # Just update statuses in-place
-                changes = 0
+                # Update ALL profiles in-place every refresh
                 for profile_id, widgets in self.profile_widgets.items():
                     if not widgets:
                         continue
                         
+                    # Get current profile data
+                    current_profile = self.profile_manager.get_profile(profile_id)
+                    if not current_profile:
+                        continue
+                        
                     is_running_now = profile_id in current_running
-                    was_running = self.last_known_states.get(profile_id, False)
+                    self.last_known_states[profile_id] = is_running_now
+                    widgets['profile'] = current_profile  # Update stored profile reference
                     
-                    if is_running_now != was_running:
-                        changes += 1
-                        self.last_known_states[profile_id] = is_running_now
-                        profile = widgets['profile']
+                    # Update all UI elements every refresh
+                    try:
+                        if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
+                            widgets['name_btn'].configure(
+                                text=f"{'🟢' if is_running_now else '⚫'} {current_profile.name}",
+                                font=ctk.CTkFont(size=12, weight="bold")
+                            )
                         
-                        # Update only the changed elements
-                        try:
-                            if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
-                                widgets['name_btn'].configure(
-                                    text=f"{'🟢' if is_running_now else '⚫'} {profile.name}",
-                                    font=ctk.CTkFont(size=12, weight="bold")
-                                )
-                            if 'status_label' in widgets and widgets['status_label'].winfo_exists():
-                                widgets['status_label'].configure(
-                                    text="🟢 Running" if is_running_now else "⚫ Stopped"
-                                )
-                        except Exception as e:
-                            self.logger.debug(f"Widget update error (likely destroyed): {e}")
+                        if 'ua_label' in widgets and widgets['ua_label'].winfo_exists():
+                            ua_text = current_profile.user_agent[:45] + "..." if len(current_profile.user_agent) > 45 else current_profile.user_agent
+                            widgets['ua_label'].configure(text=ua_text)
                         
-                        self.logger.debug(f"Profile '{profile.name}' status changed")
+                        if 'proxy_label' in widgets and widgets['proxy_label'].winfo_exists():
+                            proxy_text = current_profile.proxy[:30] + "..." if current_profile.proxy and len(current_profile.proxy) > 30 else (current_profile.proxy or "None")
+                            widgets['proxy_label'].configure(text=proxy_text)
+                        
+                        if 'status_label' in widgets and widgets['status_label'].winfo_exists():
+                            widgets['status_label'].configure(
+                                text="🟢 Running" if is_running_now else "⚫ Stopped"
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"Widget update error (likely destroyed): {e}")
                 
-                if changes > 0:
-                    self._update_stats()
-                    self.logger.info(f"Status refresh: {changes} profile(s) changed")
+                # Always update stats
+                self._update_stats()
             
             # Update selected profile buttons if needed
             if self.selected_profile_ids:
@@ -667,10 +675,9 @@ class MainWindow(ctk.CTk):
         try:
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
             if dialog.result:
-                # Don't reload everything - let refresh pick it up
+                # Trigger immediate refresh (new profile will trigger full reload)
+                self._refresh_status()
                 self.status_label.configure(text="Created profile")
-                # Force immediate refresh
-                self.after(100, self._refresh_status)
         except Exception as e:
             self.logger.error(f"Error creating profile: {e}")
             import tkinter.messagebox as msgbox
@@ -685,7 +692,8 @@ class MainWindow(ctk.CTk):
                 try:
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
                     if dialog.result:
-                        self._load_profiles()
+                        # Trigger immediate refresh
+                        self._refresh_status()
                         self.status_label.configure(text="Updated profile")
                 except Exception as e:
                     self.logger.error(f"Error editing profile: {e}")
