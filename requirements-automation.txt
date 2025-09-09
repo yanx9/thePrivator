@@ -1,0 +1,15 @@
+# Optional automation framework dependencies for thePrivator
+# Install these if you want to use browser automation features
+
+# Selenium WebDriver
+selenium>=4.0.0
+
+# Playwright (modern automation framework)
+playwright>=1.40.0
+
+# Pyppeteer (Python port of Puppeteer)
+pyppeteer>=1.0.0
+
+# Additional useful packages for automation
+beautifulsoup4>=4.12.0  # For HTML parsing
+requests>=2.31.0        # For HTTP requests (already included in main requirements)

@@ -54,7 +54,7 @@ Once the server is running, you can access:
 
 ### Profile Launching
 
-- `POST /profiles/{id}/launch` - Launch profile
+- `POST /profiles/{id}/launch` - Launch profile (now supports automation frameworks)
 - `POST /profiles/{id}/terminate` - Terminate profile process
 - `GET /profiles/{id}/process` - Get profile process info
 - `GET /profiles/{id}/process/stats` - Get detailed process statistics
@@ -75,7 +75,324 @@ Once the server is running, you can access:
 - `GET /config` - Get configuration
 - `PUT /config` - Update configuration
 
+### 🤖 Automation Endpoints (NEW!)
+
+- `GET /automation/frameworks` - List available automation frameworks
+- `GET /automation/frameworks/{framework}` - Get framework information
+- `POST /profiles/{id}/automation/connection` - Get connection info for automation
+- `GET /profiles/{id}/automation/{framework}/example` - Get example code for framework
+
+## 🤖 Browser Automation Integration
+
+thePrivator now supports seamless integration with popular browser automation frameworks:
+
+- **Selenium WebDriver** - Industry standard with broad language support
+- **Playwright** - Modern, fast, and reliable automation
+- **Puppeteer (pyppeteer)** - Lightweight Chrome automation
+
+### Prerequisites for Automation
+
+```bash
+# Install optional automation dependencies
+pip install selenium          # For Selenium WebDriver
+pip install playwright         # For Playwright
+playwright install chromium   # Install Playwright browsers
+pip install pyppeteer         # For Puppeteer/pyppeteer
+```
+
+### Quick Start: Automation with thePrivator
+
+1. **Start API server**:
+```bash
+python -m theprivator --api-port 8080
+```
+
+2. **Launch profile with automation support**:
+```python
+import requests
+
+# Launch profile with Selenium support
+response = requests.post("http://127.0.0.1:8080/profiles/{profile_id}/launch", json={
+    "headless": False,
+    "automation_framework": "selenium",
+    "debug_port": 9222
+})
+```
+
+3. **Connect with your automation framework** (see examples below)
+
 ## 📝 Usage Examples
+
+### 🤖 Automation Examples
+
+#### Selenium WebDriver Example
+
+```python
+import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
+
+class ThePrivatorSelenium:
+    def __init__(self, api_url="http://127.0.0.1:8080"):
+        self.api_url = api_url
+
+    def launch_profile_for_selenium(self, profile_id, debug_port=9222):
+        """Launch profile with Selenium automation support."""
+        response = requests.post(f"{self.api_url}/profiles/{profile_id}/launch", json={
+            "headless": False,
+            "automation_framework": "selenium", 
+            "debug_port": debug_port
+        })
+        response.raise_for_status()
+        return response.json()
+
+    def connect_selenium(self, debug_port=9222):
+        """Connect Selenium to the running profile."""
+        options = Options()
+        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        
+        driver = webdriver.Chrome(options=options)
+        return driver
+
+    def automate_example(self, profile_id):
+        """Complete automation example."""
+        # Launch profile
+        process = self.launch_profile_for_selenium(profile_id)
+        print(f"Launched profile, PID: {process['pid']}")
+        
+        time.sleep(3)  # Wait for browser to start
+        
+        # Connect Selenium
+        driver = self.connect_selenium()
+        
+        try:
+            # Navigate and interact
+            driver.get("https://httpbin.org/user-agent")
+            print(f"Page title: {driver.title}")
+            
+            # Take screenshot
+            driver.save_screenshot("selenium_automation.png")
+            print("Screenshot saved!")
+            
+            # Example form interaction
+            driver.get("https://example.com")
+            h1_element = driver.find_element(By.TAG_NAME, "h1")
+            print(f"H1 text: {h1_element.text}")
+            
+        finally:
+            # Don't quit() - just disconnect
+            print("Automation completed")
+
+# Usage
+automator = ThePrivatorSelenium()
+# automator.automate_example("your-profile-id-here")
+```
+
+#### Playwright Example
+
+```python
+import requests
+import asyncio
+from playwright.async_api import async_playwright
+
+class ThePrivatorPlaywright:
+    def __init__(self, api_url="http://127.0.0.1:8080"):
+        self.api_url = api_url
+
+    def launch_profile_for_playwright(self, profile_id, debug_port=9222):
+        """Launch profile with Playwright automation support."""
+        response = requests.post(f"{self.api_url}/profiles/{profile_id}/launch", json={
+            "headless": False,
+            "automation_framework": "playwright",
+            "debug_port": debug_port
+        })
+        response.raise_for_status()
+        return response.json()
+
+    async def connect_playwright(self, debug_port=9222):
+        """Connect Playwright to the running profile."""
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+        return playwright, browser
+
+    async def automate_example(self, profile_id):
+        """Complete Playwright automation example."""
+        # Launch profile
+        process = self.launch_profile_for_playwright(profile_id)
+        print(f"Launched profile, PID: {process['pid']}")
+        
+        await asyncio.sleep(3)  # Wait for browser to start
+        
+        playwright, browser = await self.connect_playwright()
+        
+        try:
+            # Get or create context and page
+            contexts = browser.contexts
+            if contexts:
+                context = contexts[0]
+                pages = context.pages
+                page = pages[0] if pages else await context.new_page()
+            else:
+                context = await browser.new_context()
+                page = await context.new_page()
+            
+            # Navigate and interact
+            await page.goto("https://httpbin.org/user-agent")
+            await page.wait_for_load_state("networkidle")
+            
+            title = await page.title()
+            print(f"Page title: {title}")
+            
+            # Take screenshot
+            await page.screenshot(path="playwright_automation.png")
+            print("Screenshot saved!")
+            
+            # Example interactions
+            await page.goto("https://example.com")
+            h1_text = await page.locator("h1").first.text_content()
+            print(f"H1 text: {h1_text}")
+            
+        finally:
+            await playwright.stop()
+            print("Automation completed")
+
+# Usage
+async def run_playwright_example():
+    automator = ThePrivatorPlaywright()
+    # await automator.automate_example("your-profile-id-here")
+
+# asyncio.run(run_playwright_example())
+```
+
+#### Puppeteer (pyppeteer) Example
+
+```python
+import requests
+import asyncio
+import pyppeteer
+
+class ThePrivatorPuppeteer:
+    def __init__(self, api_url="http://127.0.0.1:8080"):
+        self.api_url = api_url
+
+    def launch_profile_for_puppeteer(self, profile_id, debug_port=9222):
+        """Launch profile with Puppeteer automation support."""
+        response = requests.post(f"{self.api_url}/profiles/{profile_id}/launch", json={
+            "headless": False,
+            "automation_framework": "puppeteer",
+            "debug_port": debug_port
+        })
+        response.raise_for_status()
+        return response.json()
+
+    async def connect_puppeteer(self, debug_port=9222):
+        """Connect pyppeteer to the running profile."""
+        browser = await pyppeteer.connect({
+            'browserURL': f'http://127.0.0.1:{debug_port}',
+            'ignoreHTTPSErrors': True
+        })
+        return browser
+
+    async def automate_example(self, profile_id):
+        """Complete pyppeteer automation example."""
+        # Launch profile
+        process = self.launch_profile_for_puppeteer(profile_id)
+        print(f"Launched profile, PID: {process['pid']}")
+        
+        await asyncio.sleep(3)  # Wait for browser to start
+        
+        browser = await self.connect_puppeteer()
+        
+        try:
+            # Get existing pages or create new one
+            pages = await browser.pages()
+            if pages:
+                page = pages[0]
+            else:
+                page = await browser.newPage()
+            
+            # Configure page
+            await page.setViewport({'width': 1366, 'height': 768})
+            
+            # Navigate and interact
+            await page.goto("https://httpbin.org/user-agent", {'waitUntil': 'networkidle2'})
+            
+            title = await page.title()
+            print(f"Page title: {title}")
+            
+            # Take screenshot
+            await page.screenshot({'path': 'puppeteer_automation.png'})
+            print("Screenshot saved!")
+            
+            # Example interactions
+            await page.goto("https://example.com")
+            h1_element = await page.querySelector('h1')
+            if h1_element:
+                h1_text = await page.evaluate('(element) => element.textContent', h1_element)
+                print(f"H1 text: {h1_text}")
+                
+        finally:
+            await browser.disconnect()
+            print("Automation completed")
+
+# Usage
+async def run_puppeteer_example():
+    automator = ThePrivatorPuppeteer()
+    # await automator.automate_example("your-profile-id-here")
+
+# asyncio.run(run_puppeteer_example())
+```
+
+### Advanced Automation Features
+
+#### Get Automation Connection Info
+
+```python
+import requests
+
+# Get connection information for a specific framework
+response = requests.post("http://127.0.0.1:8080/profiles/{profile_id}/automation/connection", json={
+    "framework": "selenium",
+    "debug_port": 9222
+})
+
+connection_info = response.json()
+print(f"Debug URL: {connection_info['debugging_url']}")
+print(f"Connection method: {connection_info['connection_method']}")
+```
+
+#### Get Framework-Specific Example Code
+
+```python
+import requests
+
+# Get example code for any framework
+response = requests.get("http://127.0.0.1:8080/profiles/{profile_id}/automation/selenium/example?debug_port=9222")
+example = response.json()
+
+print(f"Framework: {example['framework']}")
+print(f"Example code:\n{example['example_code']}")
+```
+
+#### Check Available Frameworks
+
+```python
+import requests
+
+# Check which automation frameworks are available
+response = requests.get("http://127.0.0.1:8080/automation/frameworks")
+data = response.json()
+
+print("Available frameworks:", data['available_frameworks'])
+for framework, info in data['framework_info'].items():
+    print(f"{framework}: {'✅ Available' if info['available'] else '❌ Not installed'}")
+    if not info['available']:
+        print(f"  Install with: {info['installation_command']}")
+```
 
 ### Python Client Example
 
@@ -191,14 +508,17 @@ createAndLaunchProfile();
 
 ## 🧪 Testing the API
 
-A test script is included to verify API functionality:
+Test scripts are included in the `tests/` directory to verify API functionality:
 
 ```bash
 # Make sure the API server is running first
 python -m theprivator --api-port 8080
 
 # In another terminal, run the tests
-python api_test.py
+python tests/api_test.py
+
+# Test automation integration
+python tests/automation_examples.py
 ```
 
 ## 🛡️ Security Notes

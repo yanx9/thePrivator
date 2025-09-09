@@ -92,6 +92,37 @@ class ThePrivatorAPIClient:
         response = requests.get(f"{self.base_url}/processes")
         response.raise_for_status()
         return response.json()
+    
+    def get_available_frameworks(self) -> dict:
+        """Get available automation frameworks."""
+        response = requests.get(f"{self.base_url}/automation/frameworks")
+        response.raise_for_status()
+        return response.json()
+    
+    def get_automation_connection_info(self, profile_id: str, framework: str, debug_port: int = 9222) -> dict:
+        """Get automation connection info."""
+        data = {"framework": framework, "debug_port": debug_port}
+        response = requests.post(f"{self.base_url}/profiles/{profile_id}/automation/connection", json=data)
+        response.raise_for_status()
+        return response.json()
+    
+    def get_automation_example(self, profile_id: str, framework: str, debug_port: int = 9222) -> dict:
+        """Get automation example code."""
+        response = requests.get(f"{self.base_url}/profiles/{profile_id}/automation/{framework}/example?debug_port={debug_port}")
+        response.raise_for_status()
+        return response.json()
+    
+    def launch_profile_with_automation(self, profile_id: str, framework: str, debug_port: int = 9222, headless: bool = True) -> dict:
+        """Launch profile with automation support."""
+        data = {
+            "headless": headless,
+            "automation_framework": framework,
+            "debug_port": debug_port,
+            "additional_args": []
+        }
+        response = requests.post(f"{self.base_url}/profiles/{profile_id}/launch", json=data)
+        response.raise_for_status()
+        return response.json()
 
 
 def run_api_tests():
@@ -185,8 +216,57 @@ def run_api_tests():
         print(f"❌ Failed to launch profile: {e}")
         print("This might be expected if Chromium is not installed or accessible")
     
-    # Test 9: Delete test profile
-    print("\n9. Cleaning up test profile...")
+    # Test 9: Automation frameworks
+    print("\n9. Testing automation frameworks...")
+    try:
+        frameworks_info = client.get_available_frameworks()
+        available_frameworks = frameworks_info.get('available_frameworks', [])
+        framework_info = frameworks_info.get('framework_info', {})
+        
+        print(f"✅ Available frameworks: {available_frameworks}")
+        for fw, info in framework_info.items():
+            status = "✅ Available" if info.get('available') else "❌ Not installed"
+            print(f"   {fw}: {status}")
+            if not info.get('available'):
+                print(f"     Install: {info.get('installation_command', 'N/A')}")
+        
+        # Test automation connection info for first available framework
+        if available_frameworks:
+            framework = available_frameworks[0]
+            conn_info = client.get_automation_connection_info(test_profile['id'], framework)
+            print(f"✅ {framework} connection info: {conn_info.get('connection_method')}")
+            
+            # Test example code generation
+            example = client.get_automation_example(test_profile['id'], framework)
+            print(f"✅ Generated {len(example['example_code'])} characters of {framework} example code")
+        
+    except Exception as e:
+        print(f"❌ Automation framework test failed: {e}")
+    
+    # Test 10: Launch with automation support
+    if available_frameworks:
+        framework = available_frameworks[0]
+        print(f"\n10. Testing {framework} automation launch...")
+        try:
+            # Launch profile with automation support
+            process = client.launch_profile_with_automation(
+                test_profile['id'], 
+                framework, 
+                debug_port=9223,  # Use different port to avoid conflicts
+                headless=True
+            )
+            print(f"✅ Launched profile with {framework} support, PID: {process['pid']}")
+            
+            # Wait a bit then terminate
+            time.sleep(2)
+            if client.terminate_profile(test_profile['id']):
+                print(f"✅ Profile terminated successfully")
+            
+        except Exception as e:
+            print(f"❌ Automation launch test failed: {e}")
+    
+    # Test 11: Delete test profile
+    print("\n11. Cleaning up test profile...")
     try:
         if client.delete_profile(test_profile['id']):
             print("✅ Test profile deleted successfully")
@@ -197,6 +277,7 @@ def run_api_tests():
     
     print("\n🎉 API tests completed!")
     print("\n📚 API Documentation available at: http://127.0.0.1:8080/docs")
+    print("🤖 For automation examples, run: python automation_examples.py")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ if str(src_dir) not in sys.path:
 from core.profile_manager import ProfileManager, ChromiumProfile
 from core.chromium_launcher import ChromiumLauncher
 from core.config_manager import ConfigManager
+from automation.automation_manager import AutomationManager, AutomationConfig, AutomationError
 from utils.logger import get_logger, setup_logger
 from utils.exceptions import ProfileError, LaunchError, ValidationError
 
@@ -48,6 +49,8 @@ class ProfileLaunchRequest(BaseModel):
     headless: bool = Field(False, description="Launch in headless mode")
     incognito: bool = Field(False, description="Launch in incognito mode")
     additional_args: List[str] = Field([], description="Additional Chromium arguments")
+    debug_port: Optional[int] = Field(None, description="Debug port for automation frameworks")
+    automation_framework: Optional[str] = Field(None, description="Automation framework (selenium, playwright, puppeteer)")
 
 
 class ProfileResponse(BaseModel):
@@ -84,6 +87,27 @@ class ErrorResponse(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+class AutomationConnectionRequest(BaseModel):
+    debug_port: Optional[int] = Field(None, description="Debug port for connection")
+    framework: str = Field(..., description="Automation framework (selenium, playwright, puppeteer)")
+
+
+class AutomationConnectionResponse(BaseModel):
+    framework: str
+    debug_port: int
+    debugging_url: str
+    user_data_dir: Optional[str]
+    connection_method: str
+    notes: str
+
+
+class AutomationFrameworkInfo(BaseModel):
+    available: bool
+    description: str
+    installation_command: str
+    error: Optional[str] = None
+
+
 class APIServer:
     """thePrivator REST API Server."""
     
@@ -99,6 +123,7 @@ class APIServer:
         self.config_manager = ConfigManager(config_dir=self.config_dir)
         self.profile_manager = ProfileManager(config_dir=self.config_dir, config_manager=self.config_manager)
         self.launcher = ChromiumLauncher(config_manager=self.config_manager)
+        self.automation_manager = AutomationManager()
         
         # Create FastAPI app
         self.app = self._create_app()
@@ -142,6 +167,13 @@ class APIServer:
             return JSONResponse(
                 status_code=422,
                 content=ErrorResponse(error="ValidationError", detail=str(exc)).dict()
+            )
+        
+        @app.exception_handler(AutomationError)
+        async def automation_error_handler(request, exc):
+            return JSONResponse(
+                status_code=400,
+                content=ErrorResponse(error="AutomationError", detail=str(exc)).dict()
             )
         
         # Routes
@@ -245,9 +277,21 @@ class APIServer:
             if not profile:
                 raise HTTPException(status_code=404, detail="Profile not found")
             
+            additional_args = request.additional_args.copy()
+            
+            # Add automation framework specific arguments if requested
+            if request.automation_framework:
+                try:
+                    automation_args = self.automation_manager.get_automation_launch_args(
+                        profile, request.automation_framework, request.debug_port
+                    )
+                    additional_args.extend(automation_args)
+                except AutomationError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+            
             process = self.launcher.launch_profile(
                 profile=profile,
-                additional_args=request.additional_args,
+                additional_args=additional_args,
                 headless=request.headless,
                 incognito=request.incognito
             )
@@ -388,6 +432,66 @@ class APIServer:
                     self.config_manager.set(key, value)
             
             return {"status": "success", "message": "Configuration updated"}
+        
+        # Automation endpoints
+        @app.get("/automation/frameworks", tags=["Automation"])
+        async def list_automation_frameworks():
+            """List available automation frameworks."""
+            return {
+                "available_frameworks": self.automation_manager.get_available_frameworks(),
+                "framework_info": self.automation_manager.get_framework_info()
+            }
+        
+        @app.get("/automation/frameworks/{framework}", tags=["Automation"])
+        async def get_framework_info(framework: str):
+            """Get information about a specific automation framework."""
+            if framework not in ['selenium', 'playwright', 'puppeteer']:
+                raise HTTPException(status_code=400, detail="Invalid framework")
+            
+            framework_info = self.automation_manager.get_framework_info()
+            if framework not in framework_info:
+                raise HTTPException(status_code=404, detail="Framework not found")
+            
+            return framework_info[framework]
+        
+        @app.post("/profiles/{profile_id}/automation/connection", response_model=AutomationConnectionResponse, tags=["Automation"])
+        async def get_automation_connection_info(profile_id: str, request: AutomationConnectionRequest):
+            """Get connection information for automation framework."""
+            profile = self.profile_manager.get_profile(profile_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail="Profile not found")
+            
+            try:
+                connection_info = self.automation_manager.get_connection_info(
+                    profile, request.framework, request.debug_port
+                )
+                return AutomationConnectionResponse(**connection_info)
+            except AutomationError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        
+        @app.get("/profiles/{profile_id}/automation/{framework}/example", tags=["Automation"])
+        async def get_automation_example_code(profile_id: str, framework: str, debug_port: Optional[int] = Query(None)):
+            """Get example code for using automation framework with profile."""
+            profile = self.profile_manager.get_profile(profile_id)
+            if not profile:
+                raise HTTPException(status_code=404, detail="Profile not found")
+            
+            if framework not in ['selenium', 'playwright', 'puppeteer']:
+                raise HTTPException(status_code=400, detail="Invalid framework")
+            
+            try:
+                example_code = self.automation_manager.get_example_code(
+                    framework, profile, debug_port
+                )
+                return {
+                    "framework": framework,
+                    "profile_id": profile_id,
+                    "profile_name": profile.name,
+                    "debug_port": debug_port or 9222,
+                    "example_code": example_code
+                }
+            except AutomationError as e:
+                raise HTTPException(status_code=400, detail=str(e))
     
     async def start_server(self):
         """Start the API server."""

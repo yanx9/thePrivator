@@ -106,3 +106,11 @@ docs/site/
 # IPython
 profile_default/
 ipython_config.py
+
+# Test artifacts
+*_test.png
+*_automation.png
+selenium_test.png
+playwright_test.png
+puppeteer_test.png
+*_screenshot.png
