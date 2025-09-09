@@ -9,7 +9,7 @@ A comprehensive REST API for programmatic interaction with thePrivator - Chromiu
 Install the required dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -r theprivator/requirements.txt
 ```
 
 ### Starting the API Server
@@ -515,10 +515,10 @@ Test scripts are included in the `tests/` directory to verify API functionality:
 python -m theprivator --api-port 8080
 
 # In another terminal, run the tests
-python tests/api_test.py
+python -m theprivator.tests.api_test
 
 # Test automation integration
-python tests/automation_examples.py
+python -m theprivator.tests.automation_examples
 ```
 
 ## 🛡️ Security Notes
