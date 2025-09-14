@@ -44,15 +44,12 @@ class MainWindow(ctk.CTk):
         self.profile_widgets = {}  # profile_id -> widget references
         self.last_known_states = {}  # Last known running states
         self.tooltips = {}  # Store tooltip references
-        self.refresh_interval = 1000  
+        # Track watchers for external profile termination
+        self._termination_watchers: Dict[str, threading.Thread] = {}
         
         self._setup_window()
         self._create_widgets()
-        self._load_profiles()
-        
-        # Start lightweight refresh
-        self.logger.info(f"Starting auto-refresh with {self.refresh_interval}ms interval")
-        self._refresh_status()
+        self._load_profiles()  # Initial refresh on open
         
         # Handle window closing
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -542,8 +539,7 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             self.logger.error(f"Error in refresh cycle: {e}")
             
-        # Schedule next refresh
-        self.after(self.refresh_interval, self._refresh_status)
+        # Removed periodic scheduling; refresh is now event-driven
             
     def _update_stats(self) -> None:
         """Updates statistics."""
@@ -670,13 +666,117 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             self.logger.debug(f"Error refreshing row colors: {e}")
             
+    def _update_profile_row_widgets(self, profile_id: str, profile: ChromiumProfile) -> None:
+        """Updates an existing row's widgets in-place (no re-creation)."""
+        widgets = self.profile_widgets.get(profile_id)
+        if not widgets:
+            return
+        # Update cached profile reference
+        widgets['profile'] = profile
+        # Determine running state
+        is_running_now = self.chromium_launcher.is_profile_running(profile_id)
+        self.last_known_states[profile_id] = is_running_now
+        try:
+            if 'name_btn' in widgets and widgets['name_btn'].winfo_exists():
+                widgets['name_btn'].configure(
+                    text=f"{'Ы��' if is_running_now else '��'} {profile.name}",
+                    font=ctk.CTkFont(size=12, weight="bold")
+                )
+            if 'ua_label' in widgets and widgets['ua_label'].winfo_exists():
+                ua_text = profile.user_agent[:45] + "..." if len(profile.user_agent) > 45 else profile.user_agent
+                widgets['ua_label'].configure(text=ua_text)
+            if 'proxy_label' in widgets and widgets['proxy_label'].winfo_exists():
+                proxy_text = profile.proxy[:30] + "..." if profile.proxy and len(profile.proxy) > 30 else (profile.proxy or "None")
+                widgets['proxy_label'].configure(text=proxy_text)
+            if 'status_label' in widgets and widgets['status_label'].winfo_exists():
+                widgets['status_label'].configure(text=("Ы�� Running" if is_running_now else "�� Stopped"))
+        except Exception as e:
+            self.logger.debug(f"Widget update error for {profile_id}: {e}")
+
+    def _start_termination_watcher(self, profile_id: str) -> None:
+        """Starts a background watcher that detects external browser closing."""
+        try:
+            # Avoid duplicate watchers
+            existing = self._termination_watchers.get(profile_id)
+            if existing and existing.is_alive():
+                return
+
+            proc = self.chromium_launcher.get_profile_process(profile_id)
+            if not proc:
+                return
+
+            def _watch():
+                try:
+                    try:
+                        import psutil  # type: ignore
+                        ps = psutil.Process(proc.pid)
+                        ps.wait()  # block until process exits
+                    except Exception:
+                        # Fallback: light polling only for this PID
+                        while self.chromium_launcher.is_profile_running(profile_id):
+                            time.sleep(1.0)
+                except Exception:
+                    pass
+                # Notify UI thread
+                try:
+                    self.after(0, lambda: self._on_profile_terminated_external(profile_id))
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_watch, daemon=True)
+            self._termination_watchers[profile_id] = t
+            t.start()
+        except Exception as e:
+            self.logger.debug(f"Watcher start error for {profile_id}: {e}")
+
+    def _on_profile_terminated_external(self, profile_id: str) -> None:
+        """Updates UI when a running profile is closed outside the app."""
+        profile = self.profile_manager.get_profile(profile_id)
+        if not profile:
+            return
+        # Mark inactive in storage/state
+        try:
+            self.profile_manager.set_active_status(profile_id, False)
+        except Exception:
+            pass
+        self.last_known_states[profile_id] = False
+
+        # Update UI widgets if present
+        widgets = self.profile_widgets.get(profile_id)
+        if widgets:
+            try:
+                if 'name_btn' in widgets:
+                    widgets['name_btn'].configure(text=f"�� {profile.name}")
+                if 'status_label' in widgets:
+                    widgets['status_label'].configure(text="�� Stopped")
+            except Exception:
+                pass
+
+        # Update controls and stats
+        self._update_stats()
+        self._refresh_row_colors()
+        if profile_id in self.selected_profile_ids:
+            self._update_action_buttons()
+
     def _create_new_profile(self) -> None:
         """Creates new profile."""
         try:
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
             if dialog.result:
-                # Trigger immediate refresh (new profile will trigger full reload)
-                self._refresh_status()
+                new_profile: ChromiumProfile = dialog.result
+                # Append a new row without rebuilding entire list
+                is_running = self.chromium_launcher.is_profile_running(new_profile.id)
+                existing_rows = [
+                    (w['frame'].grid_info().get('row', 0) if ('frame' in w and w['frame']) else 0)
+                    for w in self.profile_widgets.values()
+                ]
+                next_row = (max(existing_rows) if existing_rows else 0) + 1
+                self._create_profile_row(next_row, new_profile, is_running)
+                self.last_known_states[new_profile.id] = is_running
+                # Apply current search filter and visuals
+                self._filter_profiles()
+                self._refresh_row_colors()
+                self._update_stats()
                 self.status_label.configure(text="Created profile")
         except Exception as e:
             self.logger.error(f"Error creating profile: {e}")
@@ -692,8 +792,10 @@ class MainWindow(ctk.CTk):
                 try:
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
                     if dialog.result:
-                        # Trigger immediate refresh
-                        self._refresh_status()
+                        updated: ChromiumProfile = dialog.result
+                        self._update_profile_row_widgets(profile_id, updated)
+                        self._refresh_row_colors()
+                        self._update_stats()
                         self.status_label.configure(text="Updated profile")
                 except Exception as e:
                     self.logger.error(f"Error editing profile: {e}")
@@ -989,6 +1091,8 @@ class MainWindow(ctk.CTk):
         
         self._update_stats()
         self.status_label.configure(text=f"Launched: {profile.name}")
+        # Watch for external window/process closing and reflect in UI
+        self._start_termination_watcher(profile.id)
         
     def _on_launch_error(self, error: str) -> None:
         """Callback on launch error."""
