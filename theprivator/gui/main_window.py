@@ -50,6 +50,8 @@ class MainWindow(ctk.CTk):
         self._setup_window()
         self._create_widgets()
         self._load_profiles()  # Initial refresh on open
+        # Start termination watchers for any profiles already running
+        self._start_watchers_for_running_profiles()
         
         # Handle window closing
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -623,46 +625,36 @@ class MainWindow(ctk.CTk):
             self.status_label.configure(text=f"Selected: {selected_count} profiles")
     
     def _refresh_row_colors(self) -> None:
-        """Refreshes alternating row colors after profile deletion or filtering."""
+        """Refresh alternating row colors for currently visible rows only."""
         try:
-            # OPTIMIZED: Use cached widget references instead of expensive winfo_children() calls
             visible_frames = []
-            
-            # Get visible frames from our cached profile_widgets (much faster than GUI traversal)
-            for profile_id, widgets in self.profile_widgets.items():
-                if not widgets or 'frame' not in widgets:
+            for _, widgets in self.profile_widgets.items():
+                frame = widgets.get('frame') if widgets else None
+                if not frame:
                     continue
-                    
-                frame = widgets['frame']
-                
-                # OPTIMIZED: Check if frame is visible using grid_info() only once
                 try:
-                    grid_info = frame.grid_info()
-                    if grid_info:  # Non-empty dict means it's gridded (visible)
-                        # Store both frame and its row for sorting
-                        visible_frames.append((frame, grid_info.get('row', 0)))
+                    # Only include frames that are currently mapped (visible)
+                    if hasattr(frame, 'winfo_ismapped') and frame.winfo_ismapped():
+                        row_no = 0
+                        try:
+                            row_no = frame.grid_info().get('row', 0)
+                        except Exception:
+                            row_no = 0
+                        visible_frames.append((frame, row_no))
                 except Exception:
-                    # Frame might be destroyed, skip it
                     continue
-            
-            # OPTIMIZED: Sort by row number (already extracted above)
+
+            # Keep on-screen order by current grid row
             visible_frames.sort(key=lambda item: item[1])
-            
-            # OPTIMIZED: Apply colors without additional system calls
+
             for i, (frame, _) in enumerate(visible_frames):
-                # Row index starts at 1 (after header), so we use i+1 for proper alternation
-                row_index = i + 1
+                row_index = i + 1  # rows start after header
                 fg_color = ("gray75", "gray25") if row_index % 2 == 0 else ("gray85", "gray15")
-                
-                # OPTIMIZED: Only configure if color actually needs to change
                 try:
-                    current_color = frame.cget('fg_color')
-                    if current_color != fg_color:
+                    if frame.cget('fg_color') != fg_color:
                         frame.configure(fg_color=fg_color)
                 except Exception:
-                    # Frame might be destroyed, skip it
                     continue
-                
         except Exception as e:
             self.logger.debug(f"Error refreshing row colors: {e}")
             
@@ -729,6 +721,15 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             self.logger.debug(f"Watcher start error for {profile_id}: {e}")
 
+    def _start_watchers_for_running_profiles(self) -> None:
+        """Start watchers for all currently running profiles (on startup)."""
+        try:
+            running = self.chromium_launcher.get_running_profiles()
+            for proc in running:
+                self._start_termination_watcher(proc.profile_id)
+        except Exception as e:
+            self.logger.debug(f"Error starting initial watchers: {e}")
+
     def _on_profile_terminated_external(self, profile_id: str) -> None:
         """Updates UI when a running profile is closed outside the app."""
         profile = self.profile_manager.get_profile(profile_id)
@@ -762,6 +763,8 @@ class MainWindow(ctk.CTk):
         """Creates new profile."""
         try:
             dialog = ProfileDialog(self, self.profile_manager, self.config_manager)
+            # Wait until user closes the dialog
+            self.wait_window(dialog)
             if dialog.result:
                 new_profile: ChromiumProfile = dialog.result
                 # Append a new row without rebuilding entire list
@@ -791,6 +794,8 @@ class MainWindow(ctk.CTk):
             if profile:
                 try:
                     dialog = ProfileDialog(self, self.profile_manager, self.config_manager, profile)
+                    # Wait until user closes the dialog
+                    self.wait_window(dialog)
                     if dialog.result:
                         updated: ChromiumProfile = dialog.result
                         self._update_profile_row_widgets(profile_id, updated)
@@ -1066,9 +1071,8 @@ class MainWindow(ctk.CTk):
             else:
                 self.profiles_scrollable.configure(label_text="Chromium Profiles")
             
-            # OPTIMIZED: Only refresh row colors if we actually filtered (not during initial load)
-            if search_term:
-                self._refresh_row_colors()
+            # Always ensure row striping correctness after filtering
+            self._refresh_row_colors()
                 
         except Exception as e:
             self.logger.error(f"Error filtering profiles: {e}")
