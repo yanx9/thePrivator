@@ -128,6 +128,7 @@ node_modules/
 *.pyc
 .venv/
 target/
+src-tauri/gen/
 vendor/
 coverage/
 .cache/
