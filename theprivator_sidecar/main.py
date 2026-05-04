@@ -7,6 +7,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
+from .profiles import ProfileStore, require_string_param
 from .protocol import (
     DIAGNOSTIC_FAILURE,
     INTERNAL_ERROR,
@@ -125,12 +126,69 @@ def dispatch(request: SidecarRequest) -> JsonObject:
             method=request.method,
         )
 
+    if request.method.startswith("profiles."):
+        return dispatch_profile_request(request)
+
     raise SidecarError(
         code=UNKNOWN_COMMAND,
         message="Unknown sidecar command.",
         request_id=request.id,
         method=request.method,
     )
+
+
+def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch profile CRUD commands through the sidecar-owned store."""
+    try:
+        store_root = require_string_param(
+            request.params,
+            "storeRoot",
+            "Profile storeRoot is required.",
+        )
+        store = ProfileStore(store_root)
+
+        if request.method == "profiles.list":
+            return store.list()
+        if request.method == "profiles.create":
+            name = require_string_param(
+                request.params,
+                "name",
+                "Profile name is required.",
+            )
+            return store.create(name)
+        if request.method == "profiles.update":
+            profile_id = require_string_param(
+                request.params,
+                "id",
+                "Profile id is required.",
+            )
+            name = require_string_param(
+                request.params,
+                "name",
+                "Profile name is required.",
+            )
+            return store.update(profile_id, name)
+        if request.method == "profiles.delete":
+            profile_id = require_string_param(
+                request.params,
+                "id",
+                "Profile id is required.",
+            )
+            return store.delete(profile_id)
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
 
 
 def health_status() -> JsonObject:

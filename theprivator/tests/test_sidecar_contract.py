@@ -184,3 +184,210 @@ def test_multiple_ndjson_requests_each_produce_one_response_and_echo_ids_exactly
     assert responses[1]["error"]["code"] == "DIAGNOSTIC_FAILURE"
     assert diagnostics[0]["requestId"] == "first"
     assert diagnostics[1]["requestId"] == 42
+
+
+def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocations(tmp_path):
+    store_root = str(tmp_path / "app-data")
+
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Research"},
+            }
+        )
+    )
+    create_response = parse_ndjson(create_proc.stdout)[0]
+    create_diagnostic = parse_ndjson(create_proc.stderr)[0]
+    assert create_proc.returncode == 0
+    assert create_response["ok"] is True
+    assert create_response["result"]["storeVersion"] == 1
+    assert create_response["result"]["count"] == 1
+    profile = create_response["result"]["profile"]
+    assert profile["name"] == "Research"
+    assert profile["defaults"] == {
+        "browser": "chromium",
+        "startUrl": "about:blank",
+        "proxyMode": "direct",
+        "fingerprintMode": "disabled",
+    }
+    assert profile["storage"] == {
+        "profileDir": f"profile-store/profiles/{profile['id']}",
+        "userDataDir": f"profile-store/profiles/{profile['id']}/user-data",
+    }
+    assert create_diagnostic["event"] == "sidecar.request"
+    assert create_diagnostic["method"] == "profiles.create"
+    assert create_diagnostic["status"] == "ok"
+    assert create_diagnostic["errorCode"] is None
+    assert create_diagnostic["detailRef"] is None
+
+    list_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-list",
+                "method": "profiles.list",
+                "params": {"storeRoot": store_root},
+            }
+        )
+    )
+    list_response = parse_ndjson(list_proc.stdout)[0]
+    assert list_response["ok"] is True
+    assert list_response["result"]["profiles"] == [profile]
+
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-update",
+                "method": "profiles.update",
+                "params": {"storeRoot": store_root, "id": profile["id"], "name": "Renamed"},
+            }
+        )
+    )
+    update_response = parse_ndjson(update_proc.stdout)[0]
+    assert update_response["ok"] is True
+    assert update_response["result"]["profile"]["name"] == "Renamed"
+    assert update_response["result"]["profiles"] == [update_response["result"]["profile"]]
+    assert update_response["result"]["count"] == 1
+
+    delete_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-delete",
+                "method": "profiles.delete",
+                "params": {"storeRoot": store_root, "id": profile["id"]},
+            }
+        )
+    )
+    delete_response = parse_ndjson(delete_proc.stdout)[0]
+    assert delete_response["ok"] is True
+    assert delete_response["result"] == {"storeVersion": 1, "profiles": [], "count": 0}
+
+
+def test_profiles_diagnostics_are_redacted_even_when_stdout_contains_profile_data(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    profile_name = "Visible Profile Name"
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-redaction",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": profile_name},
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    assert response["ok"] is True
+    assert response["result"]["profile"]["name"] == profile_name
+    assert diagnostic == {
+        "event": "sidecar.request",
+        "requestId": "profile-redaction",
+        "method": "profiles.create",
+        "status": "ok",
+        "durationMs": diagnostic["durationMs"],
+        "errorCode": None,
+        "detailRef": None,
+    }
+    assert store_root not in proc.stderr
+    assert profile_name not in proc.stderr
+    assert "params" not in proc.stderr
+
+
+def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_envelopes(tmp_path):
+    store_root = str(tmp_path / "app-data")
+    run_sidecar(
+        request_line(
+            {
+                "id": "profile-seed",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Research"},
+            }
+        )
+    )
+
+    duplicate_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-duplicate",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "research"},
+            }
+        )
+    )
+    duplicate_response = parse_ndjson(duplicate_proc.stdout)[0]
+    duplicate_diagnostic = parse_ndjson(duplicate_proc.stderr)[0]
+    duplicate_error = assert_error_envelope(
+        duplicate_response, "PROFILE_DUPLICATE_NAME", "profile-duplicate"
+    )
+    assert duplicate_diagnostic["method"] == "profiles.create"
+    assert duplicate_diagnostic["status"] == "error"
+    assert duplicate_diagnostic["errorCode"] == "PROFILE_DUPLICATE_NAME"
+    assert duplicate_diagnostic["detailRef"] == duplicate_error["detailRef"]
+    assert store_root not in duplicate_proc.stderr
+    assert "research" not in duplicate_proc.stderr
+    assert "Traceback" not in duplicate_proc.stdout
+    assert "Traceback" not in duplicate_proc.stderr
+
+    invalid_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-invalid",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "bad/name"},
+            }
+        )
+    )
+    assert_error_envelope(parse_ndjson(invalid_proc.stdout)[0], "PROFILE_INVALID_NAME", "profile-invalid")
+
+    not_found_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-not-found",
+                "method": "profiles.update",
+                "params": {"storeRoot": store_root, "id": "missing", "name": "Still Missing"},
+            }
+        )
+    )
+    assert_error_envelope(parse_ndjson(not_found_proc.stdout)[0], "PROFILE_NOT_FOUND", "profile-not-found")
+
+    store_file = tmp_path / "corrupt-app-data" / "profile-store" / "profiles.json"
+    store_file.parent.mkdir(parents=True)
+    store_file.write_text("{not-json", encoding="utf-8")
+    corrupt_proc = run_sidecar(
+        request_line(
+            {
+                "id": "profile-corrupt",
+                "method": "profiles.list",
+                "params": {"storeRoot": str(tmp_path / "corrupt-app-data")},
+            }
+        )
+    )
+    assert_error_envelope(parse_ndjson(corrupt_proc.stdout)[0], "PROFILE_STORE_CORRUPT", "profile-corrupt")
+    assert "Traceback" not in corrupt_proc.stdout
+    assert "Traceback" not in corrupt_proc.stderr
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": "missing-store", "method": "profiles.list", "params": {}},
+        {"id": "bad-store", "method": "profiles.list", "params": {"storeRoot": 42}},
+        {"id": "missing-name", "method": "profiles.create", "params": {"storeRoot": "root"}},
+        {"id": "missing-id", "method": "profiles.delete", "params": {"storeRoot": "root"}},
+    ],
+)
+def test_profiles_malformed_params_return_invalid_request(payload):
+    proc = run_sidecar(request_line(payload))
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "INVALID_REQUEST", payload["id"])
+    assert diagnostic["event"] == "sidecar.request"
+    assert diagnostic["method"] == payload["method"]
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "INVALID_REQUEST"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr
