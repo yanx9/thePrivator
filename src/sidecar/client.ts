@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   JsonScalar,
+  ProfileDefaults,
+  ProfileListResult,
+  ProfileListSnapshot,
+  ProfileMutationResult,
+  ProfileMutationSnapshot,
+  ProfileRecord,
+  ProfileStorage,
   SidecarClientError,
   SidecarCommandErrorEnvelope,
   SidecarCommandSuccessEnvelope,
@@ -42,6 +49,51 @@ export async function triggerSidecarDiagnosticFailure(): Promise<never> {
   }
 }
 
+export async function listProfiles(): Promise<ProfileListSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_list");
+    return parseProfileListEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function createProfile(name: string): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_create", { name });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true,
+      requireProfileInList: true,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function updateProfile(id: string, name: string): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_update", { id, name });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true,
+      requireProfileInList: true,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function deleteProfile(id: string): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_delete", { id });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: false,
+      requireProfileInList: false,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
 export function normalizeSidecarError(error: unknown): SidecarClientError {
   if (isCommandErrorEnvelope(error)) {
     const source = sourceForCode(error.code);
@@ -74,6 +126,38 @@ function parseHealthEnvelope(value: unknown, checkedAt: string): SidecarHealthSn
     bridgeDurationMs: envelope.durationMs,
     checkedAt,
     health,
+  };
+}
+
+function parseProfileListEnvelope(value: unknown, receivedAt: string): ProfileListSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfileListResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseProfileMutationEnvelope(
+  value: unknown,
+  receivedAt: string,
+  options: { requireProfile: boolean; requireProfileInList: boolean },
+): ProfileMutationSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfileMutationResult(envelope.result, options);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
   };
 }
 
@@ -134,6 +218,176 @@ function parseHealthPayload(value: unknown): SidecarHealthPayload {
     request,
     degradedFields,
   };
+}
+
+function parseProfileListResult(value: unknown): ProfileListResult {
+  const record = requireRecord(value, "The sidecar profile list result must be an object.");
+  const storeVersion = requireStoreVersion(record.storeVersion);
+  const profiles = parseProfileArray(record.profiles);
+  const count = requireNonNegativeInteger(record.count, "count");
+
+  if (count !== profiles.length) {
+    throw makeProtocolError("The sidecar profile list count does not match the profiles array length.");
+  }
+
+  return {
+    storeVersion,
+    profiles,
+    count,
+  };
+}
+
+function parseProfileMutationResult(
+  value: unknown,
+  options: { requireProfile: boolean; requireProfileInList: boolean },
+): ProfileMutationResult {
+  const record = requireRecord(value, "The sidecar profile mutation result must be an object.");
+  const list = parseProfileListResult(record);
+  const rawProfile = record.profile;
+
+  if (rawProfile === undefined) {
+    if (options.requireProfile) {
+      throw makeProtocolError("The sidecar profile mutation result is missing profile.");
+    }
+
+    return list;
+  }
+
+  const profile = parseProfileRecord(rawProfile);
+  if (options.requireProfileInList && !list.profiles.some((item) => sameProfileRecord(item, profile))) {
+    throw makeProtocolError("The sidecar profile mutation result profile is not present in the refreshed list.");
+  }
+
+  return {
+    ...list,
+    profile,
+  };
+}
+
+function parseProfileArray(value: unknown): ProfileRecord[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar profile result field profiles must be an array.");
+  }
+
+  return value.map((item, index) => parseProfileRecord(item, `profiles[${index}]`));
+}
+
+function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
+  const record = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  const id = requireNonBlankString(record.id, `${field}.id`);
+  const name = requireNonBlankString(record.name, `${field}.name`);
+  const createdAt = requireIsoTimestamp(record.createdAt, `${field}.createdAt`);
+  const updatedAt = requireIsoTimestamp(record.updatedAt, `${field}.updatedAt`);
+
+  return {
+    id,
+    name,
+    createdAt,
+    updatedAt,
+    defaults: parseProfileDefaults(record.defaults, `${field}.defaults`),
+    storage: parseProfileStorage(record.storage, id, `${field}.storage`),
+  };
+}
+
+function parseProfileDefaults(value: unknown, field: string): ProfileDefaults {
+  const defaults = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requireLiteral(defaults.browser, `${field}.browser`, "chromium");
+  requireLiteral(defaults.startUrl, `${field}.startUrl`, "about:blank");
+  requireLiteral(defaults.proxyMode, `${field}.proxyMode`, "direct");
+  requireLiteral(defaults.fingerprintMode, `${field}.fingerprintMode`, "disabled");
+
+  return {
+    browser: "chromium",
+    startUrl: "about:blank",
+    proxyMode: "direct",
+    fingerprintMode: "disabled",
+  };
+}
+
+function parseProfileStorage(value: unknown, profileId: string, field: string): ProfileStorage {
+  const storage = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  const profileDir = requireRelativeStoragePath(storage.profileDir, `${field}.profileDir`);
+  const userDataDir = requireRelativeStoragePath(storage.userDataDir, `${field}.userDataDir`);
+  const expectedProfileDir = `profile-store/profiles/${profileId}`;
+
+  if (profileDir !== expectedProfileDir) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.profileDir must match the profile id.`);
+  }
+  if (userDataDir !== `${expectedProfileDir}/user-data`) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.userDataDir must match the profile id.`);
+  }
+
+  return {
+    profileDir,
+    userDataDir,
+  };
+}
+
+function requireStoreVersion(value: unknown): 1 {
+  if (value !== 1) {
+    throw makeProtocolError("The sidecar profile result field storeVersion must be 1.");
+  }
+
+  return 1;
+}
+
+function requireNonBlankString(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (!text.trim()) {
+    throw makeProtocolError(`The sidecar response field ${field} must be a non-empty string.`);
+  }
+
+  return text;
+}
+
+function requireIsoTimestamp(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (!text.endsWith("Z") || Number.isNaN(Date.parse(text))) {
+    throw makeProtocolError(`The sidecar response field ${field} must be a UTC ISO timestamp string.`);
+  }
+
+  return text;
+}
+
+function requireNonNegativeInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isInteger(number) || number < 0) {
+    throw makeProtocolError(`The sidecar response field ${field} must be a non-negative integer.`);
+  }
+
+  return number;
+}
+
+function requireLiteral<T extends string>(value: unknown, field: string, expected: T): T {
+  if (value !== expected) {
+    throw makeProtocolError(`The sidecar response field ${field} must be ${expected}.`);
+  }
+
+  return expected;
+}
+
+function requireRelativeStoragePath(value: unknown, field: string): string {
+  const path = requireNonBlankString(value, field);
+  if (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path) || path.includes("\0")) {
+    throw makeProtocolError(`The sidecar response field ${field} must be a relative storage path.`);
+  }
+
+  return path;
+}
+
+function sameProfileRecord(left: ProfileRecord, right: ProfileRecord): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.storage.profileDir === right.storage.profileDir &&
+    left.storage.userDataDir === right.storage.userDataDir &&
+    left.defaults.browser === right.defaults.browser &&
+    left.defaults.startUrl === right.defaults.startUrl &&
+    left.defaults.proxyMode === right.defaults.proxyMode &&
+    left.defaults.fingerprintMode === right.defaults.fingerprintMode
+  );
 }
 
 function parseRequestTiming(value: unknown): { durationMs: number } {

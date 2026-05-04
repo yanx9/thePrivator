@@ -65,5 +65,52 @@ export interface SidecarHealthSnapshot {
   health: SidecarHealthPayload;
 }
 
+export interface ProfileDefaults {
+  browser: "chromium";
+  startUrl: "about:blank";
+  proxyMode: "direct";
+  fingerprintMode: "disabled";
+}
+
+export interface ProfileStorage {
+  profileDir: string;
+  userDataDir: string;
+}
+
+export interface ProfileRecord {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  defaults: ProfileDefaults;
+  storage: ProfileStorage;
+}
+
+export interface ProfileListResult {
+  storeVersion: 1;
+  profiles: ProfileRecord[];
+  count: number;
+}
+
+export interface ProfileMutationResult extends ProfileListResult {
+  profile?: ProfileRecord;
+}
+
+export interface ProfileListSnapshot extends ProfileListResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ProfileMutationSnapshot extends ProfileMutationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export const SIDECAR_PROTOCOL_ERROR = "SIDECAR_PROTOCOL_ERROR";
 export const SIDECAR_BRIDGE_ERROR = "SIDECAR_BRIDGE_ERROR";
