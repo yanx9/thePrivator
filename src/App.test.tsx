@@ -1,3 +1,5 @@
+// @ts-expect-error Vite raw import keeps the source guard browser-build compatible without Node fs types.
+import appSourceText from "./App.tsx?raw";
 import { invoke } from "@tauri-apps/api/core";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -125,6 +127,96 @@ function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = 
     ...overrides,
   };
 }
+
+function legacyIssue(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "LEGACY_CONFIG_MISSING",
+    message: "Legacy profile config.json is missing.",
+    detailRef: "sidecar-legacy-issue",
+    ...overrides,
+  };
+}
+
+function legacyCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    legacyId: "legacy-111111111111111111111111",
+    folderName: "profile-one",
+    legacyName: "Legacy Research",
+    targetName: "Legacy Research",
+    userData: { status: "available" },
+    metadata: {
+      source: "legacy-theprivator",
+      format: "legacy-profile",
+      legacyFolder: "profile-one",
+      legacyName: "Legacy Research",
+      hasUserData: true,
+      formatVersion: "2",
+      chromiumVersion: "116.0.0",
+      remoteControlPort: 9222,
+    },
+    issues: [],
+    ...overrides,
+  };
+}
+
+function legacyScanResult(overrides: Record<string, unknown> = {}) {
+  const candidates = overrides.candidates ?? [legacyCandidate()];
+  return {
+    scanVersion: 1,
+    count: Array.isArray(candidates) ? candidates.length : 1,
+    candidates,
+    issues: [],
+    ...overrides,
+  };
+}
+
+function legacyOutcome(overrides: Record<string, unknown> = {}) {
+  return {
+    legacyId: "legacy-111111111111111111111111",
+    targetName: "Imported Research",
+    folderName: "profile-one",
+    legacyName: "Legacy Research",
+    status: "success",
+    profileId: "11111111-1111-1111-1111-111111111111",
+    copyStatus: "copied",
+    ...overrides,
+  };
+}
+
+function legacyError(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "LEGACY_SELECTION_INVALID",
+    message: "Selected legacy profile was not found in a fresh scan.",
+    recoverable: true,
+    detailRef: "sidecar-legacy-error",
+    ...overrides,
+  };
+}
+
+function legacyImportResult(overrides: Record<string, unknown> = {}) {
+  const outcomes = overrides.outcomes ?? [legacyOutcome()];
+  return {
+    importVersion: 1,
+    requestedCount: Array.isArray(outcomes) ? outcomes.length : 1,
+    successCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "success").length : 0,
+    partialCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "partial").length : 0,
+    failedCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "failed").length : 0,
+    outcomes,
+    ...overrides,
+  };
+}
+
+function legacyEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-legacy-1",
+    protocolVersion: "1.0.0",
+    durationMs: 8.25,
+    result,
+    ...overrides,
+  };
+}
+
+const appSource = () => appSourceText;
 
 function mockStartup(profiles: unknown[] = [], chromiumResult: unknown = chromiumStatusResult()) {
   mockInvoke
@@ -577,6 +669,228 @@ describe("ThePrivator profile library UI", () => {
     expect(card).toHaveTextContent(/reconciled/i);
     expect(within(card).getByRole("button", { name: /launch chromium/i })).toBeEnabled();
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Last reconciliation11111111-1111-1111-1111-111111111111 reconciled/i);
+  });
+
+  it("renders the legacy import panel as an explicit flow without automatic scan or import calls", async () => {
+    mockStartup([]);
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    expect(screen.getByRole("heading", { name: /bring old theprivator profiles/i })).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: /scan legacy profiles/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /scan legacy root/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /import selected/i })).not.toBeInTheDocument();
+    expect(commandCalls("legacy_scan_profiles")).toHaveLength(0);
+    expect(commandCalls("legacy_import_profiles")).toHaveLength(0);
+  });
+
+  it("scans legacy candidates, keeps target names editable, displays candidate issues, and requires rescan after path changes", async () => {
+    const first = legacyCandidate({ legacyId: "legacy-good", targetName: "Imported Good" });
+    const second = legacyCandidate({
+      legacyId: "legacy-needs-fix",
+      folderName: "needs-fix",
+      legacyName: null,
+      targetName: "Taken",
+      userData: { status: "missing" },
+      issues: [
+        legacyIssue({ code: "PROFILE_DUPLICATE_NAME", message: "Profile name already exists.", detailRef: "sidecar-duplicate" }),
+        legacyIssue({ code: "PROFILE_INVALID_NAME", message: "Profile name is invalid.", detailRef: "sidecar-invalid" }),
+      ],
+    });
+    mockStartup([]);
+    mockInvoke.mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [first, second] })));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    const rootInput = screen.getByLabelText(/legacy profile root/i);
+    fireEvent.change(rootInput, { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+
+    const candidateList = await screen.findByRole("list", { name: /scanned legacy profiles/i });
+    const goodRow = within(candidateList).getByRole("listitem", { name: /legacy research/i });
+    const issueRow = within(candidateList).getByRole("listitem", { name: /needs-fix/i });
+    expect(within(goodRow).getByLabelText(/target profile name/i)).toHaveValue("Imported Good");
+    expect(issueRow).toHaveTextContent(/No user-data found/i);
+    expect(issueRow).toHaveTextContent(/PROFILE_DUPLICATE_NAME/i);
+    expect(issueRow).toHaveTextContent(/PROFILE_INVALID_NAME/i);
+    expect(screen.getByRole("button", { name: /import selected \(0\)/i })).toBeDisabled();
+
+    fireEvent.click(within(goodRow).getByRole("checkbox", { name: /select profile/i }));
+    expect(screen.getByRole("button", { name: /import selected \(1\)/i })).toBeEnabled();
+    fireEvent.change(within(goodRow).getByLabelText(/target profile name/i), { target: { value: "Edited Good" } });
+    expect(within(goodRow).getByLabelText(/target profile name/i)).toHaveValue("Edited Good");
+
+    fireEvent.change(rootInput, { target: { value: "/tmp/another-legacy-root" } });
+    expect(await screen.findByText(/path changed after the last scan/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import selected \(1\)/i })).toBeDisabled();
+    expect(mockInvoke).toHaveBeenCalledWith("legacy_scan_profiles", { legacyRoot: "/tmp/legacy-root" });
+  });
+
+  it("surfaces empty legacy scan results without enabling import", async () => {
+    mockStartup([]);
+    mockInvoke.mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [] })));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/empty-legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+
+    expect(await screen.findByLabelText(/no legacy profiles found/i)).toHaveTextContent(/No immediate legacy profile folders were found/i);
+    expect(screen.getByRole("button", { name: /import selected \(0\)/i })).toBeDisabled();
+    expect(screen.getByLabelText(/legacy import observability/i)).toHaveTextContent(/Scanned profiles0/i);
+  });
+
+  it("imports selected profiles with success, partial, and failure outcomes and refreshes profile cards from the store", async () => {
+    const candidates = [
+      legacyCandidate({ legacyId: "legacy-success", folderName: "good", legacyName: "Good Legacy", targetName: "Imported Good" }),
+      legacyCandidate({ legacyId: "legacy-partial", folderName: "partial", legacyName: "Partial Legacy", targetName: "Imported Partial" }),
+      legacyCandidate({ legacyId: "legacy-failed", folderName: "failed", legacyName: "Failed Legacy", targetName: "Imported Failed" }),
+    ];
+    const success = legacyOutcome({ legacyId: "legacy-success", folderName: "good", legacyName: "Good Legacy", targetName: "Imported Good", status: "success", copyStatus: "copied", profileId: "33333333-3333-3333-3333-333333333333" });
+    const partial = legacyOutcome({
+      legacyId: "legacy-partial",
+      folderName: "partial",
+      legacyName: "Partial Legacy",
+      targetName: "Imported Partial",
+      status: "partial",
+      copyStatus: "failed",
+      profileId: "44444444-4444-4444-4444-444444444444",
+      error: legacyError({ code: "LEGACY_USER_DATA_COPY_FAILED", message: "Legacy user-data copy failed.", detailRef: "sidecar-copy-partial" }),
+    });
+    const failed = legacyOutcome({
+      legacyId: "legacy-failed",
+      folderName: "failed",
+      legacyName: "Failed Legacy",
+      targetName: "Imported Failed",
+      status: "failed",
+      copyStatus: "skipped",
+      profileId: undefined,
+      error: legacyError({ code: "LEGACY_SELECTION_INVALID", detailRef: "sidecar-stale-selection" }),
+    });
+    const importedGood = profileRecord({ id: "33333333-3333-3333-3333-333333333333", name: "Imported Good" });
+    const importedPartial = profileRecord({ id: "44444444-4444-4444-4444-444444444444", name: "Imported Partial" });
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates })))
+      .mockResolvedValueOnce(legacyEnvelope(legacyImportResult({ outcomes: [success, partial, failed] })))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([importedGood, importedPartial])));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+    const candidateList = await screen.findByRole("list", { name: /scanned legacy profiles/i });
+    within(candidateList).getAllByRole("checkbox", { name: /select profile/i }).forEach((checkbox) => fireEvent.click(checkbox));
+    fireEvent.click(screen.getByRole("button", { name: /import selected \(3\)/i }));
+
+    const outcomes = await screen.findByLabelText(/legacy import outcomes/i);
+    expect(outcomes).toHaveTextContent(/Success1/i);
+    expect(outcomes).toHaveTextContent(/Partial1/i);
+    expect(outcomes).toHaveTextContent(/Failed1/i);
+    expect(outcomes).toHaveTextContent(/User-data copied/i);
+    expect(outcomes).toHaveTextContent(/User-data copy failed/i);
+    expect(outcomes).toHaveTextContent(/LEGACY_USER_DATA_COPY_FAILED/i);
+    expect(outcomes).toHaveTextContent(/sidecar-copy-partial/i);
+    expect(outcomes).toHaveTextContent(/LEGACY_SELECTION_INVALID/i);
+    expect(outcomes).not.toHaveTextContent("/tmp/legacy-root");
+    expect(outcomes).not.toHaveTextContent("proxy-user-should-not-leak");
+    expect(outcomes).not.toHaveTextContent("proxy-pass-should-not-leak");
+
+    const profileGrid = await screen.findByRole("list", { name: /stored profiles/i });
+    expect(within(profileGrid).getByRole("listitem", { name: /imported good/i })).toBeInTheDocument();
+    expect(within(profileGrid).getByRole("listitem", { name: /imported partial/i })).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("legacy_import_profiles", {
+      legacyRoot: "/tmp/legacy-root",
+      items: [
+        { legacyId: "legacy-success", targetName: "Imported Good" },
+        { legacyId: "legacy-partial", targetName: "Imported Partial" },
+        { legacyId: "legacy-failed", targetName: "Imported Failed" },
+      ],
+    });
+  });
+
+  it("retains scanned rows, selections, and edited target names after a bridge timeout import error", async () => {
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [legacyCandidate({ legacyId: "legacy-timeout", targetName: "Timeout Profile" })] })))
+      .mockRejectedValueOnce(profileError("SIDECAR_TIMEOUT", "The Python sidecar did not respond before the bridge timeout.", "bridge-timeout-detail"));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+    const row = await screen.findByRole("listitem", { name: /legacy research/i });
+    fireEvent.click(within(row).getByRole("checkbox", { name: /select profile/i }));
+    fireEvent.change(within(row).getByLabelText(/target profile name/i), { target: { value: "Timeout Edited" } });
+    fireEvent.click(screen.getByRole("button", { name: /import selected \(1\)/i }));
+
+    const error = await screen.findByText(/SIDECAR_TIMEOUT/i);
+    expect(error).toBeInTheDocument();
+    expect(screen.getAllByText(/bridge-timeout-detail/i).length).toBeGreaterThan(0);
+    expect(within(row).getByRole("checkbox", { name: /select profile/i })).toBeChecked();
+    expect(within(row).getByLabelText(/target profile name/i)).toHaveValue("Timeout Edited");
+    expect(screen.getByRole("button", { name: /import selected \(1\)/i })).toBeEnabled();
+  });
+
+  it("keeps import outcomes visible and reports profile reload failures separately", async () => {
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [legacyCandidate({ legacyId: "legacy-refresh", targetName: "Imported Refresh" })] })))
+      .mockResolvedValueOnce(legacyEnvelope(legacyImportResult({ outcomes: [legacyOutcome({ legacyId: "legacy-refresh", targetName: "Imported Refresh" })] })))
+      .mockRejectedValueOnce(profileError("PROFILE_STORE_UNAVAILABLE", "Profile store could not be reloaded.", "refresh-after-import-detail"));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+    const row = await screen.findByRole("listitem", { name: /legacy research/i });
+    fireEvent.click(within(row).getByRole("checkbox", { name: /select profile/i }));
+    fireEvent.click(screen.getByRole("button", { name: /import selected \(1\)/i }));
+
+    const outcomes = await screen.findByLabelText(/legacy import outcomes/i);
+    expect(outcomes).toHaveTextContent(/Imported Refresh/i);
+    expect(await screen.findByText(/Profile list refresh after import failed/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/PROFILE_STORE_UNAVAILABLE/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/refresh-after-import-detail/i).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText(/empty profile library/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/profile load recovery/i)).toHaveTextContent(/Profile truth could not be loaded/i);
+  });
+
+  it("normalizes malformed legacy import payloads to visible protocol errors while retaining scan state", async () => {
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [legacyCandidate({ legacyId: "legacy-malformed", targetName: "Malformed Import" })] })))
+      .mockResolvedValueOnce(legacyEnvelope(legacyImportResult({ requestedCount: 2 })));
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+    const row = await screen.findByRole("listitem", { name: /legacy research/i });
+    fireEvent.click(within(row).getByRole("checkbox", { name: /select profile/i }));
+    fireEvent.click(screen.getByRole("button", { name: /import selected \(1\)/i }));
+
+    expect(await screen.findByText(/SIDECAR_PROTOCOL_ERROR/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/protocol/i).length).toBeGreaterThan(0);
+    expect(within(row).getByRole("checkbox", { name: /select profile/i })).toBeChecked();
+    expect(within(row).getByLabelText(/target profile name/i)).toHaveValue("Malformed Import");
+  });
+
+  it("does not add direct browser or Tauri filesystem bypasses for legacy import", () => {
+    const source = appSource();
+
+    expect(source).toContain("scanLegacyProfiles");
+    expect(source).toContain("importLegacyProfiles");
+    expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs)/);
+    expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage/);
+    expect(source).not.toMatch(/type=\"file\"|type='file'/);
   });
 
   it("keeps the S01 diagnostic recovery pattern in the compact system panel", async () => {

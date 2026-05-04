@@ -4,8 +4,10 @@ import {
   deleteProfile,
   getChromiumStatus,
   getSidecarHealth,
+  importLegacyProfiles,
   launchChromiumProfile,
   listProfiles,
+  scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
@@ -14,6 +16,12 @@ import type {
   ChromiumRunningProfileState,
   ChromiumStatusSnapshot,
   ChromiumStoppedProfileState,
+  LegacyImportOutcome,
+  LegacyImportSelection,
+  LegacyImportSnapshot,
+  LegacyIssue,
+  LegacyScanCandidate,
+  LegacyScanSnapshot,
   ProfileListSnapshot,
   ProfileMutationSnapshot,
   ProfileRecord,
@@ -35,6 +43,15 @@ type ChromiumLifecyclePhase =
   | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
 type ChromiumMutationPhase = "launching" | "stopping";
 type ChromiumLifecycleAction = "status" | "launch" | "stop";
+type LegacyScanPhase = "idle" | "scanning" | "ready" | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+type LegacyImportPhase = "idle" | "importing" | "completed" | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+type LegacyImportRefreshState = {
+  error: SidecarClientError;
+  occurredAt: string;
+} | null;
+
+type LegacySelectionState = Record<string, boolean>;
+type LegacyTargetNameState = Record<string, string>;
 
 type HealthViewState = {
   phase: SidecarUiPhase;
@@ -110,6 +127,29 @@ const CHROMIUM_ACTION_LABELS: Record<ChromiumLifecycleAction, string> = {
   stop: "Stop Chromium",
 };
 
+const LEGACY_SCAN_PHASE_LABELS: Record<LegacyScanPhase, string> = {
+  idle: "Waiting for a legacy root",
+  scanning: "Scanning legacy profiles",
+  ready: "Legacy scan ready",
+  "recoverable-error": "Recoverable legacy scan error",
+  "bridge-error": "Legacy scan bridge error",
+};
+
+const LEGACY_IMPORT_PHASE_LABELS: Record<LegacyImportPhase, string> = {
+  idle: "No import requested",
+  importing: "Importing selected legacy profiles",
+  completed: "Legacy import complete",
+  "recoverable-error": "Recoverable legacy import error",
+  "bridge-error": "Legacy import bridge error",
+};
+
+const LEGACY_COPY_STATUS_LABELS: Record<LegacyImportOutcome["copyStatus"], string> = {
+  copied: "User-data copied",
+  missing: "No user-data found",
+  failed: "User-data copy failed",
+  skipped: "User-data copy skipped",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -137,6 +177,17 @@ export function App() {
   const [lastLifecycleError, setLastLifecycleError] = useState<ChromiumLifecycleError | null>(null);
   const [chromiumRunningCount, setChromiumRunningCount] = useState(0);
   const [isChromiumStatusRefreshing, setIsChromiumStatusRefreshing] = useState(false);
+  const [legacyRoot, setLegacyRoot] = useState("");
+  const [legacyScannedRoot, setLegacyScannedRoot] = useState<string | null>(null);
+  const [legacyScanPhase, setLegacyScanPhase] = useState<LegacyScanPhase>("idle");
+  const [legacyScanSnapshot, setLegacyScanSnapshot] = useState<LegacyScanSnapshot | null>(null);
+  const [legacySelectedById, setLegacySelectedById] = useState<LegacySelectionState>({});
+  const [legacyTargetNamesById, setLegacyTargetNamesById] = useState<LegacyTargetNameState>({});
+  const [legacyImportPhase, setLegacyImportPhase] = useState<LegacyImportPhase>("idle");
+  const [legacyImportSnapshot, setLegacyImportSnapshot] = useState<LegacyImportSnapshot | null>(null);
+  const [legacyScanError, setLegacyScanError] = useState<SidecarClientError | null>(null);
+  const [legacyImportError, setLegacyImportError] = useState<SidecarClientError | null>(null);
+  const [legacyImportRefreshState, setLegacyImportRefreshState] = useState<LegacyImportRefreshState>(null);
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -369,6 +420,140 @@ export function App() {
     [applyProfileSnapshot],
   );
 
+  const refreshProfilesAfterLegacyImport = useCallback(async () => {
+    if (profileLoadInFlightRef.current) {
+      const busyError = makeLegacyUiError(
+        "LEGACY_PROFILE_REFRESH_BUSY",
+        "Profile refresh is already running; imported outcomes remain visible and the list can be refreshed manually.",
+      );
+      setLegacyImportRefreshState({ error: busyError, occurredAt: new Date().toISOString() });
+      return;
+    }
+
+    profileLoadInFlightRef.current = true;
+    setIsProfileLoading(true);
+    setProfileError(null);
+    setProfilePhase((current) => (current === "ready" ? "ready" : "loading"));
+
+    try {
+      const snapshot = await listProfiles();
+      applyProfileSnapshot(snapshot);
+      setLegacyImportRefreshState(null);
+    } catch (error) {
+      const clientError = error as SidecarClientError;
+      setProfilePhase(clientError.phase);
+      setProfileError({ context: "refresh", error: clientError });
+      setLegacyImportRefreshState({ error: clientError, occurredAt: new Date().toISOString() });
+    } finally {
+      profileLoadInFlightRef.current = false;
+      setIsProfileLoading(false);
+    }
+  }, [applyProfileSnapshot]);
+
+  const handleLegacyRootChange = useCallback((value: string) => {
+    setLegacyRoot(value);
+    if (value.trim()) {
+      setLegacyScanError(null);
+    }
+  }, []);
+
+  const handleLegacyScanSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const normalizedRoot = legacyRoot.trim();
+
+      if (!normalizedRoot) {
+        setLegacyScanError(makeLegacyUiError("LEGACY_ROOT_REQUIRED", "Enter a legacy ThePrivator profile root before scanning."));
+        setLegacyScanPhase("recoverable-error");
+        return;
+      }
+
+      setLegacyScanPhase("scanning");
+      setLegacyScanError(null);
+
+      try {
+        const snapshot = await scanLegacyProfiles(normalizedRoot);
+        setLegacyScanSnapshot(snapshot);
+        setLegacyScannedRoot(normalizedRoot);
+        setLegacyTargetNamesById(Object.fromEntries(snapshot.candidates.map((candidate) => [candidate.legacyId, candidate.targetName])));
+        setLegacySelectedById({});
+        setLegacyImportPhase("idle");
+        setLegacyImportSnapshot(null);
+        setLegacyImportError(null);
+        setLegacyImportRefreshState(null);
+        setLegacyScanPhase("ready");
+      } catch (error) {
+        const clientError = error as SidecarClientError;
+        setLegacyScanError(clientError);
+        setLegacyScanPhase(clientError.phase);
+      }
+    },
+    [legacyRoot],
+  );
+
+  const handleLegacySelectionChange = useCallback((legacyId: string, selected: boolean) => {
+    setLegacySelectedById((current) => ({
+      ...current,
+      [legacyId]: selected,
+    }));
+  }, []);
+
+  const handleLegacyTargetNameChange = useCallback((legacyId: string, targetName: string) => {
+    setLegacyTargetNamesById((current) => ({
+      ...current,
+      [legacyId]: targetName,
+    }));
+  }, []);
+
+  const handleLegacyImportSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      if (!legacyScanSnapshot || !legacyScannedRoot) {
+        setLegacyImportError(makeLegacyUiError("LEGACY_SCAN_REQUIRED", "Scan a legacy root before importing selected profiles."));
+        setLegacyImportPhase("recoverable-error");
+        return;
+      }
+
+      if (legacyRoot.trim() !== legacyScannedRoot) {
+        setLegacyImportError(makeLegacyUiError("LEGACY_SCAN_STALE", "The path changed after the last scan. Rescan before importing."));
+        setLegacyImportPhase("recoverable-error");
+        return;
+      }
+
+      const items: LegacyImportSelection[] = legacyScanSnapshot.candidates
+        .filter((candidate) => legacySelectedById[candidate.legacyId])
+        .map((candidate) => ({
+          legacyId: candidate.legacyId,
+          targetName: legacyTargetNamesById[candidate.legacyId] ?? candidate.targetName,
+        }));
+
+      if (items.length === 0) {
+        setLegacyImportError(makeLegacyUiError("LEGACY_IMPORT_SELECTION_REQUIRED", "Select at least one scanned profile before importing."));
+        setLegacyImportPhase("recoverable-error");
+        return;
+      }
+
+      setLegacyImportPhase("importing");
+      setLegacyImportError(null);
+      setLegacyImportRefreshState(null);
+
+      try {
+        const snapshot = await importLegacyProfiles(legacyScannedRoot, items);
+        setLegacyImportSnapshot(snapshot);
+        setLegacyImportPhase("completed");
+        if (snapshot.successCount + snapshot.partialCount > 0) {
+          await refreshProfilesAfterLegacyImport();
+        }
+      } catch (error) {
+        const clientError = error as SidecarClientError;
+        setLegacyImportError(clientError);
+        setLegacyImportPhase(clientError.phase);
+      }
+    },
+    [legacyRoot, legacyScanSnapshot, legacyScannedRoot, legacySelectedById, legacyTargetNamesById, refreshProfilesAfterLegacyImport],
+  );
+
   useEffect(() => {
     void refreshHealth();
     void refreshProfiles("startup");
@@ -524,6 +709,23 @@ export function App() {
   const isEmpty = !isProfileLoading && profileCount === 0;
   const profileTone = profilePhase === "ready" ? "ready" : profilePhase === "loading" ? "pending" : "error";
   const chromiumTone = chromiumPhase === "ready" ? "ready" : chromiumPhase === "loading" || chromiumPhase === "refreshing" || chromiumPhase === "launching" || chromiumPhase === "stopping" ? "pending" : "error";
+  const legacySelectedCount = useMemo(
+    () => legacyScanSnapshot?.candidates.filter((candidate) => legacySelectedById[candidate.legacyId]).length ?? 0,
+    [legacyScanSnapshot, legacySelectedById],
+  );
+  const legacyScanIsStale = Boolean(legacyScanSnapshot && legacyScannedRoot !== null && legacyRoot.trim() !== legacyScannedRoot);
+  const legacyCanScan = legacyRoot.trim().length > 0 && legacyScanPhase !== "scanning" && legacyImportPhase !== "importing";
+  const legacyCanImport = Boolean(
+    legacyScanSnapshot && !legacyScanIsStale && legacySelectedCount > 0 && legacyScanPhase !== "scanning" && legacyImportPhase !== "importing",
+  );
+  const legacyOutcomeCounts = useMemo(
+    () => ({
+      success: legacyImportSnapshot?.successCount ?? 0,
+      partial: legacyImportSnapshot?.partialCount ?? 0,
+      failed: legacyImportSnapshot?.failedCount ?? 0,
+    }),
+    [legacyImportSnapshot],
+  );
   const latestReconciliation = useMemo(() => getLatestStoppedState(Object.values(chromiumReconciledByProfile)), [chromiumReconciledByProfile]);
 
   return (
@@ -581,11 +783,35 @@ export function App() {
             profileCount={profileCount}
           />
 
+          <LegacyImportPanel
+            canImport={legacyCanImport}
+            canScan={legacyCanScan}
+            importError={legacyImportError}
+            importPhase={legacyImportPhase}
+            importRefreshState={legacyImportRefreshState}
+            importSnapshot={legacyImportSnapshot}
+            isStale={legacyScanIsStale}
+            legacyRoot={legacyRoot}
+            outcomeCounts={legacyOutcomeCounts}
+            scanError={legacyScanError}
+            scanPhase={legacyScanPhase}
+            scanSnapshot={legacyScanSnapshot}
+            scannedRoot={legacyScannedRoot}
+            selectedById={legacySelectedById}
+            selectedCount={legacySelectedCount}
+            targetNamesById={legacyTargetNamesById}
+            onImportSubmit={handleLegacyImportSubmit}
+            onRootChange={handleLegacyRootChange}
+            onScanSubmit={handleLegacyScanSubmit}
+            onSelectionChange={handleLegacySelectionChange}
+            onTargetNameChange={handleLegacyTargetNameChange}
+          />
+
           {isProfileLoading && profileCount === 0 ? (
             <div className="profile-loading" role="status" aria-live="polite">
               Loading profiles from the sidecar store…
             </div>
-          ) : profileError && !lastListSnapshot && profileCount === 0 ? (
+          ) : profileError && (!lastListSnapshot || profileError.context === "refresh") && profileCount === 0 ? (
             <ProfileLoadRecoveryState isBusy={isProfileBusy} onRetry={() => void refreshProfiles("refresh")} />
           ) : isEmpty ? (
             <EmptyProfileState />
@@ -650,6 +876,365 @@ export function App() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function LegacyImportPanel({
+  canImport,
+  canScan,
+  importError,
+  importPhase,
+  importRefreshState,
+  importSnapshot,
+  isStale,
+  legacyRoot,
+  outcomeCounts,
+  scanError,
+  scanPhase,
+  scanSnapshot,
+  scannedRoot,
+  selectedById,
+  selectedCount,
+  targetNamesById,
+  onImportSubmit,
+  onRootChange,
+  onScanSubmit,
+  onSelectionChange,
+  onTargetNameChange,
+}: {
+  canImport: boolean;
+  canScan: boolean;
+  importError: SidecarClientError | null;
+  importPhase: LegacyImportPhase;
+  importRefreshState: LegacyImportRefreshState;
+  importSnapshot: LegacyImportSnapshot | null;
+  isStale: boolean;
+  legacyRoot: string;
+  outcomeCounts: { success: number; partial: number; failed: number };
+  scanError: SidecarClientError | null;
+  scanPhase: LegacyScanPhase;
+  scanSnapshot: LegacyScanSnapshot | null;
+  scannedRoot: string | null;
+  selectedById: LegacySelectionState;
+  selectedCount: number;
+  targetNamesById: LegacyTargetNameState;
+  onImportSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRootChange: (value: string) => void;
+  onScanSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSelectionChange: (legacyId: string, selected: boolean) => void;
+  onTargetNameChange: (legacyId: string, targetName: string) => void;
+}) {
+  const rootHelpId = "legacy-root-help";
+  const rootErrorId = scanError ? "legacy-scan-error" : undefined;
+  const hasScan = Boolean(scanSnapshot);
+  const candidateCount = scanSnapshot?.candidates.length ?? 0;
+  const panelTone = importPhase === "completed" ? "ready" : scanPhase === "scanning" || importPhase === "importing" ? "pending" : scanError || importError || importRefreshState ? "error" : "neutral";
+
+  return (
+    <section className={`legacy-import-panel legacy-import-panel--${panelTone}`} aria-labelledby="legacy-import-heading">
+      <div className="legacy-import-panel__header">
+        <div>
+          <p className="kicker">Explicit legacy import</p>
+          <h2 id="legacy-import-heading">Bring old ThePrivator profiles into the sidecar store deliberately.</h2>
+          <p>
+            Enter a legacy profile root, scan immediate profile folders, select only the rows you want, and import them
+            through the profile store. The original legacy tree is not mutated.
+          </p>
+        </div>
+        <span className="mini-phase" aria-label={`Legacy import phase: ${importPhase}`}>
+          {importPhase}
+        </span>
+      </div>
+
+      <form className="legacy-scan-form" aria-label="Scan legacy profiles" onSubmit={onScanSubmit}>
+        <div>
+          <label htmlFor="legacy-root">Legacy profile root</label>
+          <p id={rootHelpId}>
+            Paste or type the root folder that contains legacy profile folders. The app never opens a browser file-system
+            picker or starts a hidden migration.
+          </p>
+        </div>
+        <div className="legacy-scan-controls">
+          <input
+            id="legacy-root"
+            name="legacy-root"
+            value={legacyRoot}
+            onChange={(event) => onRootChange(event.target.value)}
+            aria-describedby={rootErrorId ? `${rootHelpId} ${rootErrorId}` : rootHelpId}
+            aria-invalid={scanError?.code === "LEGACY_ROOT_REQUIRED" ? true : undefined}
+            autoComplete="off"
+            placeholder="/Users/you/Library/Application Support/ThePrivator"
+          />
+          <button type="submit" disabled={!canScan}>
+            {scanPhase === "scanning" ? "Scanning…" : "Scan legacy root"}
+          </button>
+        </div>
+      </form>
+
+      <dl className="metric-list metric-list--inline legacy-observability" aria-label="Legacy import observability">
+        <Metric label="Scan phase" value={`${scanPhase} · ${LEGACY_SCAN_PHASE_LABELS[scanPhase]}`} />
+        <Metric label="Import phase" value={`${importPhase} · ${LEGACY_IMPORT_PHASE_LABELS[importPhase]}`} />
+        <Metric label="Scanned profiles" value={candidateCount} />
+        <Metric label="Selected" value={selectedCount} />
+        <Metric label="Outcomes" value={`${outcomeCounts.success} success · ${outcomeCounts.partial} partial · ${outcomeCounts.failed} failed`} />
+        <Metric label="Last scan detailRef" value={scanError?.detailRef} />
+        <Metric label="Last import detailRef" value={importError?.detailRef ?? importRefreshState?.error.detailRef} />
+      </dl>
+
+      {scanError ? <LegacyErrorFeedback id="legacy-scan-error" title="Scan failed safely" error={scanError} /> : null}
+
+      {scanSnapshot?.issues.length ? (
+        <LegacyIssueList id="legacy-root-issues" label="Root scan issues" issues={scanSnapshot.issues} />
+      ) : null}
+
+      {hasScan ? (
+        <form className="legacy-import-form" aria-label="Import scanned legacy profiles" onSubmit={onImportSubmit}>
+          <div className="legacy-selection-bar" role="status" aria-live="polite" aria-atomic="true">
+            <strong>
+              {selectedCount} of {candidateCount} scanned {candidateCount === 1 ? "profile" : "profiles"} selected.
+            </strong>
+            <span>Last scanned: {scannedRoot ? "current input at scan time" : "not yet scanned"}</span>
+          </div>
+
+          {isStale ? (
+            <div className="legacy-stale-warning" role="status" aria-live="polite">
+              The path changed after the last scan. Review the retained results if needed, then scan again before importing.
+            </div>
+          ) : null}
+
+          {candidateCount === 0 ? (
+            <section className="legacy-empty-scan" aria-label="No legacy profiles found">
+              <strong>No immediate legacy profile folders were found.</strong>
+              <p>Choose another root and scan again. Nothing is imported until you select profiles and submit.</p>
+            </section>
+          ) : (
+            <div className="legacy-candidate-list" role="list" aria-label="Scanned legacy profiles">
+              {scanSnapshot?.candidates.map((candidate) => (
+                <LegacyCandidateRow
+                  key={candidate.legacyId}
+                  candidate={candidate}
+                  isSelected={Boolean(selectedById[candidate.legacyId])}
+                  targetName={targetNamesById[candidate.legacyId] ?? candidate.targetName}
+                  onSelectionChange={onSelectionChange}
+                  onTargetNameChange={onTargetNameChange}
+                />
+              ))}
+            </div>
+          )}
+
+          {importError ? <LegacyErrorFeedback title="Import failed safely" error={importError} /> : null}
+          {importRefreshState ? (
+            <LegacyErrorFeedback
+              title="Profile list refresh after import failed"
+              error={importRefreshState.error}
+              description={`Import outcomes remain visible. Retry Refresh profiles after resolving the list reload issue from ${formatProfileTimestamp(importRefreshState.occurredAt)}.`}
+            />
+          ) : null}
+
+          <div className="legacy-import-actions">
+            <button type="submit" disabled={!canImport}>
+              {importPhase === "importing" ? "Importing selected…" : `Import selected (${selectedCount})`}
+            </button>
+            <span className="legacy-action-hint">
+              Sidecar validation runs on the target names exactly as shown; invalid or duplicate rows stay editable.
+            </span>
+          </div>
+        </form>
+      ) : null}
+
+      <LegacyImportOutcomes snapshot={importSnapshot} />
+    </section>
+  );
+}
+
+function LegacyCandidateRow({
+  candidate,
+  isSelected,
+  targetName,
+  onSelectionChange,
+  onTargetNameChange,
+}: {
+  candidate: LegacyScanCandidate;
+  isSelected: boolean;
+  targetName: string;
+  onSelectionChange: (legacyId: string, selected: boolean) => void;
+  onTargetNameChange: (legacyId: string, targetName: string) => void;
+}) {
+  const rowTitleId = `legacy-candidate-${candidate.legacyId}-title`;
+  const targetInputId = `legacy-target-${candidate.legacyId}`;
+  const targetHelpId = `legacy-target-${candidate.legacyId}-help`;
+  const issueListId = candidate.issues.length ? `legacy-candidate-${candidate.legacyId}-issues` : undefined;
+  const describedBy = issueListId ? `${targetHelpId} ${issueListId}` : targetHelpId;
+
+  return (
+    <article className={`legacy-candidate-row ${isSelected ? "legacy-candidate-row--selected" : ""}`} role="listitem" aria-labelledby={rowTitleId}>
+      <label className="legacy-select-control">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={(event) => onSelectionChange(candidate.legacyId, event.target.checked)}
+        />
+        <span>Select profile</span>
+      </label>
+
+      <div className="legacy-candidate-main">
+        <div className="legacy-candidate-titleline">
+          <div>
+            <p className="signal-label">Legacy folder</p>
+            <h3 id={rowTitleId}>{candidate.legacyName ?? candidate.folderName}</h3>
+          </div>
+          <span className={`status-pill status-pill--${candidate.userData.status === "available" ? "running" : "stopped"}`}>
+            {formatLegacyUserDataStatus(candidate.userData.status)}
+          </span>
+        </div>
+
+        <dl className="legacy-chip-list" aria-label={`${candidate.legacyName ?? candidate.folderName} safe legacy metadata`}>
+          <Metric label="Folder" value={candidate.folderName} />
+          <Metric label="Legacy name" value={candidate.legacyName ?? "No legacy name"} />
+          <Metric label="Issues" value={candidate.issues.length} />
+        </dl>
+
+        <div className="legacy-target-control">
+          <label htmlFor={targetInputId}>Target profile name</label>
+          <input
+            id={targetInputId}
+            value={targetName}
+            onChange={(event) => onTargetNameChange(candidate.legacyId, event.target.value)}
+            aria-describedby={describedBy}
+            aria-invalid={candidate.issues.length > 0 ? true : undefined}
+            autoComplete="off"
+          />
+          <p id={targetHelpId}>This exact name is sent to the sidecar profile store for validation during import.</p>
+        </div>
+
+        {candidate.issues.length ? (
+          <LegacyIssueList id={issueListId} label="Candidate validation issues" issues={candidate.issues} compact />
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function LegacyIssueList({
+  compact = false,
+  id,
+  issues,
+  label,
+}: {
+  compact?: boolean;
+  id?: string;
+  issues: LegacyIssue[];
+  label: string;
+}) {
+  return (
+    <section className={`legacy-issue-list ${compact ? "legacy-issue-list--compact" : ""}`} id={id} aria-label={label}>
+      <strong>{label}</strong>
+      <div className="legacy-issue-list__items" role="list">
+        {issues.map((issue) => (
+          <article key={`${issue.code}-${issue.detailRef}`} className="legacy-issue" role="listitem">
+            <div>
+              <strong>{issue.code}</strong>
+              <p>{issue.message}</p>
+            </div>
+            <dl className="metric-list metric-list--inline">
+              <Metric label="detailRef" value={issue.detailRef} />
+            </dl>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LegacyErrorFeedback({
+  description,
+  error,
+  id,
+  title,
+}: {
+  description?: string;
+  error: SidecarClientError;
+  id?: string;
+  title: string;
+}) {
+  return (
+    <section className="legacy-error-feedback" id={id} role="status" aria-live="polite" aria-atomic="true">
+      <strong>{title}</strong>
+      <p>{description ?? error.message}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={error.code} />
+        <Metric label="Source" value={error.source} />
+        <Metric label="Recoverable" value={error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={error.detailRef} />
+      </dl>
+    </section>
+  );
+}
+
+function LegacyImportOutcomes({ snapshot }: { snapshot: LegacyImportSnapshot | null }) {
+  if (!snapshot) {
+    return null;
+  }
+
+  return (
+    <section className="legacy-outcome-panel" aria-label="Legacy import outcomes" aria-live="polite">
+      <div className="legacy-outcome-panel__summary">
+        <div>
+          <p className="signal-label">Per-profile outcomes</p>
+          <h3>Import completed with explicit profile results.</h3>
+        </div>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Requested" value={snapshot.requestedCount} />
+          <Metric label="Success" value={snapshot.successCount} />
+          <Metric label="Partial" value={snapshot.partialCount} />
+          <Metric label="Failed" value={snapshot.failedCount} />
+          <Metric label="Request" value={snapshot.requestId} />
+        </dl>
+      </div>
+
+      <div className="legacy-outcome-list" role="list" aria-label="Per-profile legacy import result cards">
+        {snapshot.outcomes.map((outcome) => (
+          <LegacyOutcomeCard key={`${outcome.legacyId}-${outcome.targetName}-${outcome.status}`} outcome={outcome} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LegacyOutcomeCard({ outcome }: { outcome: LegacyImportOutcome }) {
+  const titleId = `legacy-outcome-${outcome.legacyId}-${outcome.status}`;
+  const statusLabel = outcome.status === "success" ? "Imported" : outcome.status === "partial" ? "Imported with copy issue" : "Import failed";
+
+  return (
+    <article className={`legacy-outcome-card legacy-outcome-card--${outcome.status}`} role="listitem" aria-labelledby={titleId}>
+      <div className="legacy-outcome-card__header">
+        <div>
+          <p className="signal-label">{statusLabel}</p>
+          <h4 id={titleId}>{outcome.targetName}</h4>
+        </div>
+        <span className={`status-pill status-pill--${outcome.status === "success" ? "running" : outcome.status === "partial" ? "pending" : "stopped"}`}>
+          {outcome.status}
+        </span>
+      </div>
+
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Copy" value={LEGACY_COPY_STATUS_LABELS[outcome.copyStatus]} />
+        <Metric label="Folder" value={outcome.folderName} />
+        <Metric label="Legacy name" value={outcome.legacyName} />
+        <Metric label="Profile ID" value={"profileId" in outcome ? outcome.profileId : undefined} />
+      </dl>
+
+      {"error" in outcome ? (
+        <section className="legacy-outcome-error" aria-label={`${outcome.targetName} import failure details`}>
+          <p>{outcome.error.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Code" value={outcome.error.code} />
+            <Metric label="Recoverable" value={outcome.error.recoverable ? "yes" : "no"} />
+            <Metric label="detailRef" value={outcome.error.detailRef} />
+          </dl>
+        </section>
+      ) : null}
+    </article>
   );
 }
 
@@ -1179,6 +1764,21 @@ function formatReconciliation(value: ChromiumStoppedProfileState | null): string
   }
 
   return `${value.profileId} ${value.termination} at ${formatProfileTimestamp(value.stoppedAt)}`;
+}
+
+function formatLegacyUserDataStatus(value: LegacyScanCandidate["userData"]["status"]): string {
+  return value === "available" ? "User-data available" : "No user-data found";
+}
+
+function makeLegacyUiError(code: string, message: string): SidecarClientError {
+  return {
+    code,
+    message,
+    recoverable: true,
+    detailRef: `ui-legacy-${code.toLowerCase().replace(/_/g, "-")}`,
+    source: "ui",
+    phase: "recoverable-error",
+  };
 }
 
 function formatValue(value: string | number | null | undefined): string {

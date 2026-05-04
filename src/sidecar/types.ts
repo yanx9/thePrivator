@@ -4,7 +4,7 @@ export type JsonObject = { [key: string]: JsonValue };
 
 export type SidecarUiPhase = "loading" | "healthy" | "recoverable-error" | "bridge-error";
 
-export type SidecarErrorSource = "sidecar" | "bridge" | "protocol";
+export type SidecarErrorSource = "sidecar" | "bridge" | "protocol" | "ui";
 
 export type SidecarHealthStatusValue = "healthy" | "degraded" | string;
 

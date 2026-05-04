@@ -1005,7 +1005,7 @@ function isSidecarClientError(value: unknown): value is SidecarClientError {
   }
 
   const source = value.source;
-  return source === "sidecar" || source === "bridge" || source === "protocol";
+  return source === "sidecar" || source === "bridge" || source === "protocol" || source === "ui";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
