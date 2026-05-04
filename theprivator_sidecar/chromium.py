@@ -601,20 +601,23 @@ def _wait_until_dead(pid: int, timeout_seconds: float) -> bool:
     while time.monotonic() <= deadline:
         if not is_process_alive(pid):
             return True
+        if _reap_if_child(pid):
+            return True
         time.sleep(0.025)
-    return not is_process_alive(pid)
+    return not is_process_alive(pid) or _reap_if_child(pid)
 
 
 
-def _reap_if_child(pid: int) -> None:
+def _reap_if_child(pid: int) -> bool:
     if platform.system() == "Windows":
-        return
+        return False
     try:
-        os.waitpid(pid, os.WNOHANG)
+        reaped_pid, _status = os.waitpid(pid, os.WNOHANG)
+        return reaped_pid == pid
     except ChildProcessError:
-        return
+        return False
     except OSError:
-        return
+        return False
 
 
 __all__ = [
