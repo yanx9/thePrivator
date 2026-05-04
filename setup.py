@@ -70,6 +70,7 @@ setup(
     entry_points={
         "console_scripts": [
             "theprivator=theprivator.main:main",
+            "theprivator-sidecar=theprivator_sidecar.main:main",
         ],
     },
     
