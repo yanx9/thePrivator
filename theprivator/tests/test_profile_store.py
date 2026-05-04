@@ -12,6 +12,7 @@ from theprivator_sidecar.profiles import (
     PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_WRITE_FAILED,
+    ProfileRecord,
     ProfileStore,
     STORE_VERSION,
 )
@@ -69,6 +70,7 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
     store_payload = json.loads(Path(tmp_path, "profile-store", "profiles.json").read_text())
     assert store_payload["storeVersion"] == STORE_VERSION
     assert store_payload["profiles"] == [profile]
+    assert "metadata" not in profile
     assert "status" not in profile
     assert "isActive" not in profile
     assert "process" not in profile
@@ -76,6 +78,56 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
     reloaded = ProfileStore(tmp_path).list()
     assert reloaded["profiles"] == [profile]
     assert reloaded["count"] == 1
+
+
+def test_optional_profile_metadata_round_trips_without_changing_storage_invariants(tmp_path):
+    metadata = {
+        "source": "legacy-theprivator",
+        "format": "legacy-profile",
+        "legacyFolder": "profile-one",
+        "legacyName": "Research",
+        "chromiumVersion": "116.0.0",
+        "remoteControlPort": 9222,
+        "hasUserData": True,
+    }
+    profile = ProfileRecord.create("Imported", metadata=metadata)
+    store_file = Path(tmp_path, "profile-store", "profiles.json")
+    store_file.parent.mkdir(parents=True)
+    store_file.write_text(
+        json.dumps(
+            {"storeVersion": STORE_VERSION, "profiles": [profile.to_dict()]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = ProfileStore(tmp_path).list()
+
+    stored_profile = result["profiles"][0]
+    assert stored_profile["metadata"] == metadata
+    assert stored_profile["storage"] == {
+        "profileDir": f"profile-store/profiles/{stored_profile['id']}",
+        "userDataDir": f"profile-store/profiles/{stored_profile['id']}/user-data",
+    }
+    assert not Path(stored_profile["storage"]["profileDir"]).is_absolute()
+    assert not Path(stored_profile["storage"]["userDataDir"]).is_absolute()
+
+
+def test_profile_metadata_must_be_json_safe_object(tmp_path):
+    profile = ProfileRecord.create("Imported")
+    payload = profile.to_dict()
+    payload["metadata"] = ["not", "an", "object"]
+    store_file = Path(tmp_path, "profile-store", "profiles.json")
+    store_file.parent.mkdir(parents=True)
+    store_file.write_text(
+        json.dumps({"storeVersion": STORE_VERSION, "profiles": [payload]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SidecarError) as exc_info:
+        ProfileStore(tmp_path).list()
+
+    assert_profile_error(exc_info, PROFILE_STORE_CORRUPT)
 
 
 def test_list_sorts_profiles_case_insensitively_and_mutations_return_refreshed_arrays(tmp_path):

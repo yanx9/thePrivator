@@ -8,6 +8,7 @@ state and absolute paths that the Tauri sidecar contract must not expose.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import uuid
@@ -90,9 +91,10 @@ class ProfileRecord:
     updatedAt: str
     defaults: ProfileDefaults
     storage: ProfileStorage
+    metadata: Optional[JsonObject] = None
 
     @classmethod
-    def create(cls, name: str) -> "ProfileRecord":
+    def create(cls, name: str, metadata: Optional[Mapping[str, Any]] = None) -> "ProfileRecord":
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
         return cls(
@@ -102,6 +104,7 @@ class ProfileRecord:
             updatedAt=now,
             defaults=ProfileDefaults(),
             storage=storage_for_profile(profile_id),
+            metadata=normalize_profile_metadata(metadata),
         )
 
     @classmethod
@@ -115,6 +118,7 @@ class ProfileRecord:
         updated_at = data.get("updatedAt")
         defaults = data.get("defaults")
         storage = data.get("storage")
+        metadata = normalize_profile_metadata(data.get("metadata")) if "metadata" in data else None
 
         if not isinstance(profile_id, str) or not is_uuid(profile_id):
             raise_corrupt_store()
@@ -142,6 +146,7 @@ class ProfileRecord:
             updatedAt=updated_at,
             defaults=ProfileDefaults(),
             storage=storage_for_profile(profile_id),
+            metadata=metadata,
         )
 
     def renamed(self, name: str) -> "ProfileRecord":
@@ -152,10 +157,11 @@ class ProfileRecord:
             updatedAt=utc_now_iso(),
             defaults=self.defaults,
             storage=self.storage,
+            metadata=self.metadata,
         )
 
     def to_dict(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "id": self.id,
             "name": self.name,
             "createdAt": self.createdAt,
@@ -163,6 +169,9 @@ class ProfileRecord:
             "defaults": asdict(self.defaults),
             "storage": asdict(self.storage),
         }
+        if self.metadata is not None:
+            payload["metadata"] = normalize_profile_metadata(self.metadata)
+        return payload
 
 
 class ProfileStore:
@@ -407,6 +416,44 @@ def ensure_no_duplicate_names(profiles: Sequence[ProfileRecord]) -> None:
         if folded in seen:
             raise_corrupt_store()
         seen.add(folded)
+
+
+def normalize_profile_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[JsonObject]:
+    """Return a JSON-safe copy of optional profile metadata.
+
+    Legacy import metadata is deliberately constrained to a JSON object so old
+    profile records can omit it and imported records cannot smuggle Python
+    objects, paths, or non-finite numbers into ``profiles.json``.
+    """
+    if metadata is None:
+        return None
+    if not isinstance(metadata, Mapping):
+        raise_corrupt_store()
+    return {key: _json_safe_metadata_value(value) for key, value in metadata.items() if _is_string_key(key)}
+
+
+def _is_string_key(key: Any) -> bool:
+    if not isinstance(key, str) or not key:
+        raise_corrupt_store()
+    return True
+
+
+def _json_safe_metadata_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        raise_corrupt_store()
+    if isinstance(value, list):
+        return [_json_safe_metadata_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            key: _json_safe_metadata_value(nested_value)
+            for key, nested_value in value.items()
+            if _is_string_key(key)
+        }
+    raise_corrupt_store()
 
 
 def normalize_profile_name(name: str) -> str:
