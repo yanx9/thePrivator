@@ -7,6 +7,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
+from . import chromium
 from .profiles import ProfileStore, require_string_param
 from .protocol import (
     DIAGNOSTIC_FAILURE,
@@ -129,6 +130,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
     if request.method.startswith("profiles."):
         return dispatch_profile_request(request)
 
+    if request.method.startswith("chromium."):
+        return dispatch_chromium_request(request)
+
     raise SidecarError(
         code=UNKNOWN_COMMAND,
         message="Unknown sidecar command.",
@@ -189,6 +193,48 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
             request_id=request.id,
             method=request.method,
         ) from error
+
+
+def dispatch_chromium_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch Chromium lifecycle commands through the sidecar-owned registry."""
+    try:
+        store_root = require_string_param(
+            request.params,
+            "storeRoot",
+            "Chromium storeRoot is required.",
+        )
+
+        if request.method == "chromium.status":
+            return chromium.status(store_root)
+        if request.method == "chromium.launch":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Chromium profileId is required.",
+            )
+            return chromium.launch(store_root, profile_id)
+        if request.method == "chromium.stop":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Chromium profileId is required.",
+            )
+            return chromium.stop(store_root, profile_id)
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
+
 
 
 def health_status() -> JsonObject:

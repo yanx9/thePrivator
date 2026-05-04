@@ -1,0 +1,299 @@
+"""Tests for the sidecar Chromium lifecycle registry and process contract."""
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any, Mapping
+
+import pytest
+
+from theprivator_sidecar import chromium
+from theprivator_sidecar.profiles import ProfileStore
+from theprivator_sidecar.protocol import (
+    CHROMIUM_ALREADY_RUNNING,
+    CHROMIUM_EXECUTABLE_NOT_FOUND,
+    CHROMIUM_LAUNCH_FAILED,
+    INVALID_REQUEST,
+    PROFILE_NOT_FOUND,
+    SidecarError,
+)
+
+
+def make_fake_chromium(tmp_path: Path) -> Path:
+    """Create a tiny executable that behaves like a long-lived browser process."""
+    script = tmp_path / "fake-chromium"
+    script.write_text(
+        "\n".join(
+            [
+                f"#!{sys.executable}",
+                "import json",
+                "import os",
+                "import signal",
+                "import sys",
+                "import time",
+                "capture = os.environ.get('THEPRIVATOR_FAKE_CHROMIUM_ARGV')",
+                "if capture:",
+                "    with open(capture, 'w', encoding='utf-8') as handle:",
+                "        json.dump(sys.argv, handle)",
+                "if os.environ.get('THEPRIVATOR_FAKE_CHROMIUM_EXIT_IMMEDIATELY') == '1':",
+                "    sys.exit(23)",
+                "def handle_term(signum, frame):",
+                "    if os.environ.get('THEPRIVATOR_FAKE_CHROMIUM_IGNORE_TERM') == '1' and signum == signal.SIGTERM:",
+                "        return",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, handle_term)",
+                "while True:",
+                "    time.sleep(0.1)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def create_profile(tmp_path: Path, name: str = "Research") -> Mapping[str, Any]:
+    return ProfileStore(tmp_path).create(name)["profile"]
+
+
+def assert_sidecar_error(exc_info: pytest.ExceptionInfo[SidecarError], code: str) -> SidecarError:
+    error = exc_info.value
+    assert error.code == code
+    assert error.recoverable is True
+    assert error.detail_ref.startswith("sidecar-")
+    assert "Traceback" not in error.message
+    return error
+
+
+def read_profiles_payload(store_root: Path) -> Mapping[str, Any]:
+    return json.loads((store_root / "profile-store" / "profiles.json").read_text(encoding="utf-8"))
+
+
+def assert_no_runtime_truth(profile: Mapping[str, Any]) -> None:
+    forbidden = {
+        "pid",
+        "process",
+        "command",
+        "status",
+        "running",
+        "stoppedAt",
+        "startedAt",
+        "termination",
+    }
+    assert forbidden.isdisjoint(profile.keys())
+
+
+def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_store_clean(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+
+    launch = chromium.launch(tmp_path, profile["id"])
+
+    try:
+        assert launch["profileId"] == profile["id"]
+        assert launch["status"] == "running"
+        assert launch["pid"] > 0
+        assert launch["startedAt"].endswith("Z")
+        assert launch["runningCount"] == 1
+        assert launch["userDataDir"] == profile["storage"]["userDataDir"]
+        assert not Path(launch["userDataDir"]).is_absolute()
+        assert str(tmp_path) not in json.dumps(launch)
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        user_data_arg = next(arg for arg in argv if arg.startswith("--user-data-dir="))
+        launched_user_data = Path(user_data_arg.split("=", 1)[1])
+        assert launched_user_data == tmp_path / profile["storage"]["userDataDir"]
+        assert launched_user_data.is_dir()
+        assert "--profile-directory=Default" in argv
+        assert "--no-first-run" in argv
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        assert status["reconciled"] == []
+        assert status["profiles"] == [
+            {
+                "profileId": profile["id"],
+                "status": "running",
+                "pid": launch["pid"],
+                "startedAt": launch["startedAt"],
+                "userDataDir": profile["storage"]["userDataDir"],
+            }
+        ]
+
+        with pytest.raises(SidecarError) as duplicate_exc:
+            chromium.launch(tmp_path, profile["id"])
+        duplicate = assert_sidecar_error(duplicate_exc, CHROMIUM_ALREADY_RUNNING)
+        assert str(tmp_path) not in duplicate.message
+        assert str(fake_chromium) not in duplicate.message
+
+        stopped = chromium.stop(tmp_path, profile["id"])
+        assert stopped["profileId"] == profile["id"]
+        assert stopped["status"] == "stopped"
+        assert stopped["termination"] == "graceful"
+        assert stopped["stoppedAt"].endswith("Z")
+        assert stopped["runningCount"] == 0
+        assert stopped["userDataDir"] == profile["storage"]["userDataDir"]
+
+        assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+    stored_profile = read_profiles_payload(tmp_path)["profiles"][0]
+    assert_no_runtime_truth(stored_profile)
+
+
+def test_status_reconciles_stale_registry_records_without_changing_profiles(tmp_path):
+    profile = create_profile(tmp_path)
+    runtime_dir = tmp_path / "profile-store" / "runtime"
+    runtime_dir.mkdir(parents=True)
+    registry_file = runtime_dir / "chromium-processes.json"
+    registry_file.write_text(
+        json.dumps(
+            {
+                "registryVersion": 1,
+                "processes": {
+                    profile["id"]: {
+                        "profileId": profile["id"],
+                        "pid": 99999999,
+                        "startedAt": "2026-01-01T00:00:00.000Z",
+                        "userDataDir": profile["storage"]["userDataDir"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = chromium.status(tmp_path)
+
+    assert result["runningCount"] == 0
+    assert result["profiles"] == []
+    assert result["reconciled"] == [
+        {
+            "profileId": profile["id"],
+            "status": "stopped",
+            "stoppedAt": result["reconciled"][0]["stoppedAt"],
+            "termination": "reconciled",
+            "userDataDir": profile["storage"]["userDataDir"],
+        }
+    ]
+    assert result["reconciled"][0]["stoppedAt"].endswith("Z")
+    assert json.loads(registry_file.read_text(encoding="utf-8"))["processes"] == {}
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_invalid_registry_json_is_treated_as_transient_bookkeeping(tmp_path):
+    profile = create_profile(tmp_path)
+    registry_file = tmp_path / "profile-store" / "runtime" / "chromium-processes.json"
+    registry_file.parent.mkdir(parents=True)
+    registry_file.write_text("{not-json", encoding="utf-8")
+
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+
+    stopped = chromium.stop(tmp_path, profile["id"])
+    assert stopped["termination"] == "already-stopped"
+    assert stopped["runningCount"] == 0
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+@pytest.mark.parametrize("bad_profile_id", [None, 42, "", "   "])
+def test_launch_and_stop_reject_malformed_profile_ids(tmp_path, bad_profile_id):
+    with pytest.raises(SidecarError) as launch_exc:
+        chromium.launch(tmp_path, bad_profile_id)  # type: ignore[arg-type]
+    assert_sidecar_error(launch_exc, INVALID_REQUEST)
+
+    with pytest.raises(SidecarError) as stop_exc:
+        chromium.stop(tmp_path, bad_profile_id)  # type: ignore[arg-type]
+    assert_sidecar_error(stop_exc, INVALID_REQUEST)
+
+
+def test_unknown_profile_id_uses_profile_store_not_found_error(tmp_path, monkeypatch):
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, "missing-profile")
+
+    assert_sidecar_error(exc_info, PROFILE_NOT_FOUND)
+
+
+def test_missing_and_invalid_chromium_discovery_returns_typed_error(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    missing_path = tmp_path / "missing-chromium"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(missing_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, CHROMIUM_EXECUTABLE_NOT_FOUND)
+    assert str(missing_path) not in error.message
+    assert "THEPRIVATOR_CHROMIUM_PATH" in error.message
+
+
+def test_missing_standard_chromium_names_return_typed_error(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    monkeypatch.delenv("THEPRIVATOR_CHROMIUM_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    assert_sidecar_error(exc_info, CHROMIUM_EXECUTABLE_NOT_FOUND)
+
+
+def test_launch_failure_does_not_leave_runtime_record_or_profile_runtime_fields(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_EXIT_IMMEDIATELY", "1")
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, CHROMIUM_LAUNCH_FAILED)
+    assert str(fake_chromium) not in error.message
+    assert str(tmp_path) not in error.message
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_stop_forces_owned_process_tree_after_graceful_timeout(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_IGNORE_TERM", "1")
+    monkeypatch.setattr(chromium, "GRACEFUL_STOP_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(chromium, "FORCE_STOP_TIMEOUT_SECONDS", 0.1)
+
+    launch = chromium.launch(tmp_path, profile["id"])
+
+    stopped = chromium.stop(tmp_path, profile["id"])
+
+    assert stopped["profileId"] == profile["id"]
+    assert stopped["status"] == "stopped"
+    assert stopped["termination"] == "forced"
+    assert stopped["runningCount"] == 0
+    assert stopped["userDataDir"] == profile["storage"]["userDataDir"]
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert not chromium.is_process_alive(launch["pid"])
+
+
+def test_stop_already_stopped_profile_is_successful_and_safe(tmp_path):
+    profile = create_profile(tmp_path)
+
+    result = chromium.stop(tmp_path, profile["id"])
+
+    assert result["profileId"] == profile["id"]
+    assert result["status"] == "stopped"
+    assert result["termination"] == "already-stopped"
+    assert result["runningCount"] == 0
+    assert result["userDataDir"] == profile["storage"]["userDataDir"]
+    assert result["stoppedAt"].endswith("Z")

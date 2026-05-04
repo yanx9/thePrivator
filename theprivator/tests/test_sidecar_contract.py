@@ -1,6 +1,7 @@
 """Contract tests for the ThePrivator Python sidecar NDJSON protocol."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,14 +13,16 @@ from theprivator import __version__ as app_version
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_sidecar(input_text):
+def run_sidecar(input_text, env=None):
     """Run the sidecar module with isolated stdin/stdout/stderr streams."""
+    process_env = None if env is None else {**os.environ, **env}
     return subprocess.run(
         [sys.executable, "-m", "theprivator_sidecar"],
         input=input_text,
         text=True,
         capture_output=True,
         cwd=REPO_ROOT,
+        env=process_env,
         check=False,
     )
 
@@ -44,6 +47,35 @@ def assert_error_envelope(response, code, request_id=None):
     assert error["recoverable"] is True
     assert error["detailRef"].startswith("sidecar-")
     return error
+
+
+def make_fake_chromium(tmp_path):
+    script = tmp_path / "fake-chromium"
+    script.write_text(
+        "\n".join(
+            [
+                f"#!{sys.executable}",
+                "import json",
+                "import os",
+                "import signal",
+                "import sys",
+                "import time",
+                "capture = os.environ.get('THEPRIVATOR_FAKE_CHROMIUM_ARGV')",
+                "if capture:",
+                "    with open(capture, 'w', encoding='utf-8') as handle:",
+                "        json.dump(sys.argv, handle)",
+                "def handle_term(signum, frame):",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, handle_term)",
+                "while True:",
+                "    time.sleep(0.1)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
 
 
 def test_health_status_success_returns_runtime_metadata_and_diagnostics():
@@ -376,6 +408,18 @@ def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_
         {"id": "bad-store", "method": "profiles.list", "params": {"storeRoot": 42}},
         {"id": "missing-name", "method": "profiles.create", "params": {"storeRoot": "root"}},
         {"id": "missing-id", "method": "profiles.delete", "params": {"storeRoot": "root"}},
+        {"id": "chromium-missing-store", "method": "chromium.status", "params": {}},
+        {"id": "chromium-bad-store", "method": "chromium.status", "params": {"storeRoot": 42}},
+        {
+            "id": "chromium-missing-profile",
+            "method": "chromium.launch",
+            "params": {"storeRoot": "root"},
+        },
+        {
+            "id": "chromium-blank-profile",
+            "method": "chromium.stop",
+            "params": {"storeRoot": "root", "profileId": "   "},
+        },
     ],
 )
 def test_profiles_malformed_params_return_invalid_request(payload):
@@ -391,3 +435,161 @@ def test_profiles_malformed_params_return_invalid_request(payload):
     assert diagnostic["detailRef"] == error["detailRef"]
     assert "Traceback" not in proc.stdout
     assert "Traceback" not in proc.stderr
+
+
+def test_chromium_launch_status_stop_sidecar_contract_redacts_runtime_details(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv-should-not-leak.json"
+    env = {
+        "THEPRIVATOR_CHROMIUM_PATH": str(fake_chromium),
+        "THEPRIVATOR_FAKE_CHROMIUM_ARGV": str(argv_capture),
+    }
+
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "chromium-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Launch Me"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+
+    try:
+        launch_proc = run_sidecar(
+            request_line(
+                {
+                    "id": "chromium-launch",
+                    "method": "chromium.launch",
+                    "params": {"storeRoot": store_root, "profileId": profile["id"]},
+                }
+            ),
+            env=env,
+        )
+        launch_response = parse_ndjson(launch_proc.stdout)[0]
+        launch_diagnostic = parse_ndjson(launch_proc.stderr)[0]
+        assert launch_response["ok"] is True
+        launch = launch_response["result"]
+        assert launch["profileId"] == profile["id"]
+        assert launch["status"] == "running"
+        assert launch["pid"] > 0
+        assert launch["startedAt"].endswith("Z")
+        assert launch["runningCount"] == 1
+        assert launch["userDataDir"] == profile["storage"]["userDataDir"]
+        assert launch_diagnostic == {
+            "event": "sidecar.request",
+            "requestId": "chromium-launch",
+            "method": "chromium.launch",
+            "status": "ok",
+            "durationMs": launch_diagnostic["durationMs"],
+            "errorCode": None,
+            "detailRef": None,
+        }
+
+        status_proc = run_sidecar(
+            request_line(
+                {
+                    "id": "chromium-status",
+                    "method": "chromium.status",
+                    "params": {"storeRoot": store_root},
+                }
+            )
+        )
+        status_response = parse_ndjson(status_proc.stdout)[0]
+        assert status_response["ok"] is True
+        assert status_response["result"]["runningCount"] == 1
+        assert status_response["result"]["profiles"][0]["pid"] == launch["pid"]
+        assert status_response["result"]["profiles"][0]["startedAt"] == launch["startedAt"]
+
+        stop_proc = run_sidecar(
+            request_line(
+                {
+                    "id": "chromium-stop",
+                    "method": "chromium.stop",
+                    "params": {"storeRoot": store_root, "profileId": profile["id"]},
+                }
+            )
+        )
+        stop_response = parse_ndjson(stop_proc.stdout)[0]
+        stop_diagnostic = parse_ndjson(stop_proc.stderr)[0]
+        assert stop_response["ok"] is True
+        assert stop_response["result"]["status"] == "stopped"
+        assert stop_response["result"]["termination"] in {"graceful", "reconciled"}
+        assert stop_response["result"]["runningCount"] == 0
+        assert stop_diagnostic["method"] == "chromium.stop"
+        assert stop_diagnostic["status"] == "ok"
+
+        combined = (
+            launch_proc.stdout
+            + launch_proc.stderr
+            + status_proc.stdout
+            + status_proc.stderr
+            + stop_proc.stdout
+            + stop_proc.stderr
+        )
+        assert store_root not in combined
+        assert str(fake_chromium) not in combined
+        assert str(argv_capture) not in combined
+        assert "--user-data-dir" not in combined
+        assert "Traceback" not in combined
+    finally:
+        run_sidecar(
+            request_line(
+                {
+                    "id": "chromium-cleanup",
+                    "method": "chromium.stop",
+                    "params": {"storeRoot": store_root, "profileId": profile["id"]},
+                }
+            )
+        )
+
+    stored_profile = json.loads(
+        Path(store_root, "profile-store", "profiles.json").read_text(encoding="utf-8")
+    )["profiles"][0]
+    assert "pid" not in stored_profile
+    assert "status" not in stored_profile
+    assert "process" not in stored_profile
+    assert "command" not in stored_profile
+
+
+def test_chromium_missing_executable_sidecar_error_is_typed_and_redacted(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "chromium-missing-exe-profile",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "No Browser"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    missing_executable = tmp_path / "missing-chromium-path-should-not-leak"
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "chromium-missing-exe",
+                "method": "chromium.launch",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        ),
+        env={"THEPRIVATOR_CHROMIUM_PATH": str(missing_executable), "PATH": str(tmp_path / "empty")},
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "CHROMIUM_EXECUTABLE_NOT_FOUND", "chromium-missing-exe")
+    assert "THEPRIVATOR_CHROMIUM_PATH" in error["message"]
+    assert diagnostic["event"] == "sidecar.request"
+    assert diagnostic["method"] == "chromium.launch"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "CHROMIUM_EXECUTABLE_NOT_FOUND"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    combined = proc.stdout + proc.stderr
+    assert store_root not in combined
+    assert str(missing_executable) not in combined
+    assert profile["name"] not in proc.stderr
+    assert "Traceback" not in combined

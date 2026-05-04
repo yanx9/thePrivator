@@ -179,6 +179,16 @@ class ProfileStore:
         profiles = self._read_profiles()
         return self._collection_response(profiles)
 
+    def get(self, profile_id: str) -> ProfileRecord:
+        """Load one profile record by id through the canonical store parser."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Profile id is required.",
+            )
+        profiles = self._read_profiles()
+        return self._find_profile(profiles, profile_id)
+
     def create(self, name: str) -> JsonObject:
         """Create a profile, persist it, and return the refreshed list."""
         valid_name = normalize_profile_name(name)
