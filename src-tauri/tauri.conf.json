@@ -28,7 +28,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm"],
+    "icon": ["icons/icon.png"],
     "externalBin": ["binaries/theprivator-sidecar"],
     "shortDescription": "ThePrivator desktop shell",
     "longDescription": "A Tauri 2 desktop shell for ThePrivator's typed Rust and Python sidecar rewrite spine."

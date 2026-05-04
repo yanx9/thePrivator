@@ -62,6 +62,12 @@ pip install .
 python -m theprivator
 ```
 
+### Tauri rewrite spine health smoke
+
+The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. For a current-OS desktop smoke, install the Node/Python/Rust prerequisites, run `npm run verify:s01`, then build and open the packaged Tauri artifact with `npm run tauri build`.
+
+See [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) for the full contributor runbook, including `npm run tauri dev`, packaged-artifact checks, and the expected health/error UI states.
+
 ### Creating Your First Profile
 
 1. Click **"➕ New Profile"** in the sidebar
