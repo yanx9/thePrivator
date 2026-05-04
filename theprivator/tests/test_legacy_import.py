@@ -8,15 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from theprivator_sidecar.legacy_import import scan_legacy_profiles
+from theprivator_sidecar.legacy_import import import_legacy_profiles, scan_legacy_profiles
 from theprivator_sidecar.profiles import ProfileStore
 from theprivator_sidecar.protocol import (
     INVALID_REQUEST,
     LEGACY_CONFIG_MALFORMED,
     LEGACY_CONFIG_MISSING,
     LEGACY_ROOT_INVALID,
+    LEGACY_SELECTION_INVALID,
+    LEGACY_USER_DATA_COPY_FAILED,
     PROFILE_DUPLICATE_NAME,
     PROFILE_INVALID_NAME,
+    PROFILE_STORE_WRITE_FAILED,
     SidecarError,
 )
 
@@ -301,3 +304,253 @@ def test_scan_surfaces_profile_store_corruption_from_duplicate_detection(tmp_pat
 
     assert_sidecar_error(exc_info, "PROFILE_STORE_CORRUPT")
     assert store_file.read_text(encoding="utf-8") == "{not-json"
+
+
+def test_import_success_creates_profile_through_store_copies_user_data_and_preserves_legacy_tree(tmp_path, capsys):
+    legacy_root = tmp_path / "legacy-root-should-not-leak"
+    app_root = tmp_path / "app-root-should-not-leak"
+    legacy_profile = legacy_root / "profile-one"
+    write_config(
+        legacy_profile,
+        {
+            "name": "Legacy Research",
+            "chromium_version": "116.0.0",
+            "version": "2",
+            "rc_port": 9222,
+            "proxy_user": "alice-should-not-leak",
+            "proxy_pass": "secret-should-not-leak",
+            "absolute_path": str(tmp_path / "legacy-secret-path"),
+        },
+    )
+    (legacy_profile / "user-data" / "Default").mkdir(parents=True)
+    (legacy_profile / "user-data" / "Default" / "Preferences").write_text(
+        '{"browser":"copied-data-not-rendered"}',
+        encoding="utf-8",
+    )
+    before_legacy = snapshot_tree(legacy_root)
+    candidate = scan_legacy_profiles(legacy_root, app_root)["candidates"][0]
+
+    result = import_legacy_profiles(
+        legacy_root,
+        app_root,
+        [{"legacyId": candidate["legacyId"], "targetName": "Imported Research"}],
+    )
+
+    assert result["importVersion"] == 1
+    assert result["requestedCount"] == 1
+    assert result["successCount"] == 1
+    assert result["partialCount"] == 0
+    assert result["failedCount"] == 0
+    outcome = result["outcomes"][0]
+    assert outcome["status"] == "success"
+    assert outcome["copyStatus"] == "copied"
+    assert outcome["legacyId"] == candidate["legacyId"]
+    assert outcome["folderName"] == "profile-one"
+    assert outcome["legacyName"] == "Legacy Research"
+    assert outcome["targetName"] == "Imported Research"
+    assert outcome["profileId"]
+    assert "error" not in outcome
+
+    store_result = ProfileStore(app_root).list()
+    assert store_result["count"] == 1
+    profile = store_result["profiles"][0]
+    assert profile["id"] == outcome["profileId"]
+    assert profile["name"] == "Imported Research"
+    assert profile["metadata"] == {
+        "source": "legacy-theprivator",
+        "format": "legacy-profile",
+        "formatVersion": "2",
+        "legacyFolder": "profile-one",
+        "legacyName": "Legacy Research",
+        "chromiumVersion": "116.0.0",
+        "remoteControlPort": 9222,
+        "hasUserData": True,
+    }
+    assert not Path(profile["storage"]["profileDir"]).is_absolute()
+    assert not Path(profile["storage"]["userDataDir"]).is_absolute()
+    copied_file = app_root / profile["storage"]["userDataDir"] / "Default" / "Preferences"
+    assert copied_file.read_text(encoding="utf-8") == '{"browser":"copied-data-not-rendered"}'
+    assert snapshot_tree(legacy_root) == before_legacy
+
+    store_payload = (app_root / "profile-store" / "profiles.json").read_text(encoding="utf-8")
+    assert str(legacy_root) not in store_payload
+    assert str(app_root) not in store_payload
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert_scan_output_redacted(
+        result,
+        legacy_root,
+        app_root,
+        "alice-should-not-leak",
+        "secret-should-not-leak",
+        tmp_path / "legacy-secret-path",
+        "copied-data-not-rendered",
+    )
+
+
+def test_import_empty_selection_returns_empty_result_without_profile_writes(tmp_path):
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    app_root = tmp_path / "app"
+
+    result = import_legacy_profiles(legacy_root, app_root, [])
+
+    assert result == {
+        "importVersion": 1,
+        "requestedCount": 0,
+        "successCount": 0,
+        "partialCount": 0,
+        "failedCount": 0,
+        "outcomes": [],
+    }
+    assert not app_root.exists()
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        "not-a-list",
+        ["not-an-object"],
+        [{}],
+        [{"legacyId": "", "targetName": "Imported"}],
+        [{"legacyId": "legacy-abc", "targetName": "   "}],
+        [{"legacyId": "legacy-abc", "targetName": 42}],
+    ],
+)
+def test_import_rejects_malformed_items_before_side_effects(tmp_path, items):
+    legacy_root = tmp_path / "legacy"
+    write_config(legacy_root / "profile", {"name": "Profile"})
+    app_root = tmp_path / "app"
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_legacy_profiles(legacy_root, app_root, items)  # type: ignore[arg-type]
+
+    assert_sidecar_error(exc_info, INVALID_REQUEST)
+    assert not app_root.exists()
+
+
+def test_import_rejects_duplicate_selected_legacy_ids_before_side_effects(tmp_path):
+    legacy_root = tmp_path / "legacy"
+    write_config(legacy_root / "profile", {"name": "Profile"})
+    app_root = tmp_path / "app"
+    legacy_id = scan_legacy_profiles(legacy_root, app_root)["candidates"][0]["legacyId"]
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_legacy_profiles(
+            legacy_root,
+            app_root,
+            [
+                {"legacyId": legacy_id, "targetName": "First"},
+                {"legacyId": legacy_id, "targetName": "Second"},
+            ],
+        )
+
+    assert_sidecar_error(exc_info, INVALID_REQUEST)
+    assert not app_root.exists()
+
+
+def test_import_reports_per_item_failures_and_continues_other_profiles(tmp_path):
+    legacy_root = tmp_path / "legacy"
+    app_root = tmp_path / "app"
+    ProfileStore(app_root).create("Taken")
+    write_config(legacy_root / "good", {"name": "Good"})
+    write_config(legacy_root / "duplicate", {"name": "Duplicate"})
+    write_config(legacy_root / "invalid", {"name": "Invalid"})
+    scanned = {candidate["folderName"]: candidate for candidate in scan_legacy_profiles(legacy_root, app_root)["candidates"]}
+
+    result = import_legacy_profiles(
+        legacy_root,
+        app_root,
+        [
+            {"legacyId": scanned["good"]["legacyId"], "targetName": "Imported Good"},
+            {"legacyId": scanned["duplicate"]["legacyId"], "targetName": "taken"},
+            {"legacyId": "legacy-stale-selection", "targetName": "Stale"},
+            {"legacyId": scanned["invalid"]["legacyId"], "targetName": "Bad/Name"},
+        ],
+    )
+
+    assert result["requestedCount"] == 4
+    assert result["successCount"] == 1
+    assert result["partialCount"] == 0
+    assert result["failedCount"] == 3
+    outcomes = {outcome["targetName"]: outcome for outcome in result["outcomes"]}
+    assert outcomes["Imported Good"]["status"] == "success"
+    assert outcomes["Imported Good"]["copyStatus"] == "missing"
+    assert outcomes["taken"]["status"] == "failed"
+    assert outcomes["taken"]["copyStatus"] == "skipped"
+    assert outcomes["taken"]["error"]["code"] == PROFILE_DUPLICATE_NAME
+    assert outcomes["Stale"]["status"] == "failed"
+    assert outcomes["Stale"]["error"]["code"] == LEGACY_SELECTION_INVALID
+    assert outcomes["Bad/Name"]["status"] == "failed"
+    assert outcomes["Bad/Name"]["error"]["code"] == PROFILE_INVALID_NAME
+    assert all(outcome["error"]["detailRef"].startswith("sidecar-") for outcome in result["outcomes"] if "error" in outcome)
+    profile_names = [profile["name"] for profile in ProfileStore(app_root).list()["profiles"]]
+    assert profile_names == ["Imported Good", "Taken"]
+
+
+def test_import_profile_store_write_failure_is_per_item_failure_without_record(tmp_path, monkeypatch):
+    legacy_root = tmp_path / "legacy"
+    app_root = tmp_path / "app"
+    write_config(legacy_root / "profile", {"name": "Profile"})
+    candidate = scan_legacy_profiles(legacy_root, app_root)["candidates"][0]
+
+    def fail_replace(source, destination):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("theprivator_sidecar.profiles.os.replace", fail_replace)
+
+    result = import_legacy_profiles(
+        legacy_root,
+        app_root,
+        [{"legacyId": candidate["legacyId"], "targetName": "Imported"}],
+    )
+
+    assert result["successCount"] == 0
+    assert result["partialCount"] == 0
+    assert result["failedCount"] == 1
+    outcome = result["outcomes"][0]
+    assert outcome["status"] == "failed"
+    assert outcome["copyStatus"] == "skipped"
+    assert outcome["error"]["code"] == PROFILE_STORE_WRITE_FAILED
+    assert "profileId" not in outcome
+    store_file = app_root / "profile-store" / "profiles.json"
+    assert not store_file.exists()
+
+
+def test_import_partial_outcome_on_unsafe_user_data_symlink_keeps_profile_and_legacy_tree_unchanged(tmp_path):
+    legacy_root = tmp_path / "legacy-root-should-not-leak"
+    app_root = tmp_path / "app-root-should-not-leak"
+    legacy_profile = legacy_root / "profile-one"
+    write_config(legacy_profile, {"name": "Symlinked"})
+    user_data = legacy_profile / "user-data"
+    user_data.mkdir(parents=True)
+    outside_secret = tmp_path / "outside-secret-should-not-leak.txt"
+    outside_secret.write_text("outside", encoding="utf-8")
+    (user_data / "unsafe-link").symlink_to(outside_secret)
+    before_legacy = snapshot_tree(legacy_root)
+    candidate = scan_legacy_profiles(legacy_root, app_root)["candidates"][0]
+
+    result = import_legacy_profiles(
+        legacy_root,
+        app_root,
+        [{"legacyId": candidate["legacyId"], "targetName": "Imported Symlink"}],
+    )
+
+    assert result["successCount"] == 0
+    assert result["partialCount"] == 1
+    assert result["failedCount"] == 0
+    outcome = result["outcomes"][0]
+    assert outcome["status"] == "partial"
+    assert outcome["copyStatus"] == "failed"
+    assert outcome["profileId"]
+    assert outcome["error"]["code"] == LEGACY_USER_DATA_COPY_FAILED
+    assert outcome["error"]["detailRef"].startswith("sidecar-")
+
+    profile = ProfileStore(app_root).list()["profiles"][0]
+    assert profile["name"] == "Imported Symlink"
+    destination = app_root / profile["storage"]["userDataDir"]
+    assert destination.exists()
+    assert snapshot_tree(destination) == []
+    assert snapshot_tree(legacy_root) == before_legacy
+    assert_scan_output_redacted(result, legacy_root, app_root, outside_secret)

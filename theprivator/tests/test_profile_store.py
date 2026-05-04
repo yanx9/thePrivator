@@ -113,6 +113,46 @@ def test_optional_profile_metadata_round_trips_without_changing_storage_invarian
     assert not Path(stored_profile["storage"]["userDataDir"]).is_absolute()
 
 
+def test_create_imported_profile_uses_canonical_validation_storage_and_metadata(tmp_path):
+    store = ProfileStore(tmp_path)
+    metadata = {
+        "source": "legacy-theprivator",
+        "format": "legacy-profile",
+        "legacyFolder": "profile-one",
+        "hasUserData": False,
+    }
+
+    result = store.create_imported("Imported", metadata=metadata)
+
+    profile = result["profile"]
+    assert profile["name"] == "Imported"
+    assert profile["metadata"] == metadata
+    assert profile["storage"] == {
+        "profileDir": f"profile-store/profiles/{profile['id']}",
+        "userDataDir": f"profile-store/profiles/{profile['id']}/user-data",
+    }
+    assert Path(tmp_path, profile["storage"]["userDataDir"]).is_dir()
+    assert ProfileStore(tmp_path).list()["profiles"] == [profile]
+
+
+@pytest.mark.parametrize("name", ["Bad/Name", "Trailing "])
+def test_create_imported_profile_reuses_name_validation(tmp_path, name):
+    with pytest.raises(SidecarError) as exc_info:
+        ProfileStore(tmp_path).create_imported(name, metadata={"source": "legacy-theprivator"})
+
+    assert_profile_error(exc_info, PROFILE_INVALID_NAME)
+
+
+def test_create_imported_profile_reuses_duplicate_name_validation(tmp_path):
+    store = ProfileStore(tmp_path)
+    store.create("Research")
+
+    with pytest.raises(SidecarError) as exc_info:
+        store.create_imported("research", metadata={"source": "legacy-theprivator"})
+
+    assert_profile_error(exc_info, PROFILE_DUPLICATE_NAME)
+
+
 def test_profile_metadata_must_be_json_safe_object(tmp_path):
     profile = ProfileRecord.create("Imported")
     payload = profile.to_dict()

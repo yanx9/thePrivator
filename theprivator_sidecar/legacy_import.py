@@ -1,17 +1,24 @@
-"""Sidecar-owned legacy ThePrivator scan contract.
+"""Sidecar-owned legacy ThePrivator scan and import contract.
 
-The legacy import flow starts with a read-only scan of a user-selected root. This
-module intentionally does not reuse ``theprivator.utils.legacy_migration``: that
-legacy helper recursively sizes user-data, logs absolute paths, sanitizes names,
-and writes through the GUI profile manager. The sidecar contract must instead
-return compact typed results, reuse S02 profile-store validation rules, and avoid
-mutating either the legacy root or app-data profile store during scan.
+The legacy import flow starts with a read-only scan of a user-selected root and
+then imports explicit selections through ``ProfileStore``. This module
+intentionally does not reuse ``theprivator.utils.legacy_migration``: that legacy
+helper recursively sizes user-data, logs absolute paths, sanitizes names, and
+writes through the GUI profile manager. The sidecar contract must instead return
+compact typed results, reuse S02 profile-store validation rules, and avoid
+mutating either the legacy root or app-data profile store during scan. Import is
+non-destructive: legacy files are read only, destination user-data is copied into
+a sidecar-owned relative storage target, and per-profile copy failures become
+partial outcomes rather than top-level tracebacks.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Optional, Union
 
@@ -21,6 +28,8 @@ from .protocol import (
     LEGACY_CONFIG_MALFORMED,
     LEGACY_CONFIG_MISSING,
     LEGACY_ROOT_INVALID,
+    LEGACY_SELECTION_INVALID,
+    LEGACY_USER_DATA_COPY_FAILED,
     PROFILE_DUPLICATE_NAME,
     PROFILE_INVALID_NAME,
     JsonObject,
@@ -29,9 +38,18 @@ from .protocol import (
 )
 
 SCAN_VERSION = 1
+IMPORT_VERSION = 1
 LEGACY_SOURCE = "legacy-theprivator"
 LEGACY_FORMAT = "legacy-profile"
 LEGACY_ID_PREFIX = "legacy-"
+
+_IMPORT_STATUS_SUCCESS = "success"
+_IMPORT_STATUS_PARTIAL = "partial"
+_IMPORT_STATUS_FAILED = "failed"
+_COPY_STATUS_COPIED = "copied"
+_COPY_STATUS_MISSING = "missing"
+_COPY_STATUS_FAILED = "failed"
+_COPY_STATUS_SKIPPED = "skipped"
 
 
 def scan_legacy_profiles(legacy_root: Union[str, Path], store_root: Union[str, Path]) -> JsonObject:
@@ -66,6 +84,149 @@ def scan_legacy_profiles(legacy_root: Union[str, Path], store_root: Union[str, P
         "candidates": candidates,
         "issues": [],
     }
+
+
+def import_legacy_profiles(
+    legacy_root: Union[str, Path],
+    store_root: Union[str, Path],
+    items: Any,
+) -> JsonObject:
+    """Import selected legacy profiles with per-profile outcomes.
+
+    The item list is validated up front so malformed shapes and duplicate
+    selected legacy IDs cannot produce partial side effects. A fresh scan maps
+    opaque ``legacyId`` values back to immediate child folders under
+    ``legacy_root``; the ID is never interpreted as a path. Profile records are
+    created only through ``ProfileStore.create_imported`` so S02 validation,
+    duplicate checks, relative storage construction, and atomic store writes stay
+    canonical. User-data copy uses a sibling temporary directory and converts
+    copy failures into ``partial`` outcomes while retaining the imported record.
+    """
+    import_items = _validated_import_items(items)
+    if not import_items:
+        return _import_response([])
+
+    root = _validated_legacy_root(legacy_root)
+    scan_result = scan_legacy_profiles(root, store_root)
+    candidates_by_id = {
+        candidate["legacyId"]: candidate
+        for candidate in scan_result["candidates"]
+        if isinstance(candidate, Mapping) and isinstance(candidate.get("legacyId"), str)
+    }
+
+    store = ProfileStore(store_root)
+    outcomes = []
+    for item in import_items:
+        legacy_id = item["legacyId"]
+        target_name = item["targetName"]
+        candidate = candidates_by_id.get(legacy_id)
+        if candidate is None:
+            outcomes.append(
+                _failed_outcome(
+                    legacy_id=legacy_id,
+                    target_name=target_name,
+                    error=_outcome_error(
+                        LEGACY_SELECTION_INVALID,
+                        "Selected legacy profile was not found in a fresh scan.",
+                    ),
+                )
+            )
+            continue
+
+        try:
+            create_result = store.create_imported(target_name, metadata=_candidate_metadata(candidate))
+        except SidecarError as error:
+            outcomes.append(
+                _failed_outcome(
+                    legacy_id=legacy_id,
+                    target_name=target_name,
+                    candidate=candidate,
+                    error=error.to_dict(),
+                )
+            )
+            continue
+
+        profile = create_result["profile"]
+        profile_id = str(profile["id"])
+        source_user_data = root / str(candidate["folderName"]) / "user-data"
+        if not _candidate_has_user_data(candidate) or not _is_directory(source_user_data):
+            outcomes.append(
+                _success_outcome(
+                    legacy_id=legacy_id,
+                    target_name=target_name,
+                    candidate=candidate,
+                    profile_id=profile_id,
+                    copy_status=_COPY_STATUS_MISSING,
+                )
+            )
+            continue
+
+        destination = Path(store_root) / str(profile["storage"]["userDataDir"])
+        try:
+            _copy_user_data(source_user_data, destination)
+        except SidecarError as error:
+            outcomes.append(
+                _partial_outcome(
+                    legacy_id=legacy_id,
+                    target_name=target_name,
+                    candidate=candidate,
+                    profile_id=profile_id,
+                    error=error.to_dict(),
+                )
+            )
+            continue
+
+        outcomes.append(
+            _success_outcome(
+                legacy_id=legacy_id,
+                target_name=target_name,
+                candidate=candidate,
+                profile_id=profile_id,
+                copy_status=_COPY_STATUS_COPIED,
+            )
+        )
+
+    return _import_response(outcomes)
+
+
+def _validated_import_items(items: Any) -> list[JsonObject]:
+    if not isinstance(items, list):
+        raise SidecarError(
+            code=INVALID_REQUEST,
+            message="Legacy import items must be a list.",
+        )
+
+    seen_legacy_ids: set[str] = set()
+    validated = []
+    for raw_item in items:
+        if not isinstance(raw_item, Mapping):
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Legacy import item must be an object.",
+            )
+
+        legacy_id = raw_item.get("legacyId")
+        target_name = raw_item.get("targetName")
+        if not isinstance(legacy_id, str) or not legacy_id.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Legacy import item legacyId is required.",
+            )
+        if not isinstance(target_name, str) or not target_name.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Legacy import item targetName is required.",
+            )
+        if legacy_id in seen_legacy_ids:
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Legacy import item legacyId values must be unique.",
+            )
+
+        seen_legacy_ids.add(legacy_id)
+        validated.append({"legacyId": legacy_id, "targetName": target_name})
+
+    return validated
 
 
 def _validated_legacy_root(value: Union[str, Path]) -> Path:
@@ -225,6 +386,168 @@ def _has_user_data(profile_dir: Path) -> bool:
         return False
 
 
+def _candidate_metadata(candidate: Mapping[str, Any]) -> JsonObject:
+    metadata = candidate.get("metadata")
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
+def _candidate_has_user_data(candidate: Mapping[str, Any]) -> bool:
+    user_data = candidate.get("userData")
+    return isinstance(user_data, Mapping) and user_data.get("status") == "available"
+
+
+def _success_outcome(
+    *,
+    legacy_id: str,
+    target_name: str,
+    candidate: Mapping[str, Any],
+    profile_id: str,
+    copy_status: str,
+) -> JsonObject:
+    outcome = _base_outcome(legacy_id=legacy_id, target_name=target_name, candidate=candidate)
+    outcome.update(
+        {
+            "status": _IMPORT_STATUS_SUCCESS,
+            "profileId": profile_id,
+            "copyStatus": copy_status,
+        }
+    )
+    return outcome
+
+
+def _partial_outcome(
+    *,
+    legacy_id: str,
+    target_name: str,
+    candidate: Mapping[str, Any],
+    profile_id: str,
+    error: JsonObject,
+) -> JsonObject:
+    outcome = _base_outcome(legacy_id=legacy_id, target_name=target_name, candidate=candidate)
+    outcome.update(
+        {
+            "status": _IMPORT_STATUS_PARTIAL,
+            "profileId": profile_id,
+            "copyStatus": _COPY_STATUS_FAILED,
+            "error": error,
+        }
+    )
+    return outcome
+
+
+def _failed_outcome(
+    *,
+    legacy_id: str,
+    target_name: str,
+    error: JsonObject,
+    candidate: Optional[Mapping[str, Any]] = None,
+) -> JsonObject:
+    outcome = _base_outcome(legacy_id=legacy_id, target_name=target_name, candidate=candidate)
+    outcome.update(
+        {
+            "status": _IMPORT_STATUS_FAILED,
+            "copyStatus": _COPY_STATUS_SKIPPED,
+            "error": error,
+        }
+    )
+    return outcome
+
+
+def _base_outcome(
+    *,
+    legacy_id: str,
+    target_name: str,
+    candidate: Optional[Mapping[str, Any]],
+) -> JsonObject:
+    outcome: JsonObject = {
+        "legacyId": legacy_id,
+        "targetName": target_name,
+    }
+    if candidate is not None:
+        folder_name = candidate.get("folderName")
+        legacy_name = candidate.get("legacyName")
+        if isinstance(folder_name, str):
+            outcome["folderName"] = folder_name
+        if isinstance(legacy_name, str):
+            outcome["legacyName"] = legacy_name
+    return outcome
+
+
+def _outcome_error(code: str, message: str) -> JsonObject:
+    return SidecarError(code=code, message=message).to_dict()
+
+
+def _import_response(outcomes: list[JsonObject]) -> JsonObject:
+    success_count = sum(1 for outcome in outcomes if outcome.get("status") == _IMPORT_STATUS_SUCCESS)
+    partial_count = sum(1 for outcome in outcomes if outcome.get("status") == _IMPORT_STATUS_PARTIAL)
+    failed_count = sum(1 for outcome in outcomes if outcome.get("status") == _IMPORT_STATUS_FAILED)
+    return {
+        "importVersion": IMPORT_VERSION,
+        "requestedCount": len(outcomes),
+        "successCount": success_count,
+        "partialCount": partial_count,
+        "failedCount": failed_count,
+        "outcomes": outcomes,
+    }
+
+
+def _copy_user_data(source: Path, destination: Path) -> None:
+    try:
+        source_root = source.resolve(strict=True)
+        if not source_root.is_dir():
+            raise _copy_error()
+        destination_parent = destination.parent
+        temp_destination = destination_parent / f".{destination.name}.legacy-import-{uuid.uuid4().hex}.tmp"
+        destination_parent.mkdir(parents=True, exist_ok=True)
+        temp_destination.mkdir(mode=0o700)
+        copy_committed = False
+        try:
+            _copy_directory_contents(source_root, temp_destination)
+            if destination.exists():
+                if not destination.is_dir() or any(destination.iterdir()):
+                    raise _copy_error()
+                destination.rmdir()
+            os.replace(temp_destination, destination)
+            copy_committed = True
+        finally:
+            if not copy_committed:
+                if temp_destination.exists():
+                    shutil.rmtree(temp_destination, ignore_errors=True)
+                if not destination.exists():
+                    try:
+                        destination.mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        pass
+    except SidecarError:
+        raise
+    except OSError as exc:
+        raise _copy_error() from exc
+
+
+def _copy_directory_contents(source: Path, destination: Path) -> None:
+    with os.scandir(source) as entries:
+        for entry in entries:
+            if entry.is_symlink():
+                raise _copy_error()
+
+            entry_path = Path(entry.path)
+            target_path = destination / entry.name
+            if entry.is_dir(follow_symlinks=False):
+                target_path.mkdir()
+                _copy_directory_contents(entry_path, target_path)
+            elif entry.is_file(follow_symlinks=False):
+                shutil.copy2(entry_path, target_path, follow_symlinks=False)
+            else:
+                raise _copy_error()
+
+
+def _copy_error() -> SidecarError:
+    return SidecarError(
+        code=LEGACY_USER_DATA_COPY_FAILED,
+        message="Legacy user-data copy failed.",
+    )
+
+
 def _optional_nonblank_string(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.strip() and _is_safe_metadata_string(value):
         return value
@@ -262,8 +585,10 @@ def _optional_port(value: Any) -> Optional[int]:
 
 
 __all__ = [
+    "IMPORT_VERSION",
     "LEGACY_FORMAT",
     "LEGACY_SOURCE",
     "SCAN_VERSION",
+    "import_legacy_profiles",
     "scan_legacy_profiles",
 ]

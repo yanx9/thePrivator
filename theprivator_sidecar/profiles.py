@@ -200,11 +200,22 @@ class ProfileStore:
 
     def create(self, name: str) -> JsonObject:
         """Create a profile, persist it, and return the refreshed list."""
+        return self._create_profile(name, metadata=None)
+
+    def create_imported(self, name: str, metadata: Mapping[str, Any]) -> JsonObject:
+        """Create an imported profile through the canonical profile-store path."""
+        return self._create_profile(name, metadata=metadata)
+
+    def _create_profile(
+        self,
+        name: str,
+        metadata: Optional[Mapping[str, Any]],
+    ) -> JsonObject:
         valid_name = normalize_profile_name(name)
         profiles = self._read_profiles()
         self._ensure_unique_name(profiles, valid_name)
 
-        profile = ProfileRecord.create(valid_name)
+        profile = ProfileRecord.create(valid_name, metadata=metadata)
         self._ensure_profile_directories(profile)
         updated_profiles = sort_profiles([*profiles, profile])
         self._write_profiles(updated_profiles)
