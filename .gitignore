@@ -129,6 +129,7 @@ node_modules/
 .venv/
 target/
 src-tauri/gen/
+src-tauri/binaries/theprivator-sidecar-*
 vendor/
 coverage/
 .cache/

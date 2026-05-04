@@ -10,8 +10,9 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest",
     "tauri": "tauri",
-    "sidecar:build": "node -e \"console.error('sidecar:build is reserved for S01/T03 after the Python sidecar exists.'); process.exit(1);\"",
-    "verify:s01": "npm test -- --run && npm run build && cargo check --manifest-path src-tauri/Cargo.toml"
+    "sidecar:build": "node scripts/build-sidecar.mjs",
+    "verify:sidecar": "node scripts/verify-sidecar.mjs",
+    "verify:s01": "npm test -- --run && npm run build && npm run sidecar:build && npm run verify:sidecar && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

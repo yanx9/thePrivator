@@ -1,3 +1,5 @@
+mod sidecar;
+
 mod commands {
     use serde::Serialize;
 
@@ -13,8 +15,8 @@ mod commands {
     pub fn shell_status() -> ShellStatus {
         ShellStatus {
             product_name: "ThePrivator",
-            bridge: "typed-command-placeholder",
-            sidecar: "not-wired-yet",
+            bridge: "typed-command-bridge",
+            sidecar: "theprivator-sidecar",
         }
     }
 }
@@ -22,7 +24,12 @@ mod commands {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![commands::shell_status])
+        .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::shell_status,
+            sidecar::sidecar_health,
+            sidecar::sidecar_diagnostic_failure
+        ])
         .run(tauri::generate_context!())
         .expect("error while running ThePrivator Tauri application");
 }
