@@ -7,7 +7,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
-from . import chromium
+from . import chromium, legacy_import
 from .profiles import ProfileStore, require_string_param
 from .protocol import (
     DIAGNOSTIC_FAILURE,
@@ -22,6 +22,7 @@ from .protocol import (
     SuccessResponse,
     diagnostic_event,
     encode_ndjson,
+    legacy_import_outcome_diagnostic,
     parse_request_line,
 )
 
@@ -31,9 +32,10 @@ PRODUCT_NAME = "ThePrivator"
 def run(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
     """Process NDJSON requests from ``stdin`` until EOF."""
     for raw_line in stdin:
-        response, diagnostic = handle_request_line(raw_line)
+        response, diagnostics = handle_request_line(raw_line)
         print(encode_ndjson(response), file=stdout, flush=True)
-        print(encode_ndjson(diagnostic), file=stderr, flush=True)
+        for diagnostic in diagnostics:
+            print(encode_ndjson(diagnostic), file=stderr, flush=True)
 
     return 0
 
@@ -43,7 +45,7 @@ def main() -> int:
     return run(sys.stdin, sys.stdout, sys.stderr)
 
 
-def handle_request_line(raw_line: str) -> Tuple[JsonObject, JsonObject]:
+def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
     """Handle one raw input line and return stdout/stderr envelope objects."""
     started = time.perf_counter()
     request_id = None
@@ -71,7 +73,9 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, JsonObject]:
             error_code=None,
             detail_ref=None,
         )
-        return response, diagnostic
+        diagnostics = [diagnostic]
+        diagnostics.extend(_legacy_import_outcome_diagnostics(request.method, result))
+        return response, diagnostics
 
     except SidecarError as error:
         duration_ms = _elapsed_ms(started)
@@ -88,7 +92,7 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, JsonObject]:
             error_code=error.code,
             detail_ref=error.detail_ref,
         )
-        return response, diagnostic
+        return response, [diagnostic]
 
     except Exception:
         duration_ms = _elapsed_ms(started)
@@ -111,7 +115,7 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, JsonObject]:
             error_code=error.code,
             detail_ref=error.detail_ref,
         )
-        return response, diagnostic
+        return response, [diagnostic]
 
 
 def dispatch(request: SidecarRequest) -> JsonObject:
@@ -129,6 +133,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
 
     if request.method.startswith("profiles."):
         return dispatch_profile_request(request)
+
+    if request.method.startswith("legacy."):
+        return dispatch_legacy_request(request)
 
     if request.method.startswith("chromium."):
         return dispatch_chromium_request(request)
@@ -193,6 +200,75 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
             request_id=request.id,
             method=request.method,
         ) from error
+
+
+def dispatch_legacy_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch legacy scan/import commands through sidecar-owned boundaries."""
+    try:
+        store_root = require_string_param(
+            request.params,
+            "storeRoot",
+            "Legacy storeRoot is required.",
+        )
+        legacy_root = require_string_param(
+            request.params,
+            "legacyRoot",
+            "Legacy root is required.",
+        )
+
+        if request.method == "legacy.scan":
+            return legacy_import.scan_legacy_profiles(legacy_root, store_root)
+        if request.method == "legacy.import":
+            return legacy_import.import_legacy_profiles(
+                legacy_root,
+                store_root,
+                request.params.get("items"),
+            )
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
+
+
+def _legacy_import_outcome_diagnostics(method: str, result: JsonObject) -> list[JsonObject]:
+    if method != "legacy.import":
+        return []
+
+    outcomes = result.get("outcomes")
+    if not isinstance(outcomes, list):
+        return []
+
+    diagnostics: list[JsonObject] = []
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        status = outcome.get("status")
+        if status not in {"partial", "failed"}:
+            continue
+        error = outcome.get("error")
+        if not isinstance(error, dict):
+            continue
+        error_code = error.get("code")
+        detail_ref = error.get("detailRef")
+        diagnostics.append(
+            legacy_import_outcome_diagnostic(
+                legacy_id=outcome.get("legacyId") if isinstance(outcome.get("legacyId"), str) else None,
+                status=status if isinstance(status, str) else None,
+                error_code=error_code if isinstance(error_code, str) else None,
+                detail_ref=detail_ref if isinstance(detail_ref, str) else None,
+            )
+        )
+    return diagnostics
 
 
 def dispatch_chromium_request(request: SidecarRequest) -> JsonObject:

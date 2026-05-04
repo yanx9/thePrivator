@@ -593,3 +593,190 @@ def test_chromium_missing_executable_sidecar_error_is_typed_and_redacted(tmp_pat
     assert str(missing_executable) not in combined
     assert profile["name"] not in proc.stderr
     assert "Traceback" not in combined
+
+
+def write_legacy_config(profile_dir: Path, payload: object) -> None:
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "config.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_legacy_scan_ndjson_dispatch_returns_candidates_and_redacted_diagnostic(tmp_path):
+    legacy_root = tmp_path / "legacy-root-should-not-leak"
+    store_root = tmp_path / "app-data-should-not-leak"
+    legacy_profile = legacy_root / "profile-one"
+    write_legacy_config(
+        legacy_profile,
+        {
+            "name": "Legacy Research",
+            "proxy_user": "legacy-user-should-not-leak",
+            "proxy_pass": "legacy-pass-should-not-leak",
+            "absolute_path": str(tmp_path / "secret-path-should-not-leak"),
+        },
+    )
+    (legacy_profile / "user-data" / "Default").mkdir(parents=True)
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "legacy-scan",
+                "method": "legacy.scan",
+                "params": {"storeRoot": str(store_root), "legacyRoot": str(legacy_root)},
+            }
+        )
+    )
+
+    assert proc.returncode == 0
+    responses = parse_ndjson(proc.stdout)
+    diagnostics = parse_ndjson(proc.stderr)
+    assert len(responses) == 1
+    assert len(diagnostics) == 1
+    response = responses[0]
+    assert response["id"] == "legacy-scan"
+    assert response["ok"] is True
+    assert response["protocolVersion"] == "1.0.0"
+    assert response["result"]["scanVersion"] == 1
+    assert response["result"]["count"] == 1
+    candidate = response["result"]["candidates"][0]
+    assert candidate["legacyId"].startswith("legacy-")
+    assert candidate["folderName"] == "profile-one"
+    assert candidate["targetName"] == "Legacy Research"
+    assert candidate["userData"] == {"status": "available"}
+
+    diagnostic = diagnostics[0]
+    assert diagnostic == {
+        "event": "sidecar.request",
+        "requestId": "legacy-scan",
+        "method": "legacy.scan",
+        "status": "ok",
+        "durationMs": diagnostic["durationMs"],
+        "errorCode": None,
+        "detailRef": None,
+    }
+    combined = proc.stdout + proc.stderr
+    assert str(legacy_root) not in combined
+    assert str(store_root) not in proc.stderr
+    assert "legacy-user-should-not-leak" not in combined
+    assert "legacy-pass-should-not-leak" not in combined
+    assert "secret-path-should-not-leak" not in combined
+    assert "params" not in proc.stderr
+    assert "Traceback" not in combined
+
+
+def test_legacy_import_ndjson_dispatch_reports_success_partial_failed_and_redacted_outcome_diagnostics(tmp_path):
+    legacy_root = tmp_path / "legacy-root-should-not-leak"
+    store_root = tmp_path / "app-data-should-not-leak"
+    write_legacy_config(legacy_root / "good", {"name": "Good Legacy"})
+    (legacy_root / "good" / "user-data" / "Default").mkdir(parents=True)
+    (legacy_root / "good" / "user-data" / "Default" / "Preferences").write_text(
+        "copied-browser-data-should-not-leak",
+        encoding="utf-8",
+    )
+    write_legacy_config(legacy_root / "partial", {"name": "Partial Legacy"})
+    partial_user_data = legacy_root / "partial" / "user-data"
+    partial_user_data.mkdir(parents=True)
+    outside_secret = tmp_path / "outside-secret-should-not-leak.txt"
+    outside_secret.write_text("outside-secret-should-not-leak", encoding="utf-8")
+    (partial_user_data / "unsafe-link").symlink_to(outside_secret)
+
+    scan_proc = run_sidecar(
+        request_line(
+            {
+                "id": "legacy-scan-for-import",
+                "method": "legacy.scan",
+                "params": {"storeRoot": str(store_root), "legacyRoot": str(legacy_root)},
+            }
+        )
+    )
+    candidates = {
+        candidate["folderName"]: candidate
+        for candidate in parse_ndjson(scan_proc.stdout)[0]["result"]["candidates"]
+    }
+
+    import_proc = run_sidecar(
+        request_line(
+            {
+                "id": "legacy-import",
+                "method": "legacy.import",
+                "params": {
+                    "storeRoot": str(store_root),
+                    "legacyRoot": str(legacy_root),
+                    "items": [
+                        {"legacyId": candidates["good"]["legacyId"], "targetName": "Imported Good"},
+                        {"legacyId": candidates["partial"]["legacyId"], "targetName": "Imported Partial"},
+                        {"legacyId": "legacy-stale-selection", "targetName": "Imported Stale"},
+                    ],
+                },
+            }
+        )
+    )
+
+    assert import_proc.returncode == 0
+    response = parse_ndjson(import_proc.stdout)[0]
+    diagnostics = parse_ndjson(import_proc.stderr)
+    assert response["id"] == "legacy-import"
+    assert response["ok"] is True
+    result = response["result"]
+    assert result["importVersion"] == 1
+    assert result["requestedCount"] == 3
+    assert result["successCount"] == 1
+    assert result["partialCount"] == 1
+    assert result["failedCount"] == 1
+    outcomes = {outcome["targetName"]: outcome for outcome in result["outcomes"]}
+    assert outcomes["Imported Good"]["status"] == "success"
+    assert outcomes["Imported Good"]["copyStatus"] == "copied"
+    assert outcomes["Imported Partial"]["status"] == "partial"
+    assert outcomes["Imported Partial"]["copyStatus"] == "failed"
+    assert outcomes["Imported Partial"]["error"]["code"] == "LEGACY_USER_DATA_COPY_FAILED"
+    assert outcomes["Imported Stale"]["status"] == "failed"
+    assert outcomes["Imported Stale"]["copyStatus"] == "skipped"
+    assert outcomes["Imported Stale"]["error"]["code"] == "LEGACY_SELECTION_INVALID"
+
+    request_diagnostic = diagnostics[0]
+    assert request_diagnostic["event"] == "sidecar.request"
+    assert request_diagnostic["method"] == "legacy.import"
+    assert request_diagnostic["status"] == "ok"
+    outcome_diagnostics = diagnostics[1:]
+    assert len(outcome_diagnostics) == 2
+    assert {
+        diagnostic["legacyId"]: diagnostic["errorCode"] for diagnostic in outcome_diagnostics
+    } == {
+        candidates["partial"]["legacyId"]: "LEGACY_USER_DATA_COPY_FAILED",
+        "legacy-stale-selection": "LEGACY_SELECTION_INVALID",
+    }
+    for diagnostic in outcome_diagnostics:
+        assert set(diagnostic) == {"event", "legacyId", "status", "errorCode", "detailRef"}
+        assert diagnostic["event"] == "legacy.import.outcome"
+        assert diagnostic["status"] in {"partial", "failed"}
+        assert diagnostic["detailRef"].startswith("sidecar-")
+
+    combined = import_proc.stdout + import_proc.stderr
+    assert str(legacy_root) not in combined
+    assert str(store_root) not in import_proc.stderr
+    assert str(outside_secret) not in combined
+    assert "copied-browser-data-should-not-leak" not in combined
+    assert "outside-secret-should-not-leak" not in combined
+    assert "params" not in import_proc.stderr
+    assert "Traceback" not in combined
+
+
+def test_legacy_malformed_params_return_invalid_request(tmp_path):
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "legacy-bad-items",
+                "method": "legacy.import",
+                "params": {"storeRoot": str(tmp_path / "app"), "legacyRoot": str(tmp_path / "legacy"), "items": {}},
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "INVALID_REQUEST", "legacy-bad-items")
+    assert diagnostic["event"] == "sidecar.request"
+    assert diagnostic["method"] == "legacy.import"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "INVALID_REQUEST"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    assert "Traceback" not in proc.stdout
+    assert "Traceback" not in proc.stderr

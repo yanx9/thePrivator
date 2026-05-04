@@ -10,6 +10,20 @@ import type {
   ChromiumStopSnapshot,
   ChromiumTermination,
   JsonScalar,
+  JsonObject,
+  JsonValue,
+  LegacyImportCopyStatus,
+  LegacyImportOutcome,
+  LegacyImportOutcomeError,
+  LegacyImportOutcomeStatus,
+  LegacyImportResult,
+  LegacyImportSelection,
+  LegacyImportSnapshot,
+  LegacyIssue,
+  LegacyScanCandidate,
+  LegacyScanResult,
+  LegacyScanSnapshot,
+  LegacyUserDataStatus,
   ProfileDefaults,
   ProfileListResult,
   ProfileListSnapshot,
@@ -98,6 +112,27 @@ export async function deleteProfile(id: string): Promise<ProfileMutationSnapshot
       requireProfile: false,
       requireProfileInList: false,
     });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function scanLegacyProfiles(legacyRoot: string): Promise<LegacyScanSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("legacy_scan_profiles", { legacyRoot });
+    return parseLegacyScanEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function importLegacyProfiles(
+  legacyRoot: string,
+  items: LegacyImportSelection[],
+): Promise<LegacyImportSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("legacy_import_profiles", { legacyRoot, items });
+    return parseLegacyImportEnvelope(envelope, new Date().toISOString());
   } catch (error) {
     throw normalizeSidecarError(error);
   }
@@ -197,6 +232,34 @@ function parseProfileMutationEnvelope(
   };
 }
 
+function parseLegacyScanEnvelope(value: unknown, receivedAt: string): LegacyScanSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseLegacyScanResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseLegacyImportEnvelope(value: unknown, receivedAt: string): LegacyImportSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseLegacyImportResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseChromiumStatusEnvelope(value: unknown, receivedAt: string): ChromiumStatusSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseChromiumStatusResult(envelope.result);
@@ -247,9 +310,14 @@ function parseSuccessEnvelope(value: unknown): SidecarCommandSuccessEnvelope {
     throw makeProtocolError("The Tauri bridge response is missing requestId.");
   }
 
+  const protocolVersion = requireString(record.protocolVersion, "protocolVersion");
+  if (protocolVersion !== "1.0.0") {
+    throw makeProtocolError("The Tauri bridge response used an unsupported protocolVersion.");
+  }
+
   return {
     requestId,
-    protocolVersion: requireString(record.protocolVersion, "protocolVersion"),
+    protocolVersion,
     durationMs: requireNumber(record.durationMs, "durationMs"),
     result: record.result,
   };
@@ -339,6 +407,175 @@ function parseProfileMutationResult(
   return {
     ...list,
     profile,
+  };
+}
+
+function parseLegacyScanResult(value: unknown): LegacyScanResult {
+  const record = requireRecord(value, "The sidecar legacy scan result must be an object.");
+  requireLiteralNumber(record.scanVersion, "scanVersion", 1);
+  const candidates = parseLegacyScanCandidateArray(record.candidates);
+  const count = requireNonNegativeInteger(record.count, "count");
+  const issues = parseLegacyIssueArray(record.issues, "issues");
+
+  if (count !== candidates.length) {
+    throw makeProtocolError("The sidecar legacy scan count does not match the candidates array length.");
+  }
+
+  return {
+    scanVersion: 1,
+    count,
+    candidates,
+    issues,
+  };
+}
+
+function parseLegacyImportResult(value: unknown): LegacyImportResult {
+  const record = requireRecord(value, "The sidecar legacy import result must be an object.");
+  requireLiteralNumber(record.importVersion, "importVersion", 1);
+  const outcomes = parseLegacyImportOutcomeArray(record.outcomes);
+  const requestedCount = requireNonNegativeInteger(record.requestedCount, "requestedCount");
+  const successCount = requireNonNegativeInteger(record.successCount, "successCount");
+  const partialCount = requireNonNegativeInteger(record.partialCount, "partialCount");
+  const failedCount = requireNonNegativeInteger(record.failedCount, "failedCount");
+
+  if (requestedCount !== outcomes.length) {
+    throw makeProtocolError("The sidecar legacy import requestedCount does not match the outcomes array length.");
+  }
+  if (successCount !== outcomes.filter((outcome) => outcome.status === "success").length) {
+    throw makeProtocolError("The sidecar legacy import successCount does not match successful outcomes.");
+  }
+  if (partialCount !== outcomes.filter((outcome) => outcome.status === "partial").length) {
+    throw makeProtocolError("The sidecar legacy import partialCount does not match partial outcomes.");
+  }
+  if (failedCount !== outcomes.filter((outcome) => outcome.status === "failed").length) {
+    throw makeProtocolError("The sidecar legacy import failedCount does not match failed outcomes.");
+  }
+
+  return {
+    importVersion: 1,
+    requestedCount,
+    successCount,
+    partialCount,
+    failedCount,
+    outcomes,
+  };
+}
+
+function parseLegacyScanCandidateArray(value: unknown): LegacyScanCandidate[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar legacy scan candidates field must be an array.");
+  }
+
+  return value.map((item, index) => parseLegacyScanCandidate(item, `candidates[${index}]`));
+}
+
+function parseLegacyScanCandidate(value: unknown, field: string): LegacyScanCandidate {
+  const record = requireRecord(value, `The sidecar legacy scan field ${field} must be an object.`);
+  const userData = requireRecord(record.userData, `The sidecar legacy scan field ${field}.userData must be an object.`);
+  const legacyName = record.legacyName;
+
+  if (legacyName !== null && typeof legacyName !== "string") {
+    throw makeProtocolError(`The sidecar legacy scan field ${field}.legacyName must be a string or null.`);
+  }
+
+  return {
+    legacyId: requireLegacyId(record.legacyId, `${field}.legacyId`),
+    folderName: requireNonBlankString(record.folderName, `${field}.folderName`),
+    legacyName,
+    targetName: requireNonBlankString(record.targetName, `${field}.targetName`),
+    userData: {
+      status: requireLegacyUserDataStatus(userData.status, `${field}.userData.status`),
+    },
+    metadata: parseSafeJsonObject(record.metadata, `${field}.metadata`),
+    issues: parseLegacyIssueArray(record.issues, `${field}.issues`),
+  };
+}
+
+function parseLegacyIssueArray(value: unknown, field: string): LegacyIssue[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar legacy field ${field} must be an array.`);
+  }
+
+  return value.map((item, index) => parseLegacyIssue(item, `${field}[${index}]`));
+}
+
+function parseLegacyIssue(value: unknown, field: string): LegacyIssue {
+  const record = requireRecord(value, `The sidecar legacy issue field ${field} must be an object.`);
+  return {
+    code: requireNonBlankString(record.code, `${field}.code`),
+    message: requireNonBlankString(record.message, `${field}.message`),
+    detailRef: requireDetailRef(record.detailRef, `${field}.detailRef`),
+  };
+}
+
+function parseLegacyImportOutcomeArray(value: unknown): LegacyImportOutcome[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar legacy import outcomes field must be an array.");
+  }
+
+  return value.map((item, index) => parseLegacyImportOutcome(item, `outcomes[${index}]`));
+}
+
+function parseLegacyImportOutcome(value: unknown, field: string): LegacyImportOutcome {
+  const record = requireRecord(value, `The sidecar legacy import field ${field} must be an object.`);
+  const base = {
+    legacyId: requireLegacyId(record.legacyId, `${field}.legacyId`),
+    targetName: requireNonBlankString(record.targetName, `${field}.targetName`),
+    folderName: optionalNonBlankString(record.folderName, `${field}.folderName`),
+    legacyName: optionalNonBlankString(record.legacyName, `${field}.legacyName`),
+  };
+  const status = requireLegacyImportOutcomeStatus(record.status, `${field}.status`);
+  const copyStatus = requireLegacyImportCopyStatus(record.copyStatus, `${field}.copyStatus`);
+
+  if (status === "success") {
+    if (copyStatus !== "copied" && copyStatus !== "missing") {
+      throw makeProtocolError(`The sidecar legacy import field ${field}.copyStatus is invalid for success.`);
+    }
+    if (record.error !== undefined) {
+      throw makeProtocolError(`The sidecar legacy import field ${field}.error must be absent for success.`);
+    }
+    return compactOptionalFields({
+      ...base,
+      status,
+      copyStatus,
+      profileId: requireNonBlankString(record.profileId, `${field}.profileId`),
+    });
+  }
+
+  if (status === "partial") {
+    if (copyStatus !== "failed") {
+      throw makeProtocolError(`The sidecar legacy import field ${field}.copyStatus must be failed for partial.`);
+    }
+    return compactOptionalFields({
+      ...base,
+      status,
+      copyStatus,
+      profileId: requireNonBlankString(record.profileId, `${field}.profileId`),
+      error: parseLegacyOutcomeError(record.error, `${field}.error`),
+    });
+  }
+
+  if (copyStatus !== "skipped") {
+    throw makeProtocolError(`The sidecar legacy import field ${field}.copyStatus must be skipped for failed.`);
+  }
+  if (record.profileId !== undefined) {
+    throw makeProtocolError(`The sidecar legacy import field ${field}.profileId must be absent for failed.`);
+  }
+  return compactOptionalFields({
+    ...base,
+    status,
+    copyStatus,
+    error: parseLegacyOutcomeError(record.error, `${field}.error`),
+  });
+}
+
+function parseLegacyOutcomeError(value: unknown, field: string): LegacyImportOutcomeError {
+  const record = requireRecord(value, `The sidecar legacy import field ${field} must be an object.`);
+  return {
+    code: requireNonBlankString(record.code, `${field}.code`),
+    message: requireNonBlankString(record.message, `${field}.message`),
+    recoverable: requireBoolean(record.recoverable, `${field}.recoverable`),
+    detailRef: requireDetailRef(record.detailRef, `${field}.detailRef`),
   };
 }
 
@@ -434,6 +671,8 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
   const createdAt = requireIsoTimestamp(record.createdAt, `${field}.createdAt`);
   const updatedAt = requireIsoTimestamp(record.updatedAt, `${field}.updatedAt`);
 
+  const metadata = record.metadata === undefined ? undefined : parseSafeJsonObject(record.metadata, `${field}.metadata`);
+
   return {
     id,
     name,
@@ -441,6 +680,7 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
     updatedAt,
     defaults: parseProfileDefaults(record.defaults, `${field}.defaults`),
     storage: parseProfileStorage(record.storage, id, `${field}.storage`),
+    ...(metadata === undefined ? {} : { metadata }),
   };
 }
 
@@ -522,6 +762,110 @@ function requirePositiveInteger(value: unknown, field: string): number {
   return number;
 }
 
+function requireLiteralNumber<T extends number>(value: unknown, field: string, expected: T): T {
+  if (value !== expected) {
+    throw makeProtocolError(`The sidecar response field ${field} must be ${expected}.`);
+  }
+
+  return expected;
+}
+
+function requireDetailRef(value: unknown, field: string): string {
+  const detailRef = requireNonBlankString(value, field);
+  if (!detailRef.startsWith("sidecar-") && !detailRef.startsWith("bridge-") && !detailRef.startsWith("ui-")) {
+    throw makeProtocolError(`The sidecar response field ${field} must be an opaque detailRef.`);
+  }
+
+  return detailRef;
+}
+
+function requireLegacyId(value: unknown, field: string): string {
+  const legacyId = requireNonBlankString(value, field);
+  if (!legacyId.startsWith("legacy-")) {
+    throw makeProtocolError(`The sidecar legacy field ${field} must be an opaque legacy id.`);
+  }
+
+  return legacyId;
+}
+
+function requireLegacyUserDataStatus(value: unknown, field: string): LegacyUserDataStatus {
+  if (value === "available" || value === "missing") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar legacy field ${field} must be a known user-data status.`);
+}
+
+function requireLegacyImportOutcomeStatus(value: unknown, field: string): LegacyImportOutcomeStatus {
+  if (value === "success" || value === "partial" || value === "failed") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar legacy import field ${field} must be a known outcome status.`);
+}
+
+function requireLegacyImportCopyStatus(value: unknown, field: string): LegacyImportCopyStatus {
+  if (value === "copied" || value === "missing" || value === "failed" || value === "skipped") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar legacy import field ${field} must be a known copy status.`);
+}
+
+function optionalNonBlankString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  return requireNonBlankString(value, field);
+}
+
+function parseSafeJsonObject(value: unknown, field: string): JsonObject {
+  const record = requireRecord(value, `The sidecar response field ${field} must be an object.`);
+  const parsed: JsonObject = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (!key) {
+      throw makeProtocolError(`The sidecar response field ${field} contains an empty metadata key.`);
+    }
+    parsed[key] = parseSafeJsonValue(item, `${field}.${key}`);
+  }
+  return parsed;
+}
+
+function parseSafeJsonValue(value: unknown, field: string): JsonValue {
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (isPathLikeOrUrl(value)) {
+      throw makeProtocolError(`The sidecar response field ${field} must not contain a path-like metadata string.`);
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw makeProtocolError(`The sidecar response field ${field} must contain a finite metadata number.`);
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => parseSafeJsonValue(item, `${field}[${index}]`));
+  }
+  if (isRecord(value)) {
+    return parseSafeJsonObject(value, field);
+  }
+
+  throw makeProtocolError(`The sidecar response field ${field} must contain JSON-safe metadata.`);
+}
+
+function isPathLikeOrUrl(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(value) || value.includes("://") || value.includes("\0");
+}
+
+function compactOptionalFields<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+}
+
 function requireChromiumTermination(value: unknown, field: string): ChromiumTermination {
   if (value === "already-stopped" || value === "graceful" || value === "forced" || value === "reconciled") {
     return value;
@@ -569,7 +913,8 @@ function sameProfileRecord(left: ProfileRecord, right: ProfileRecord): boolean {
     left.defaults.browser === right.defaults.browser &&
     left.defaults.startUrl === right.defaults.startUrl &&
     left.defaults.proxyMode === right.defaults.proxyMode &&
-    left.defaults.fingerprintMode === right.defaults.fingerprintMode
+    left.defaults.fingerprintMode === right.defaults.fingerprintMode &&
+    JSON.stringify(left.metadata ?? null) === JSON.stringify(right.metadata ?? null)
   );
 }
 

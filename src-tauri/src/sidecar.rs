@@ -15,6 +15,9 @@ use tauri_plugin_shell::ShellExt;
 pub const SIDECAR_LOGICAL_NAME: &str = "theprivator-sidecar";
 pub const SIDECAR_EXTERNAL_BIN: &str = "binaries/theprivator-sidecar";
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
+// Large legacy user-data copies can legitimately outlive CRUD/health checks, so
+// only legacy.import receives this longer one-shot process timeout.
+const LEGACY_IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
 const SIDECAR_PROCESS_ERROR: &str = "SIDECAR_PROCESS_ERROR";
@@ -24,6 +27,13 @@ const SIDECAR_UNAVAILABLE: &str = "SIDECAR_UNAVAILABLE";
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DETAIL_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyImportItemParam {
+    pub legacy_id: String,
+    pub target_name: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +192,27 @@ pub async fn chromium_stop(
     chromium_stop_with_runner(&runner, store_root, profile_id).await
 }
 
+#[tauri::command]
+pub async fn legacy_scan_profiles(
+    app: tauri::AppHandle,
+    legacy_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    legacy_scan_profiles_with_runner(&runner, store_root, legacy_root).await
+}
+
+#[tauri::command]
+pub async fn legacy_import_profiles(
+    app: tauri::AppHandle,
+    legacy_root: String,
+    items: Vec<LegacyImportItemParam>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    legacy_import_profiles_with_runner(&runner, store_root, legacy_root, items).await
+}
+
 pub async fn sidecar_health_with_runner<R: SidecarRunner>(
     runner: &R,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
@@ -304,6 +335,41 @@ async fn chromium_stop_with_runner<R: SidecarRunner>(
     .await
 }
 
+async fn legacy_scan_profiles_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    legacy_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "legacy.scan",
+        json!({
+            "storeRoot": store_root,
+            "legacyRoot": legacy_root,
+        }),
+    )
+    .await
+}
+
+async fn legacy_import_profiles_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    legacy_root: String,
+    items: Vec<LegacyImportItemParam>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "legacy.import",
+        json!({
+            "storeRoot": store_root,
+            "legacyRoot": legacy_root,
+            "items": items,
+        }),
+        LEGACY_IMPORT_TIMEOUT,
+    )
+    .await
+}
+
 fn resolve_profile_store_root(app: &tauri::AppHandle) -> Result<String, SidecarCommandError> {
     profile_store_root_from_app_data_dir(app.path().app_data_dir())
 }
@@ -340,6 +406,15 @@ async fn invoke_method_with_params<R: SidecarRunner>(
     method: &'static str,
     params: Value,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(runner, method, params, BRIDGE_TIMEOUT).await
+}
+
+async fn invoke_method_with_params_timeout<R: SidecarRunner>(
+    runner: &R,
+    method: &'static str,
+    params: Value,
+    timeout: Duration,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let request_id = next_request_id();
     let request = json!({
         "id": request_id,
@@ -354,7 +429,7 @@ async fn invoke_method_with_params<R: SidecarRunner>(
     })?;
 
     let output = runner
-        .run(request_line, BRIDGE_TIMEOUT)
+        .run(request_line, timeout)
         .await
         .map_err(|error| map_runner_error(error, method, &request_id))?;
 
@@ -679,6 +754,7 @@ mod tests {
     struct FakeRunner {
         mode: FakeMode,
         last_request: Arc<Mutex<Option<Value>>>,
+        last_timeout: Arc<Mutex<Option<Duration>>>,
     }
 
     impl FakeRunner {
@@ -686,6 +762,7 @@ mod tests {
             Self {
                 mode,
                 last_request: Arc::new(Mutex::new(None)),
+                last_timeout: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -696,6 +773,13 @@ mod tests {
                 .clone()
                 .expect("runner was not called")
         }
+
+        fn last_timeout(&self) -> Duration {
+            self.last_timeout
+                .lock()
+                .expect("last_timeout lock poisoned")
+                .expect("runner was not called")
+        }
     }
 
     #[async_trait]
@@ -703,13 +787,17 @@ mod tests {
         async fn run(
             &self,
             request_line: String,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> Result<SidecarProcessOutput, SidecarRunnerError> {
             let request: Value = serde_json::from_str(&request_line).expect("valid bridge request");
             *self
                 .last_request
                 .lock()
                 .expect("last_request lock poisoned") = Some(request.clone());
+            *self
+                .last_timeout
+                .lock()
+                .expect("last_timeout lock poisoned") = Some(timeout);
             let request_id = request.get("id").cloned().unwrap_or(Value::Null);
 
             match &self.mode {
@@ -867,6 +955,39 @@ mod tests {
             store_root.to_string(),
             profile_id.to_string(),
         ))
+    }
+
+    fn run_legacy_scan(
+        runner: &FakeRunner,
+        store_root: &str,
+        legacy_root: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(legacy_scan_profiles_with_runner(
+            runner,
+            store_root.to_string(),
+            legacy_root.to_string(),
+        ))
+    }
+
+    fn run_legacy_import(
+        runner: &FakeRunner,
+        store_root: &str,
+        legacy_root: &str,
+        items: Vec<LegacyImportItemParam>,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(legacy_import_profiles_with_runner(
+            runner,
+            store_root.to_string(),
+            legacy_root.to_string(),
+            items,
+        ))
+    }
+
+    fn legacy_item(legacy_id: &str, target_name: &str) -> LegacyImportItemParam {
+        LegacyImportItemParam {
+            legacy_id: legacy_id.to_string(),
+            target_name: target_name.to_string(),
+        }
     }
 
     fn assert_request_params(request: &Value, method: &str, expected: &[(&str, Value)]) {
@@ -1028,6 +1149,104 @@ mod tests {
     }
 
     #[test]
+    fn legacy_scan_request_injects_store_root_and_legacy_root_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_legacy_scan(&runner, "/app/data/root", "/legacy/root")
+            .expect("legacy scan reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "legacy.scan",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("legacyRoot", json!("/legacy/root")),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn legacy_import_request_injects_selection_only_and_uses_longer_timeout() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let items = vec![legacy_item("legacy-one", "Imported One")];
+
+        run_legacy_import(&runner, "/app/data/root", "/legacy/root", items)
+            .expect("legacy import reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "legacy.import",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("legacyRoot", json!("/legacy/root")),
+                (
+                    "items",
+                    json!([{ "legacyId": "legacy-one", "targetName": "Imported One" }]),
+                ),
+            ],
+        );
+        assert!(
+            runner.last_timeout() > BRIDGE_TIMEOUT,
+            "legacy.import should be the only command with a longer copy timeout",
+        );
+    }
+
+    #[test]
+    fn legacy_sidecar_errors_are_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "LEGACY_ROOT_INVALID",
+            message: "Legacy root must be an existing directory.",
+            detail_ref: "legacy-root-detail",
+        });
+
+        let error = run_legacy_scan(&runner, "/app/data/root", "/missing/legacy")
+            .expect_err("legacy root error surfaces");
+
+        assert_eq!(error.code, "LEGACY_ROOT_INVALID");
+        assert_eq!(error.message, "Legacy root must be an existing directory.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "legacy-root-detail");
+        assert_eq!(runner.last_request()["method"], "legacy.scan");
+    }
+
+    #[test]
+    fn legacy_import_timeout_maps_to_timeout_error() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_legacy_import(
+            &runner,
+            "/app/data/root",
+            "/legacy/root",
+            vec![legacy_item("legacy-one", "Imported One")],
+        )
+        .expect_err("legacy import timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "legacy.import");
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn legacy_malformed_stdout_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_legacy_import(
+            &runner,
+            "/app/data/root",
+            "/legacy/root",
+            vec![legacy_item("legacy-one", "Imported One")],
+        )
+        .expect_err("legacy malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "legacy.import");
+    }
+
+    #[test]
     fn chromium_lifecycle_error_is_passed_through() {
         let runner = FakeRunner::new(FakeMode::TypedError {
             code: "CHROMIUM_EXECUTABLE_NOT_FOUND",
@@ -1049,8 +1268,8 @@ mod tests {
     fn chromium_bridge_timeout_maps_to_timeout_error() {
         let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
 
-        let error = run_chromium_status(&runner, "/app/data/root")
-            .expect_err("chromium timeout surfaces");
+        let error =
+            run_chromium_status(&runner, "/app/data/root").expect_err("chromium timeout surfaces");
 
         assert_eq!(error.code, SIDECAR_TIMEOUT);
         assert!(error.detail_ref.starts_with("bridge-"));

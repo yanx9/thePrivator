@@ -5,8 +5,10 @@ import {
   deleteProfile,
   getChromiumStatus,
   getSidecarHealth,
+  importLegacyProfiles,
   launchChromiumProfile,
   listProfiles,
+  scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
@@ -123,6 +125,94 @@ function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = 
   };
 }
 
+function legacyIssue(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "LEGACY_CONFIG_MISSING",
+    message: "Legacy profile config.json is missing.",
+    detailRef: "sidecar-legacy-issue",
+    ...overrides,
+  };
+}
+
+function legacyCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    legacyId: "legacy-111111111111111111111111",
+    folderName: "profile-one",
+    legacyName: "Legacy Research",
+    targetName: "Legacy Research",
+    userData: { status: "available" },
+    metadata: {
+      source: "legacy-theprivator",
+      format: "legacy-profile",
+      legacyFolder: "profile-one",
+      legacyName: "Legacy Research",
+      hasUserData: true,
+      formatVersion: "2",
+      chromiumVersion: "116.0.0",
+      remoteControlPort: 9222,
+    },
+    issues: [],
+    ...overrides,
+  };
+}
+
+function legacyScanResult(overrides: Record<string, unknown> = {}) {
+  const candidates = overrides.candidates ?? [legacyCandidate()];
+  return {
+    scanVersion: 1,
+    count: Array.isArray(candidates) ? candidates.length : 1,
+    candidates,
+    issues: [],
+    ...overrides,
+  };
+}
+
+function legacyOutcome(overrides: Record<string, unknown> = {}) {
+  return {
+    legacyId: "legacy-111111111111111111111111",
+    targetName: "Imported Research",
+    folderName: "profile-one",
+    legacyName: "Legacy Research",
+    status: "success",
+    profileId: "11111111-1111-1111-1111-111111111111",
+    copyStatus: "copied",
+    ...overrides,
+  };
+}
+
+function legacyError(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "LEGACY_SELECTION_INVALID",
+    message: "Selected legacy profile was not found in a fresh scan.",
+    recoverable: true,
+    detailRef: "sidecar-legacy-error",
+    ...overrides,
+  };
+}
+
+function legacyImportResult(overrides: Record<string, unknown> = {}) {
+  const outcomes = overrides.outcomes ?? [legacyOutcome()];
+  return {
+    importVersion: 1,
+    requestedCount: Array.isArray(outcomes) ? outcomes.length : 1,
+    successCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "success").length : 0,
+    partialCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "partial").length : 0,
+    failedCount: Array.isArray(outcomes) ? outcomes.filter((outcome) => (outcome as { status?: unknown })?.status === "failed").length : 0,
+    outcomes,
+    ...overrides,
+  };
+}
+
+function legacyEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-legacy-1",
+    protocolVersion: "1.0.0",
+    durationMs: 8.25,
+    result,
+    ...overrides,
+  };
+}
+
 describe("sidecar client", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -201,6 +291,110 @@ describe("sidecar client", () => {
     expect(updated.profile).toEqual(renamed);
     expect(deleted.profile).toBeUndefined();
     expect(deleted.profiles).toEqual([]);
+  });
+
+  it("scans legacy profiles through the fixed Tauri command and validates nested candidates", async () => {
+    const candidate = legacyCandidate({ issues: [legacyIssue()] });
+    mockInvoke.mockResolvedValueOnce(legacyEnvelope(legacyScanResult({ candidates: [candidate] })));
+
+    const snapshot = await scanLegacyProfiles("/user/chosen/legacy-root");
+
+    expect(mockInvoke).toHaveBeenCalledWith("legacy_scan_profiles", { legacyRoot: "/user/chosen/legacy-root" });
+    expect(snapshot.requestId).toBe("bridge-legacy-1");
+    expect(snapshot.scanVersion).toBe(1);
+    expect(snapshot.count).toBe(1);
+    expect(snapshot.candidates[0]).toEqual(candidate);
+    expect(snapshot.candidates[0].issues[0]).toMatchObject({
+      code: "LEGACY_CONFIG_MISSING",
+      detailRef: "sidecar-legacy-issue",
+    });
+  });
+
+  it("imports selected legacy profiles through the fixed Tauri command and validates outcome variants", async () => {
+    const success = legacyOutcome({ legacyId: "legacy-success", targetName: "Imported Success", status: "success", copyStatus: "copied" });
+    const partial = legacyOutcome({
+      legacyId: "legacy-partial",
+      targetName: "Imported Partial",
+      status: "partial",
+      copyStatus: "failed",
+      error: legacyError({ code: "LEGACY_USER_DATA_COPY_FAILED" }),
+    });
+    const failed = legacyOutcome({
+      legacyId: "legacy-failed",
+      targetName: "Imported Failed",
+      status: "failed",
+      copyStatus: "skipped",
+      profileId: undefined,
+      error: legacyError({ code: "LEGACY_SELECTION_INVALID" }),
+    });
+    mockInvoke.mockResolvedValueOnce(legacyEnvelope(legacyImportResult({ outcomes: [success, partial, failed] })));
+
+    const snapshot = await importLegacyProfiles("/user/chosen/legacy-root", [
+      { legacyId: "legacy-success", targetName: "Imported Success" },
+      { legacyId: "legacy-partial", targetName: "Imported Partial" },
+      { legacyId: "legacy-failed", targetName: "Imported Failed" },
+    ]);
+
+    expect(mockInvoke).toHaveBeenCalledWith("legacy_import_profiles", {
+      legacyRoot: "/user/chosen/legacy-root",
+      items: [
+        { legacyId: "legacy-success", targetName: "Imported Success" },
+        { legacyId: "legacy-partial", targetName: "Imported Partial" },
+        { legacyId: "legacy-failed", targetName: "Imported Failed" },
+      ],
+    });
+    expect(snapshot.requestedCount).toBe(3);
+    expect(snapshot.successCount).toBe(1);
+    expect(snapshot.partialCount).toBe(1);
+    expect(snapshot.failedCount).toBe(1);
+    expect(snapshot.outcomes.map((outcome) => outcome.status)).toEqual(["success", "partial", "failed"]);
+    expect(snapshot.outcomes[1]).toMatchObject({
+      copyStatus: "failed",
+      error: { code: "LEGACY_USER_DATA_COPY_FAILED", detailRef: "sidecar-legacy-error" },
+    });
+  });
+
+  it.each([
+    ["missing candidate legacyId", legacyEnvelope(legacyScanResult({ candidates: [legacyCandidate({ legacyId: "" })] })), () => scanLegacyProfiles("/legacy")],
+    ["invalid candidate user-data status", legacyEnvelope(legacyScanResult({ candidates: [legacyCandidate({ userData: { status: "unknown" } })] })), () => scanLegacyProfiles("/legacy")],
+    ["non-array import items", legacyEnvelope(legacyImportResult({ outcomes: {} })), () => importLegacyProfiles("/legacy", [])],
+    ["unknown outcome status", legacyEnvelope(legacyImportResult({ outcomes: [legacyOutcome({ status: "done" })] })), () => importLegacyProfiles("/legacy", [])],
+    ["unknown copy status", legacyEnvelope(legacyImportResult({ outcomes: [legacyOutcome({ copyStatus: "linked" })] })), () => importLegacyProfiles("/legacy", [])],
+    ["missing outcome error detailRef", legacyEnvelope(legacyImportResult({ outcomes: [legacyOutcome({ status: "failed", copyStatus: "skipped", profileId: undefined, error: legacyError({ detailRef: undefined }) })] })), () => importLegacyProfiles("/legacy", [])],
+    ["legacy count mismatch", legacyEnvelope(legacyScanResult({ count: 2 })), () => scanLegacyProfiles("/legacy")],
+    ["unknown protocol version", legacyEnvelope(legacyScanResult(), { protocolVersion: "9.9.9" }), () => scanLegacyProfiles("/legacy")],
+  ])("maps malformed legacy payloads to protocol errors: %s", async (_caseName, envelope, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelope);
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["LEGACY_ROOT_INVALID", "Legacy root must be an existing directory.", () => scanLegacyProfiles("/missing")],
+    ["LEGACY_SELECTION_INVALID", "Legacy import selection is invalid.", () => importLegacyProfiles("/legacy", [])],
+    ["PROFILE_DUPLICATE_NAME", "Profile name already exists.", () => importLegacyProfiles("/legacy", [])],
+  ])("preserves typed recoverable legacy errors: %s", async (code, message, callClient) => {
+    mockInvoke.mockRejectedValueOnce({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-legacy-detail",
+    });
+
+    await expect(callClient()).rejects.toMatchObject({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-legacy-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
   });
 
   it("loads an empty Chromium status through the fixed Tauri lifecycle command", async () => {

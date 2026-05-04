@@ -1,4 +1,6 @@
 export type JsonScalar = string | number | boolean | null;
+export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
 
 export type SidecarUiPhase = "loading" | "healthy" | "recoverable-error" | "bridge-error";
 
@@ -84,6 +86,7 @@ export interface ProfileRecord {
   updatedAt: string;
   defaults: ProfileDefaults;
   storage: ProfileStorage;
+  metadata?: JsonObject;
 }
 
 export interface ProfileListResult {
@@ -105,6 +108,101 @@ export interface ProfileListSnapshot extends ProfileListResult {
 }
 
 export interface ProfileMutationSnapshot extends ProfileMutationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface LegacyIssue {
+  code: string;
+  message: string;
+  detailRef: string;
+}
+
+export type LegacyUserDataStatus = "available" | "missing";
+
+export interface LegacyScanCandidate {
+  legacyId: string;
+  folderName: string;
+  legacyName: string | null;
+  targetName: string;
+  userData: {
+    status: LegacyUserDataStatus;
+  };
+  metadata: JsonObject;
+  issues: LegacyIssue[];
+}
+
+export interface LegacyScanResult {
+  scanVersion: 1;
+  count: number;
+  candidates: LegacyScanCandidate[];
+  issues: LegacyIssue[];
+}
+
+export interface LegacyScanSnapshot extends LegacyScanResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface LegacyImportSelection {
+  legacyId: string;
+  targetName: string;
+}
+
+export type LegacyImportOutcomeStatus = "success" | "partial" | "failed";
+export type LegacyImportCopyStatus = "copied" | "missing" | "failed" | "skipped";
+
+export interface LegacyImportOutcomeError extends SidecarCommandErrorEnvelope {}
+
+export interface LegacyImportOutcomeBase {
+  legacyId: string;
+  targetName: string;
+  folderName?: string;
+  legacyName?: string;
+  status: LegacyImportOutcomeStatus;
+  copyStatus: LegacyImportCopyStatus;
+}
+
+export interface LegacyImportSuccessOutcome extends LegacyImportOutcomeBase {
+  status: "success";
+  copyStatus: "copied" | "missing";
+  profileId: string;
+}
+
+export interface LegacyImportPartialOutcome extends LegacyImportOutcomeBase {
+  status: "partial";
+  copyStatus: "failed";
+  profileId: string;
+  error: LegacyImportOutcomeError;
+}
+
+export interface LegacyImportFailedOutcome extends LegacyImportOutcomeBase {
+  status: "failed";
+  copyStatus: "skipped";
+  error: LegacyImportOutcomeError;
+}
+
+export type LegacyImportOutcome =
+  | LegacyImportSuccessOutcome
+  | LegacyImportPartialOutcome
+  | LegacyImportFailedOutcome;
+
+export interface LegacyImportResult {
+  importVersion: 1;
+  requestedCount: number;
+  successCount: number;
+  partialCount: number;
+  failedCount: number;
+  outcomes: LegacyImportOutcome[];
+}
+
+export interface LegacyImportSnapshot extends LegacyImportResult {
   requestId: string;
   rawRequestId: JsonScalar;
   protocolVersion: string;

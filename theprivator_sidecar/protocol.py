@@ -195,6 +195,23 @@ def diagnostic_event(
     }
 
 
+def legacy_import_outcome_diagnostic(
+    *,
+    legacy_id: Optional[str],
+    status: Optional[str],
+    error_code: Optional[str],
+    detail_ref: Optional[str],
+) -> JsonObject:
+    """Build a redacted diagnostic for one failed legacy import outcome."""
+    return {
+        "event": "legacy.import.outcome",
+        "legacyId": _redact_log_value(legacy_id),
+        "status": _redact_log_value(status),
+        "errorCode": error_code,
+        "detailRef": detail_ref,
+    }
+
+
 def _extract_partial_context(parsed: Mapping[str, Any]) -> Tuple[Optional[RequestId], Optional[str]]:
     request_id = parsed.get("id")
     method = parsed.get("method")
