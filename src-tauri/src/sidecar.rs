@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
+    path::PathBuf,
     process::{Command as StdCommand, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 
 pub const SIDECAR_LOGICAL_NAME: &str = "theprivator-sidecar";
@@ -111,6 +113,46 @@ pub async fn sidecar_diagnostic_failure(
     sidecar_diagnostic_failure_with_runner(&runner).await
 }
 
+#[tauri::command]
+pub async fn profiles_list(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_list_with_runner(&runner, store_root).await
+}
+
+#[tauri::command]
+pub async fn profiles_create(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_create_with_runner(&runner, store_root, name).await
+}
+
+#[tauri::command]
+pub async fn profiles_update(
+    app: tauri::AppHandle,
+    id: String,
+    name: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_update_with_runner(&runner, store_root, id, name).await
+}
+
+#[tauri::command]
+pub async fn profiles_delete(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_delete_with_runner(&runner, store_root, id).await
+}
+
 pub async fn sidecar_health_with_runner<R: SidecarRunner>(
     runner: &R,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
@@ -123,15 +165,111 @@ pub async fn sidecar_diagnostic_failure_with_runner<R: SidecarRunner>(
     invoke_fixed_method(runner, "diagnostics.fail").await
 }
 
+async fn profiles_list_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.list",
+        json!({
+            "storeRoot": store_root,
+        }),
+    )
+    .await
+}
+
+async fn profiles_create_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    name: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.create",
+        json!({
+            "storeRoot": store_root,
+            "name": name,
+        }),
+    )
+    .await
+}
+
+async fn profiles_update_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    id: String,
+    name: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.update",
+        json!({
+            "storeRoot": store_root,
+            "id": id,
+            "name": name,
+        }),
+    )
+    .await
+}
+
+async fn profiles_delete_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.delete",
+        json!({
+            "storeRoot": store_root,
+            "id": id,
+        }),
+    )
+    .await
+}
+
+fn resolve_profile_store_root(app: &tauri::AppHandle) -> Result<String, SidecarCommandError> {
+    profile_store_root_from_app_data_dir(app.path().app_data_dir())
+}
+
+// `ProfileStore` appends `profile-store` internally, so the bridge injects the
+// app-data root rather than a path that would become `profile-store/profile-store`.
+fn profile_store_root_from_app_data_dir<E>(
+    app_data_dir: Result<PathBuf, E>,
+) -> Result<String, SidecarCommandError> {
+    let app_data_dir = app_data_dir.map_err(|_| {
+        bridge_error(
+            SIDECAR_CONFIGURATION_ERROR,
+            "The Tauri app data directory could not be resolved for the profile store.",
+        )
+    })?;
+
+    app_data_dir.into_os_string().into_string().map_err(|_| {
+        bridge_error(
+            SIDECAR_CONFIGURATION_ERROR,
+            "The Tauri app data directory for the profile store is not valid Unicode.",
+        )
+    })
+}
+
 async fn invoke_fixed_method<R: SidecarRunner>(
     runner: &R,
     method: &'static str,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(runner, method, json!({})).await
+}
+
+async fn invoke_method_with_params<R: SidecarRunner>(
+    runner: &R,
+    method: &'static str,
+    params: Value,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let request_id = next_request_id();
     let request = json!({
         "id": request_id,
         "method": method,
-        "params": {},
+        "params": params,
     });
     let request_line = serde_json::to_string(&request).map_err(|_| {
         bridge_error(
@@ -449,7 +587,11 @@ mod tests {
     #[derive(Clone)]
     enum FakeMode {
         HealthSuccess,
-        TypedError,
+        TypedError {
+            code: &'static str,
+            message: &'static str,
+            detail_ref: &'static str,
+        },
         Static(SidecarProcessOutput),
         RunnerError(SidecarRunnerError),
         MismatchedId,
@@ -503,16 +645,20 @@ mod tests {
                     "durationMs": 1.25,
                     "result": { "status": "healthy" }
                 }))),
-                FakeMode::TypedError => Ok(output_with_stdout(json!({
+                FakeMode::TypedError {
+                    code,
+                    message,
+                    detail_ref,
+                } => Ok(output_with_stdout(json!({
                     "id": request_id,
                     "ok": false,
                     "protocolVersion": "1.0.0",
                     "durationMs": 1.5,
                     "error": {
-                        "code": "DIAGNOSTIC_FAILURE",
-                        "message": "Diagnostic failure requested.",
+                        "code": code,
+                        "message": message,
                         "recoverable": true,
-                        "detailRef": "sidecar-test-detail"
+                        "detailRef": detail_ref
                     }
                 }))),
                 FakeMode::Static(output) => Ok(output.clone()),
@@ -572,6 +718,60 @@ mod tests {
         tauri::async_runtime::block_on(sidecar_diagnostic_failure_with_runner(runner))
     }
 
+    fn run_profiles_list(
+        runner: &FakeRunner,
+        store_root: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_list_with_runner(runner, store_root.to_string()))
+    }
+
+    fn run_profiles_create(
+        runner: &FakeRunner,
+        store_root: &str,
+        name: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_create_with_runner(
+            runner,
+            store_root.to_string(),
+            name.to_string(),
+        ))
+    }
+
+    fn run_profiles_update(
+        runner: &FakeRunner,
+        store_root: &str,
+        id: &str,
+        name: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_update_with_runner(
+            runner,
+            store_root.to_string(),
+            id.to_string(),
+            name.to_string(),
+        ))
+    }
+
+    fn run_profiles_delete(
+        runner: &FakeRunner,
+        store_root: &str,
+        id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_delete_with_runner(
+            runner,
+            store_root.to_string(),
+            id.to_string(),
+        ))
+    }
+
+    fn assert_request_params(request: &Value, method: &str, expected: &[(&str, Value)]) {
+        assert_eq!(request["method"], method);
+        let params = request["params"].as_object().expect("params object");
+        assert_eq!(params.len(), expected.len());
+        for (key, value) in expected {
+            assert_eq!(params.get(*key), Some(value), "param {key} mismatch");
+        }
+    }
+
     #[test]
     fn health_request_uses_empty_params_and_returns_result() {
         let runner = FakeRunner::new(FakeMode::HealthSuccess);
@@ -591,7 +791,11 @@ mod tests {
 
     #[test]
     fn sidecar_typed_error_is_passed_through() {
-        let runner = FakeRunner::new(FakeMode::TypedError);
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "DIAGNOSTIC_FAILURE",
+            message: "Diagnostic failure requested.",
+            detail_ref: "sidecar-test-detail",
+        });
 
         let error = run_diagnostic_failure(&runner).expect_err("diagnostic failure surfaces");
 
@@ -600,6 +804,159 @@ mod tests {
         assert!(error.recoverable);
         assert_eq!(error.detail_ref, "sidecar-test-detail");
         assert_eq!(runner.last_request()["method"], "diagnostics.fail");
+    }
+
+    #[test]
+    fn profile_list_request_injects_only_store_root() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_list(&runner, "/app/data/root").expect("profile list succeeds");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.list",
+            &[("storeRoot", json!("/app/data/root"))],
+        );
+    }
+
+    #[test]
+    fn profile_create_request_injects_store_root_and_name_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_create(&runner, "/app/data/root", "").expect("profile create reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.create",
+            &[("storeRoot", json!("/app/data/root")), ("name", json!(""))],
+        );
+    }
+
+    #[test]
+    fn profile_update_request_injects_store_root_id_and_name_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_update(&runner, "/app/data/root", "", "Renamed")
+            .expect("profile update reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.update",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("id", json!("")),
+                ("name", json!("Renamed")),
+            ],
+        );
+    }
+
+    #[test]
+    fn profile_delete_request_injects_store_root_and_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_delete(&runner, "/app/data/root", "profile-id")
+            .expect("profile delete reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.delete",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("id", json!("profile-id")),
+            ],
+        );
+    }
+
+    #[test]
+    fn profile_duplicate_name_error_is_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "PROFILE_DUPLICATE_NAME",
+            message: "Profile name already exists.",
+            detail_ref: "profile-duplicate-detail",
+        });
+
+        let error = run_profiles_create(&runner, "/app/data/root", "research")
+            .expect_err("duplicate profile error surfaces");
+
+        assert_eq!(error.code, "PROFILE_DUPLICATE_NAME");
+        assert_eq!(error.message, "Profile name already exists.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "profile-duplicate-detail");
+        assert_eq!(runner.last_request()["method"], "profiles.create");
+    }
+
+    #[test]
+    fn profile_invalid_name_error_is_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "PROFILE_INVALID_NAME",
+            message: "Profile name is invalid.",
+            detail_ref: "profile-invalid-detail",
+        });
+
+        let error = run_profiles_create(&runner, "/app/data/root", "bad/name")
+            .expect_err("invalid profile error surfaces");
+
+        assert_eq!(error.code, "PROFILE_INVALID_NAME");
+        assert_eq!(error.message, "Profile name is invalid.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "profile-invalid-detail");
+    }
+
+    #[test]
+    fn profile_timeout_maps_to_timeout_error() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_profiles_create(&runner, "/app/data/root", "Research")
+            .expect_err("profile timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "profiles.create");
+    }
+
+    #[test]
+    fn profile_malformed_stdout_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_profiles_list(&runner, "/app/data/root")
+            .expect_err("profile malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "profiles.list");
+    }
+
+    #[test]
+    fn profile_mismatched_request_id_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::MismatchedId);
+
+        let error = run_profiles_delete(&runner, "/app/data/root", "profile-id")
+            .expect_err("profile mismatched id surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "profiles.delete");
+    }
+
+    #[test]
+    fn profile_store_root_resolution_maps_failures_to_configuration_error() {
+        let error = profile_store_root_from_app_data_dir::<()>(Err(()))
+            .expect_err("profile store resolution failure surfaces");
+
+        assert_eq!(error.code, SIDECAR_CONFIGURATION_ERROR);
+        assert!(error.recoverable);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert!(!error.message.contains("/"));
+    }
+
+    #[test]
+    fn profile_store_root_resolution_injects_app_data_root_for_sidecar_layout() {
+        let root = profile_store_root_from_app_data_dir::<()>(Ok(PathBuf::from("/app/data/root")))
+            .expect("app data root resolves");
+
+        assert_eq!(root, "/app/data/root");
     }
 
     #[test]

@@ -28,7 +28,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::shell_status,
             sidecar::sidecar_health,
-            sidecar::sidecar_diagnostic_failure
+            sidecar::sidecar_diagnostic_failure,
+            sidecar::profiles_list,
+            sidecar::profiles_create,
+            sidecar::profiles_update,
+            sidecar::profiles_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running ThePrivator Tauri application");
