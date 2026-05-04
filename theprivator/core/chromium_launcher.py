@@ -357,6 +357,61 @@ class ChromiumLauncher:
                 
         self.logger.warning("Chromium executable not found")
         return None
+
+    def _enable_continue_where_left_off(self, user_data_path: Path) -> None:
+        """Persist Chrome's "Continue where you left off" startup behavior.
+
+        Chromium stores this as a profile preference under the Default profile
+        directory. This is intentionally best-effort: if an existing preference
+        file is malformed or not writable we still launch with
+        ``--restore-last-session`` rather than blocking the user's browser.
+        """
+        preferences_dir = user_data_path / "Default"
+        preferences_path = preferences_dir / "Preferences"
+
+        try:
+            preferences_dir.mkdir(parents=True, exist_ok=True)
+
+            preferences: Dict[str, Any] = {}
+            if preferences_path.exists():
+                try:
+                    loaded = json.loads(preferences_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    self.logger.warning(
+                        "Cannot update Chromium session restore preference for %s: %s",
+                        preferences_path,
+                        exc,
+                    )
+                    return
+
+                if not isinstance(loaded, dict):
+                    self.logger.warning(
+                        "Cannot update Chromium session restore preference for %s: root is not an object",
+                        preferences_path,
+                    )
+                    return
+                preferences = loaded
+
+            session_preferences = preferences.get("session")
+            if not isinstance(session_preferences, dict):
+                session_preferences = {}
+                preferences["session"] = session_preferences
+
+            session_preferences["restore_on_startup"] = 1
+            session_preferences.setdefault("startup_urls", [])
+
+            temp_path = preferences_path.with_name(f"{preferences_path.name}.tmp")
+            temp_path.write_text(
+                json.dumps(preferences, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(preferences_path)
+        except OSError as exc:
+            self.logger.warning(
+                "Cannot persist Chromium session restore preference for %s: %s",
+                preferences_path,
+                exc,
+            )
         
     def _build_chromium_args(self, profile: ChromiumProfile, additional_args: List[str],
                            headless: bool = False, incognito: bool = False,
@@ -384,6 +439,13 @@ class ChromiumLauncher:
 
             # Also set profile directory name (usually Default)
             args.append('--profile-directory=Default')
+
+            # Make launched profiles resume their previous browser session after
+            # a normal app-managed stop. The preference is persistent, while the
+            # flag makes the behavior explicit for Chromium launches from the app.
+            self._enable_continue_where_left_off(user_data_path)
+            if '--restore-last-session' not in additional_args:
+                args.append('--restore-last-session')
 
             self.logger.info(f"Using user data directory: {user_data_str}")
         else:

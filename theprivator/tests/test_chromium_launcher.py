@@ -1,5 +1,8 @@
 """Tests for ChromiumLauncher."""
 
+import json
+from pathlib import Path
+
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 import subprocess
@@ -38,24 +41,62 @@ class TestChromiumLauncher:
         launcher = ChromiumLauncher()
         assert launcher._chromium_path is None
         
-    def test_build_chromium_args(self):
+    def test_build_chromium_args(self, tmp_path):
         """Test building Chromium arguments."""
         self.launcher._chromium_path = "/usr/bin/chromium"
+        self.test_profile.user_data_dir = str(tmp_path / "test-profile")
         
         args = self.launcher._build_chromium_args(
             self.test_profile,
             ["--additional-arg"],
             headless=True,
-            incognito=True
+            incognito=False
         )
         
-        assert "/usr/bin/chromium" in args
-        assert "--user-data-dir" in args
-        assert "/tmp/test-profile" in args
-        assert "--user-agent" in args
+        assert args[0] == "/usr/bin/chromium"
+        assert f"--user-data-dir={Path(self.test_profile.user_data_dir).absolute()}" in args
+        assert "--profile-directory=Default" in args
+        assert "--restore-last-session" in args
+        assert "--user-agent=Mozilla/5.0 (Test) Chrome/100.0" in args
         assert "--headless" in args
-        assert "--incognito" in args
+        assert "--incognito" not in args
         assert "--additional-arg" in args
+        
+        preferences_path = Path(self.test_profile.user_data_dir) / "Default" / "Preferences"
+        preferences = json.loads(preferences_path.read_text(encoding="utf-8"))
+        assert preferences["session"]["restore_on_startup"] == 1
+        assert preferences["session"]["startup_urls"] == []
+
+    def test_session_restore_preserves_existing_preferences(self, tmp_path):
+        """Test enabling session restore without discarding existing Chromium prefs."""
+        user_data_dir = tmp_path / "test-profile"
+        preferences_path = user_data_dir / "Default" / "Preferences"
+        preferences_path.parent.mkdir(parents=True)
+        preferences_path.write_text(
+            json.dumps({
+                "browser": {"check_default_browser": False},
+                "session": {"startup_urls": ["https://example.com"]}
+            }),
+            encoding="utf-8"
+        )
+
+        self.launcher._enable_continue_where_left_off(user_data_dir)
+
+        preferences = json.loads(preferences_path.read_text(encoding="utf-8"))
+        assert preferences["browser"]["check_default_browser"] is False
+        assert preferences["session"]["startup_urls"] == ["https://example.com"]
+        assert preferences["session"]["restore_on_startup"] == 1
+
+    def test_session_restore_skips_invalid_preferences(self, tmp_path):
+        """Test malformed Chromium prefs are not overwritten."""
+        user_data_dir = tmp_path / "test-profile"
+        preferences_path = user_data_dir / "Default" / "Preferences"
+        preferences_path.parent.mkdir(parents=True)
+        preferences_path.write_text("{not valid json", encoding="utf-8")
+
+        self.launcher._enable_continue_where_left_off(user_data_dir)
+
+        assert preferences_path.read_text(encoding="utf-8") == "{not valid json"
         
     @patch('subprocess.Popen')
     @patch('psutil.pid_exists')
