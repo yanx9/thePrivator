@@ -82,8 +82,55 @@ function profileError(code: string, message: string, detailRef = "profile-detail
   };
 }
 
-function mockStartup(profiles: unknown[] = []) {
-  mockInvoke.mockResolvedValueOnce(healthEnvelope()).mockResolvedValueOnce(profileEnvelope(profileResult(profiles)));
+function chromiumRunningProfile(overrides: Record<string, unknown> = {}) {
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "11111111-1111-1111-1111-111111111111";
+  return {
+    profileId,
+    status: "running",
+    pid: 4242,
+    startedAt: "2026-05-04T18:05:00.000Z",
+    userDataDir: `profile-store/profiles/${profileId}/user-data`,
+    ...overrides,
+  };
+}
+
+function chromiumStoppedProfile(overrides: Record<string, unknown> = {}) {
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "11111111-1111-1111-1111-111111111111";
+  return {
+    profileId,
+    status: "stopped",
+    stoppedAt: "2026-05-04T18:06:00.000Z",
+    termination: "graceful",
+    userDataDir: `profile-store/profiles/${profileId}/user-data`,
+    ...overrides,
+  };
+}
+
+function chromiumStatusResult(overrides: Record<string, unknown> = {}) {
+  const profiles = overrides.profiles ?? [];
+  return {
+    runningCount: Array.isArray(profiles) ? profiles.length : 0,
+    profiles,
+    reconciled: [],
+    ...overrides,
+  };
+}
+
+function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-chromium-1",
+    protocolVersion: "1.0.0",
+    durationMs: 6.75,
+    result,
+    ...overrides,
+  };
+}
+
+function mockStartup(profiles: unknown[] = [], chromiumResult: unknown = chromiumStatusResult()) {
+  mockInvoke
+    .mockResolvedValueOnce(healthEnvelope())
+    .mockResolvedValueOnce(profileEnvelope(profileResult(profiles)))
+    .mockResolvedValueOnce(chromiumEnvelope(chromiumResult));
 }
 
 function deferred<T>() {
@@ -97,14 +144,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function commandCalls(command: string) {
+  return mockInvoke.mock.calls.filter(([calledCommand]) => calledCommand === command);
+}
+
 describe("ThePrivator profile library UI", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
   });
 
-  it("starts health and profile list without a startup waterfall and renders the empty-state CTA", async () => {
+  it("starts health, profile list, and Chromium status without a startup waterfall and renders the empty-state CTA", async () => {
     const health = deferred<unknown>();
     const profiles = deferred<unknown>();
+    const chromium = deferred<unknown>();
     mockInvoke.mockImplementation(((command: string) => {
       if (command === "sidecar_health") {
         return health.promise;
@@ -112,27 +164,34 @@ describe("ThePrivator profile library UI", () => {
       if (command === "profiles_list") {
         return profiles.promise;
       }
+      if (command === "chromium_status") {
+        return chromium.promise;
+      }
       return Promise.reject(new Error(`Unexpected command: ${command}`));
     }) as typeof invoke);
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /persistent profile library/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /persistent profiles, transient browsers/i })).toBeInTheDocument();
     expect(mockInvoke).toHaveBeenNthCalledWith(1, "sidecar_health");
     expect(mockInvoke).toHaveBeenNthCalledWith(2, "profiles_list");
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "chromium_status");
     expect(screen.getByLabelText(/current profile phase/i)).toHaveTextContent(/loading/i);
     expect(screen.getByRole("button", { name: /refreshing profiles/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /refreshing status/i })).toBeDisabled();
 
     await act(async () => {
       health.resolve(healthEnvelope());
       profiles.resolve(profileEnvelope(profileResult([])));
-      await Promise.all([health.promise, profiles.promise]);
+      chromium.resolve(chromiumEnvelope(chromiumStatusResult()));
+      await Promise.all([health.promise, profiles.promise, chromium.promise]);
     });
 
     expect(await screen.findByLabelText(/empty profile library/i)).toHaveTextContent(/Create the first profile/i);
     expect(screen.getByLabelText(/current profile phase/i)).toHaveTextContent(/ready/i);
     expect(screen.getByLabelText(/current profile phase/i)).toHaveTextContent(/0 stored profiles/i);
     expect(screen.getByLabelText(/compact sidecar system status/i)).toHaveTextContent(/ThePrivator 2\.1\.0/i);
+    expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Lifecycle phaseready/i);
   });
 
   it("renders startup profiles as persisted reload truth with typed defaults and compact observability", async () => {
@@ -149,15 +208,18 @@ describe("ThePrivator profile library UI", () => {
     expect(card).toHaveTextContent(/disabled fingerprinting/i);
     expect(card).toHaveTextContent(/about:blank/i);
     expect(card).toHaveTextContent(/profile-store\/profiles\/11111111-1111-1111-1111-111111111111\/user-data/i);
-    expect(card).toHaveTextContent(/not persisted running truth/i);
+    expect(card).toHaveTextContent(/No sidecar-owned running record exists/i);
+    expect(card).toHaveTextContent(/transient runtime state, not durable profile truth/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Current count1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/List requestbridge-profiles-1/i);
+    expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Running count0/i);
   });
 
   it("renders startup profile load failures as actionable recovery without claiming an empty store", async () => {
     mockInvoke
       .mockResolvedValueOnce(healthEnvelope())
-      .mockRejectedValueOnce(profileError("SIDECAR_UNAVAILABLE", "The profile bridge is unavailable.", "startup-detail"));
+      .mockRejectedValueOnce(profileError("SIDECAR_UNAVAILABLE", "The profile bridge is unavailable.", "startup-detail"))
+      .mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult()));
 
     render(<App />);
 
@@ -268,7 +330,7 @@ describe("ThePrivator profile library UI", () => {
     const card = await screen.findByRole("listitem", { name: /research/i });
     fireEvent.click(within(card).getByRole("button", { name: /^delete$/i }));
 
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(3);
     const confirmation = within(card).getByRole("group", { name: /confirm delete research/i });
     expect(confirmation).toHaveTextContent(/removes the profile record only/i);
     expect(confirmation).toHaveTextContent(/does not promise browser user-data cleanup/i);
@@ -319,6 +381,202 @@ describe("ThePrivator profile library UI", () => {
     expect(feedback).toHaveTextContent(/protocol/i);
     expect(input).toHaveValue("Travel");
     expect(screen.getByRole("listitem", { name: /research/i })).toBeInTheDocument();
+  });
+
+  it("launches a stored profile, renders validated PID proof, and disables unsafe row CRUD while running", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 7321 });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(chromiumEnvelope({ ...running, runningCount: 1 }))
+      .mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult({ profiles: [running] })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    await waitFor(() => expect(card).toHaveTextContent(/Running from sidecar runtime bookkeeping/i));
+    expect(card).toHaveTextContent(/PID7321/i);
+    expect(card).toHaveTextContent(/2026-05-04 18:05:00 UTC/i);
+    expect(within(card).getByRole("button", { name: /stop chromium/i })).toBeEnabled();
+    expect(within(card).getByRole("button", { name: /rename/i })).toBeDisabled();
+    expect(within(card).getByRole("button", { name: /^delete$/i })).toBeDisabled();
+    expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Running count1/i);
+    expect(mockInvoke).toHaveBeenCalledWith("chromium_launch", { profileId: profile.id });
+  });
+
+  it("renders missing-executable launch errors as row-level recoverable lifecycle feedback", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockInvoke.mockRejectedValueOnce(
+      profileError("CHROMIUM_EXECUTABLE_NOT_FOUND", "Chromium executable was not found.", "missing-chromium-detail"),
+    );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    expect(recovery).toHaveTextContent(/Launch Chromium failed safely/i);
+    expect(recovery).toHaveTextContent(/CHROMIUM_EXECUTABLE_NOT_FOUND/i);
+    expect(recovery).toHaveTextContent(/sidecar/i);
+    expect(recovery).toHaveTextContent(/missing-chromium-detail/i);
+    expect(within(recovery).getByRole("button", { name: /retry launch/i })).toBeEnabled();
+    expect(card).toHaveTextContent(/Stopped/i);
+    expect(card).not.toHaveTextContent(/PID4242/i);
+  });
+
+  it("preserves already-running launch errors and prevents duplicate launch clicks while pending", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockInvoke.mockRejectedValueOnce(
+      profileError("CHROMIUM_ALREADY_RUNNING", "Chromium is already running for this profile.", "already-running-detail"),
+    );
+
+    const firstRender = render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    expect(recovery).toHaveTextContent(/CHROMIUM_ALREADY_RUNNING/i);
+    expect(recovery).toHaveTextContent(/already-running-detail/i);
+    firstRender.unmount();
+
+    const pendingLaunch = deferred<unknown>();
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(((command: string) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "chromium_launch") {
+        return pendingLaunch.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const pendingCard = await screen.findByRole("listitem", { name: /research/i });
+    const launchButton = within(pendingCard).getByRole("button", { name: /launch chromium/i });
+    fireEvent.click(launchButton);
+    fireEvent.click(launchButton);
+
+    expect(within(pendingCard).getByRole("button", { name: /launching/i })).toBeDisabled();
+    expect(commandCalls("chromium_launch")).toHaveLength(1);
+
+    await act(async () => {
+      pendingLaunch.resolve(chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id }), runningCount: 1 }));
+      await pendingLaunch.promise;
+    });
+  });
+
+  it("treats malformed launch success as a recoverable protocol error without showing Running", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockInvoke.mockResolvedValueOnce(
+      chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id, pid: "not-a-pid" }), runningCount: 1 }),
+    );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    expect(recovery).toHaveTextContent(/SIDECAR_PROTOCOL_ERROR/i);
+    expect(recovery).toHaveTextContent(/protocol/i);
+    expect(card).toHaveTextContent(/Stopped/i);
+    expect(within(card).queryByRole("button", { name: /stop chromium/i })).not.toBeInTheDocument();
+  });
+
+  it("stops only the selected running profile and returns the row to stopped proof", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 8181 });
+    const stopped = chromiumStoppedProfile({ profileId: profile.id, termination: "graceful" });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+    mockInvoke
+      .mockResolvedValueOnce(chromiumEnvelope({ ...stopped, runningCount: 0 }))
+      .mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult({ profiles: [], runningCount: 0 })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    expect(card).toHaveTextContent(/PID8181/i);
+    fireEvent.click(within(card).getByRole("button", { name: /stop chromium/i }));
+
+    await waitFor(() => expect(card).toHaveTextContent(/Stopped/i));
+    expect(card).toHaveTextContent(/graceful/i);
+    expect(within(card).getByRole("button", { name: /launch chromium/i })).toBeEnabled();
+    expect(mockInvoke).toHaveBeenCalledWith("chromium_stop", { profileId: profile.id });
+  });
+
+  it("keeps PID proof visible when stop fails and exposes Retry Stop", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 9191 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+    mockInvoke.mockRejectedValueOnce(
+      profileError("CHROMIUM_STOP_FAILED", "Chromium process could not be stopped.", "stop-detail"),
+    );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /stop chromium/i }));
+
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    expect(card).toHaveTextContent(/Running/i);
+    expect(card).toHaveTextContent(/PID9191/i);
+    expect(recovery).toHaveTextContent(/CHROMIUM_STOP_FAILED/i);
+    expect(recovery).toHaveTextContent(/stop-detail/i);
+    expect(within(recovery).getByRole("button", { name: /retry stop/i })).toBeEnabled();
+  });
+
+  it("renders status bridge failures without losing the stored profile list", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockInvoke
+      .mockResolvedValueOnce(healthEnvelope())
+      .mockResolvedValueOnce(profileEnvelope(profileResult([profile])))
+      .mockRejectedValueOnce(
+        profileError("SIDECAR_TIMEOUT", "The Python sidecar did not respond before the bridge timeout.", "status-timeout-detail"),
+      );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    expect(card).toHaveTextContent(/Stopped/i);
+    expect(recovery).toHaveTextContent(/Status refresh failed safely/i);
+    expect(recovery).toHaveTextContent(/SIDECAR_TIMEOUT/i);
+    expect(recovery).toHaveTextContent(/bridge/i);
+    expect(within(recovery).getByRole("button", { name: /retry status refresh/i })).toBeEnabled();
+    expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/SIDECAR_TIMEOUT/i);
+  });
+
+  it("reconciles an externally closed Chromium process on the next status refresh", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 5151 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+    mockInvoke.mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult({ profiles: [], runningCount: 0 })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    expect(card).toHaveTextContent(/PID5151/i);
+    fireEvent.click(screen.getByRole("button", { name: /refresh lifecycle status/i }));
+
+    await waitFor(() => expect(card).toHaveTextContent(/Last status refresh reconciled/i));
+    expect(card).toHaveTextContent(/reconciled/i);
+    expect(within(card).getByRole("button", { name: /launch chromium/i })).toBeEnabled();
+    expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Last reconciliation11111111-1111-1111-1111-111111111111 reconciled/i);
   });
 
   it("keeps the S01 diagnostic recovery pattern in the compact system panel", async () => {
