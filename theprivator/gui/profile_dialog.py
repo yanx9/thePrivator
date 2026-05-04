@@ -13,6 +13,8 @@ if str(src_dir) not in sys.path:
 
 from core.profile_manager import ProfileManager, ChromiumProfile
 from core.config_manager import ConfigManager
+from core.fingerprint_presets import FINGERPRINT_PRESETS, get_preset_names
+from core.fingerprint_generator import FingerprintGenerator
 from utils.logger import get_logger
 from utils.exceptions import ValidationError, ProfileError
 
@@ -32,6 +34,7 @@ class ProfileDialog(ctk.CTkToplevel):
         self.profile = profile
         self.result = None
         self.logger = get_logger(__name__)
+        self.fp_generator = FingerprintGenerator()
 
         # state
         self.user_agents = []  # filled asynchronously
@@ -230,6 +233,59 @@ class ProfileDialog(ctk.CTkToplevel):
         )
         proxy_help.pack(anchor="w", padx=10, pady=(0, 10))
 
+        # Fingerprint Configuration
+        fp_frame = ctk.CTkFrame(scroll_frame)
+        fp_frame.pack(fill="x", padx=10, pady=10)
+
+        fp_header = ctk.CTkFrame(fp_frame)
+        fp_header.pack(fill="x", padx=10, pady=(10, 5))
+
+        ctk.CTkLabel(
+            fp_header,
+            text="🔒 Fingerprint Protection:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+
+        # Mode selector
+        self.fp_mode_var = ctk.StringVar(value="Disabled")
+        fp_mode_menu = ctk.CTkOptionMenu(
+            fp_header,
+            values=["Disabled", "Simple (Presets)"],
+            variable=self.fp_mode_var,
+            command=self._on_fp_mode_change,
+            width=180
+        )
+        fp_mode_menu.pack(side="right")
+
+        # Simple mode frame (preset dropdown)
+        self.simple_fp_frame = ctk.CTkFrame(fp_frame)
+
+        ctk.CTkLabel(
+            self.simple_fp_frame,
+            text="Preset Profile:",
+            font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=(10, 5))
+
+        self.preset_var = ctk.StringVar(value=get_preset_names()[0])
+        preset_menu = ctk.CTkOptionMenu(
+            self.simple_fp_frame,
+            values=get_preset_names(),
+            variable=self.preset_var,
+            command=self._on_preset_change,
+            width=300
+        )
+        preset_menu.pack(side="left", padx=5)
+
+        # Help text
+        fp_help = ctk.CTkLabel(
+            fp_frame,
+            text="Enable fingerprint protection to mask Canvas, WebGL, Audio, and other browser fingerprints",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            wraplength=500
+        )
+        fp_help.pack(anchor="w", padx=10, pady=(5, 10))
+
         # Notes
         notes_frame = ctk.CTkFrame(scroll_frame)
         notes_frame.pack(fill="x", padx=10, pady=10)
@@ -285,10 +341,24 @@ class ProfileDialog(ctk.CTkToplevel):
 
             if hasattr(self.profile, 'notes') and self.profile.notes:
                 self.notes_text.insert("1.0", self.profile.notes)
+
+            # Populate fingerprint settings
+            if self.profile.fingerprint and self.profile.fingerprint.mode != "disabled":
+                if self.profile.fingerprint.mode == "simple":
+                    self.fp_mode_var.set("Simple (Presets)")
+                    if self.profile.fingerprint.preset_name:
+                        self.preset_var.set(self.profile.fingerprint.preset_name)
+                    self._on_fp_mode_change("Simple (Presets)")
+                else:
+                    self.fp_mode_var.set("Disabled")
+            else:
+                self.fp_mode_var.set("Disabled")
+
         else:
             # Use default User-Agent initially
             default_ua = self.config_manager.get('default_user_agent')
             self.ua_text.insert("1.0", default_ua)
+            self.fp_mode_var.set("Disabled")
 
     # --- User-Agent callbacks (GUI <-> utils) ---
 
@@ -311,6 +381,33 @@ class ProfileDialog(ctk.CTkToplevel):
         choice = random.choice(self.user_agents)
         self.ua_text.delete("1.0", "end")
         self.ua_text.insert("1.0", choice)
+
+    # --- Fingerprint callbacks ---
+
+    def _on_fp_mode_change(self, mode: str) -> None:
+        """Handle fingerprint mode change."""
+        if mode == "Disabled":
+            self.simple_fp_frame.pack_forget()
+            # Re-enable user agent field
+            self.ua_text.configure(state="normal")
+            self.ua_random_btn.configure(state="normal" if hasattr(self, '_user_agents') and self._user_agents else "disabled")
+        elif mode == "Simple (Presets)":
+            self.simple_fp_frame.pack(fill="x", padx=10, pady=(5, 0))
+            # Auto-fill user agent from preset
+            self._on_preset_change(self.preset_var.get())
+
+    def _on_preset_change(self, preset_name: str) -> None:
+        """Handle preset selection change - auto-fill user agent."""
+        from core.fingerprint_presets import FINGERPRINT_PRESETS
+
+        preset = FINGERPRINT_PRESETS.get(preset_name)
+        if preset and preset.get("user_agent"):
+            # Auto-fill user agent
+            self.ua_text.delete("1.0", "end")
+            self.ua_text.insert("1.0", preset["user_agent"])
+            # Make it read-only (but still visible)
+            self.ua_text.configure(state="disabled")
+            self.ua_random_btn.configure(state="disabled")
 
     # --- Validation / actions ---
 
@@ -353,6 +450,27 @@ class ProfileDialog(ctk.CTkToplevel):
             proxy = self.proxy_entry.get().strip() or None
             notes = self.notes_text.get("1.0", "end").strip()
 
+            # Generate fingerprint config based on mode
+            fp_mode = self.fp_mode_var.get()
+            if fp_mode == "Disabled":
+                from core.profile_manager import FingerprintConfig
+                fingerprint = FingerprintConfig(mode="disabled")
+            elif fp_mode == "Simple (Presets)":
+                preset_name = self.preset_var.get()
+                fingerprint = self.fp_generator.generate_from_preset(preset_name)
+                fingerprint.mode = "simple"
+                fingerprint.preset_name = preset_name
+
+                # CRITICAL: Override user agent from preset
+                from core.fingerprint_presets import FINGERPRINT_PRESETS
+                preset = FINGERPRINT_PRESETS.get(preset_name)
+                if preset and preset.get("user_agent"):
+                    user_agent = preset["user_agent"]
+                    self.logger.info(f"Using preset User-Agent: {user_agent[:50]}...")
+            else:
+                from core.profile_manager import FingerprintConfig
+                fingerprint = FingerprintConfig(mode="disabled")
+
             if self.profile:
                 # Edit existing profile
                 self.profile_manager.update_profile(
@@ -360,7 +478,8 @@ class ProfileDialog(ctk.CTkToplevel):
                     name=name,
                     user_agent=user_agent,
                     proxy=proxy,
-                    notes=notes
+                    notes=notes,
+                    fingerprint=fingerprint
                 )
                 # Get the updated profile from the manager
                 self.result = self.profile_manager.get_profile(self.profile.id)
@@ -371,6 +490,12 @@ class ProfileDialog(ctk.CTkToplevel):
                     user_agent=user_agent,
                     proxy=proxy,
                     notes=notes
+                )
+                # Set fingerprint and update
+                self.result.fingerprint = fingerprint
+                self.profile_manager.update_profile(
+                    self.result.id,
+                    fingerprint=fingerprint
                 )
 
             self.destroy()

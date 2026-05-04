@@ -20,9 +20,75 @@ from utils.exceptions import ProfileError, ValidationError
 
 
 @dataclass
+class FingerprintConfig:
+    """Browser fingerprint configuration."""
+
+    # Preset/mode
+    preset_name: Optional[str] = None  # "Windows 10 Chrome 120", etc.
+    mode: str = "disabled"  # "disabled", "simple", "advanced"
+
+    # Canvas/WebGL/Audio (consistent seeded noise)
+    canvas_noise_seed: Optional[int] = None
+    webgl_noise_seed: Optional[int] = None
+    audio_noise_seed: Optional[int] = None
+    canvas_enabled: bool = True
+    webgl_enabled: bool = True
+    audio_enabled: bool = True
+    webgl_vendor: Optional[str] = None
+    webgl_renderer: Optional[str] = None
+
+    # WebRTC
+    webrtc_protection: str = "block_leak"  # "disabled", "block_leak"
+
+    # Geolocation & Timezone (via CDP)
+    timezone_id: Optional[str] = None  # "America/New_York"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy: Optional[int] = 10
+
+    # Language & Locale
+    languages: Optional[List[str]] = None  # ["en-US", "en"]
+    locale: Optional[str] = None
+
+    # Screen & Viewport
+    screen_width: Optional[int] = None
+    screen_height: Optional[int] = None
+    viewport_width: Optional[int] = None
+    viewport_height: Optional[int] = None
+    color_depth: int = 24
+    pixel_ratio: float = 1.0
+
+    # Platform & Hardware
+    platform: Optional[str] = None  # "Win32", "MacIntel", "Linux x86_64"
+    hardware_concurrency: Optional[int] = None  # CPU cores
+    device_memory: Optional[int] = None  # GB
+
+    # User-Agent Client Hints
+    ua_platform: Optional[str] = None
+    ua_platform_version: Optional[str] = None
+    ua_architecture: Optional[str] = None
+    ua_mobile: bool = False
+
+    def __post_init__(self):
+        if self.languages is None:
+            self.languages = ["en-US", "en"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converts fingerprint config to dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FingerprintConfig':
+        """Creates fingerprint config from dictionary."""
+        # Only include fields that exist in the dataclass
+        valid_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**valid_fields)
+
+
+@dataclass
 class ChromiumProfile:
     """Represents a Chromium profile."""
-    
+
     id: str
     name: str
     user_agent: str
@@ -32,12 +98,15 @@ class ChromiumProfile:
     last_used: str = ""
     is_active: bool = False
     notes: str = ""
-    
+    fingerprint: Optional[FingerprintConfig] = None
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
+        if self.fingerprint is None:
+            self.fingerprint = FingerprintConfig()
             
     def to_dict(self) -> Dict[str, Any]:
         """Converts profile to dictionary."""
@@ -48,6 +117,13 @@ class ChromiumProfile:
         """Creates profile from dictionary."""
         if 'notes' not in data:
             data['notes'] = ""
+
+        # Handle fingerprint field
+        if 'fingerprint' in data and isinstance(data['fingerprint'], dict):
+            data['fingerprint'] = FingerprintConfig.from_dict(data['fingerprint'])
+        elif 'fingerprint' not in data:
+            data['fingerprint'] = None  # Will be initialized in __post_init__
+
         return cls(**data)
     
     @property
@@ -400,16 +476,30 @@ class ProfileManager:
     def _load_profiles(self) -> None:
         """Loads profiles from file."""
         try:
+            migrated_count = 0
             if self.profiles_file.exists():
                 with open(self.profiles_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     for profile_data in data.get('profiles', []):
                         try:
                             profile = ChromiumProfile.from_dict(profile_data)
+
+                            # Auto-migrate legacy profiles without fingerprint field
+                            if not hasattr(profile, 'fingerprint') or profile.fingerprint is None:
+                                profile.fingerprint = FingerprintConfig(mode="disabled")
+                                migrated_count += 1
+
                             self._profiles[profile.id] = profile
                         except Exception as e:
                             self.logger.warning(f"Skipped invalid profile: {e}")
+
                 self.logger.info(f"Loaded {len(self._profiles)} profiles")
+
+                # Save if any migrations occurred
+                if migrated_count > 0:
+                    self.logger.info(f"Migrated {migrated_count} profiles to v3.0 format")
+                    self._save_profiles()
+
         except Exception as e:
             self.logger.error(f"Error loading profiles: {e}")
             # Create backup of corrupted file
