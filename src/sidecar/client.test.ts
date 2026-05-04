@@ -1,6 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createProfile, deleteProfile, getSidecarHealth, listProfiles, triggerSidecarDiagnosticFailure, updateProfile } from "./client";
+import {
+  createProfile,
+  deleteProfile,
+  getChromiumStatus,
+  getSidecarHealth,
+  launchChromiumProfile,
+  listProfiles,
+  stopChromiumProfile,
+  triggerSidecarDiagnosticFailure,
+  updateProfile,
+} from "./client";
 import { SIDECAR_PROTOCOL_ERROR } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -64,6 +74,50 @@ function profileEnvelope(result: unknown, overrides: Record<string, unknown> = {
     requestId: "bridge-profiles-1",
     protocolVersion: "1.0.0",
     durationMs: 4.5,
+    result,
+    ...overrides,
+  };
+}
+
+function chromiumRunningProfile(overrides: Record<string, unknown> = {}) {
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "11111111-1111-1111-1111-111111111111";
+  return {
+    profileId,
+    status: "running",
+    pid: 4242,
+    startedAt: "2026-05-04T18:05:00.000Z",
+    userDataDir: `profile-store/profiles/${profileId}/user-data`,
+    ...overrides,
+  };
+}
+
+function chromiumStoppedProfile(overrides: Record<string, unknown> = {}) {
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "11111111-1111-1111-1111-111111111111";
+  return {
+    profileId,
+    status: "stopped",
+    stoppedAt: "2026-05-04T18:06:00.000Z",
+    termination: "graceful",
+    userDataDir: `profile-store/profiles/${profileId}/user-data`,
+    ...overrides,
+  };
+}
+
+function chromiumStatusResult(overrides: Record<string, unknown> = {}) {
+  const profiles = overrides.profiles ?? [chromiumRunningProfile()];
+  return {
+    runningCount: Array.isArray(profiles) ? profiles.length : 1,
+    profiles,
+    reconciled: [],
+    ...overrides,
+  };
+}
+
+function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-chromium-1",
+    protocolVersion: "1.0.0",
+    durationMs: 6.75,
     result,
     ...overrides,
   };
@@ -147,6 +201,141 @@ describe("sidecar client", () => {
     expect(updated.profile).toEqual(renamed);
     expect(deleted.profile).toBeUndefined();
     expect(deleted.profiles).toEqual([]);
+  });
+
+  it("loads an empty Chromium status through the fixed Tauri lifecycle command", async () => {
+    mockInvoke.mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult({ profiles: [], runningCount: 0 })));
+
+    const snapshot = await getChromiumStatus();
+
+    expect(mockInvoke).toHaveBeenCalledWith("chromium_status");
+    expect(snapshot.requestId).toBe("bridge-chromium-1");
+    expect(snapshot.protocolVersion).toBe("1.0.0");
+    expect(snapshot.bridgeDurationMs).toBe(6.75);
+    expect(snapshot.runningCount).toBe(0);
+    expect(snapshot.profiles).toEqual([]);
+    expect(snapshot.reconciled).toEqual([]);
+  });
+
+  it("wraps launch and stop with fixed Chromium command params only", async () => {
+    const running = chromiumRunningProfile();
+    const stopped = chromiumStoppedProfile({ termination: "forced" });
+    mockInvoke
+      .mockResolvedValueOnce(chromiumEnvelope({ ...running, runningCount: 1 }))
+      .mockResolvedValueOnce(chromiumEnvelope({ ...stopped, runningCount: 0 }));
+
+    const launch = await launchChromiumProfile(running.profileId);
+    const stop = await stopChromiumProfile(stopped.profileId);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "chromium_launch", { profileId: running.profileId });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "chromium_stop", { profileId: stopped.profileId });
+    expect(launch).toMatchObject({
+      profileId: running.profileId,
+      status: "running",
+      pid: 4242,
+      startedAt: "2026-05-04T18:05:00.000Z",
+      userDataDir: running.userDataDir,
+      runningCount: 1,
+    });
+    expect(stop).toMatchObject({
+      profileId: stopped.profileId,
+      status: "stopped",
+      termination: "forced",
+      stoppedAt: "2026-05-04T18:06:00.000Z",
+      userDataDir: stopped.userDataDir,
+      runningCount: 0,
+    });
+  });
+
+  it("validates populated Chromium status with running and reconciled profile states", async () => {
+    const running = chromiumRunningProfile();
+    const reconciled = chromiumStoppedProfile({ termination: "reconciled" });
+    mockInvoke.mockResolvedValueOnce(
+      chromiumEnvelope(chromiumStatusResult({ profiles: [running], reconciled: [reconciled] })),
+    );
+
+    const snapshot = await getChromiumStatus();
+
+    expect(snapshot.runningCount).toBe(1);
+    expect(snapshot.profiles).toEqual([running]);
+    expect(snapshot.reconciled).toEqual([reconciled]);
+  });
+
+  it.each([
+    ["empty profile id", chromiumEnvelope(chromiumStatusResult({ profiles: [chromiumRunningProfile({ profileId: "" })] })), getChromiumStatus],
+    ["malformed pid", chromiumEnvelope({ ...chromiumRunningProfile({ pid: "4242" }), runningCount: 1 }), () => launchChromiumProfile("11111111-1111-1111-1111-111111111111")],
+    ["non-positive pid", chromiumEnvelope({ ...chromiumRunningProfile({ pid: 0 }), runningCount: 1 }), () => launchChromiumProfile("11111111-1111-1111-1111-111111111111")],
+    ["bad started timestamp", chromiumEnvelope({ ...chromiumRunningProfile({ startedAt: "2026-05-04 18:05" }), runningCount: 1 }), () => launchChromiumProfile("11111111-1111-1111-1111-111111111111")],
+    ["unknown running status", chromiumEnvelope(chromiumStatusResult({ profiles: [chromiumRunningProfile({ status: "starting" })] })), getChromiumStatus],
+    ["unknown termination", chromiumEnvelope({ ...chromiumStoppedProfile({ termination: "sigterm" }), runningCount: 0 }), () => stopChromiumProfile("11111111-1111-1111-1111-111111111111")],
+    ["absolute userDataDir", chromiumEnvelope(chromiumStatusResult({ profiles: [chromiumRunningProfile({ userDataDir: "/tmp/profile/user-data" })] })), getChromiumStatus],
+    ["missing running count", chromiumEnvelope({ profiles: [], reconciled: [] }), getChromiumStatus],
+    ["launch running count zero", chromiumEnvelope({ ...chromiumRunningProfile(), runningCount: 0 }), () => launchChromiumProfile("11111111-1111-1111-1111-111111111111")],
+    ["non-array running profiles", chromiumEnvelope(chromiumStatusResult({ profiles: {} })), getChromiumStatus],
+    ["non-array reconciled profiles", chromiumEnvelope(chromiumStatusResult({ profiles: [], reconciled: {} })), getChromiumStatus],
+    ["running count mismatch", chromiumEnvelope(chromiumStatusResult({ profiles: [chromiumRunningProfile()], runningCount: 2 })), getChromiumStatus],
+  ])("maps malformed Chromium runtime payloads to protocol errors: %s", async (_caseName, envelope, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelope);
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["CHROMIUM_EXECUTABLE_NOT_FOUND", "Chromium executable was not found.", () => launchChromiumProfile("profile-id")],
+    ["CHROMIUM_ALREADY_RUNNING", "Chromium is already running for this profile.", () => launchChromiumProfile("profile-id")],
+    ["CHROMIUM_STOP_FAILED", "Chromium process could not be stopped.", () => stopChromiumProfile("profile-id")],
+    ["PROFILE_NOT_FOUND", "Profile not found.", () => launchChromiumProfile("missing-profile")],
+  ])("preserves typed recoverable Chromium lifecycle errors: %s", async (code, message, callClient) => {
+    mockInvoke.mockRejectedValueOnce({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-chromium-detail",
+    });
+
+    await expect(callClient()).rejects.toMatchObject({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-chromium-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+  });
+
+  it("preserves typed bridge and protocol errors for Chromium lifecycle calls", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "SIDECAR_TIMEOUT",
+        message: "The Python sidecar did not respond before the bridge timeout.",
+        recoverable: true,
+        detailRef: "bridge-timeout-detail",
+      })
+      .mockRejectedValueOnce({
+        code: SIDECAR_PROTOCOL_ERROR,
+        message: "The Python sidecar returned malformed JSON.",
+        recoverable: true,
+        detailRef: "bridge-protocol-detail",
+      });
+
+    await expect(getChromiumStatus()).rejects.toMatchObject({
+      code: "SIDECAR_TIMEOUT",
+      source: "bridge",
+      phase: "bridge-error",
+      detailRef: "bridge-timeout-detail",
+    });
+    await expect(launchChromiumProfile("profile-id")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: "bridge-protocol-detail",
+    });
   });
 
   it.each([

@@ -153,6 +153,35 @@ pub async fn profiles_delete(
     profiles_delete_with_runner(&runner, store_root, id).await
 }
 
+#[tauri::command]
+pub async fn chromium_status(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    chromium_status_with_runner(&runner, store_root).await
+}
+
+#[tauri::command]
+pub async fn chromium_launch(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    chromium_launch_with_runner(&runner, store_root, profile_id).await
+}
+
+#[tauri::command]
+pub async fn chromium_stop(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    chromium_stop_with_runner(&runner, store_root, profile_id).await
+}
+
 pub async fn sidecar_health_with_runner<R: SidecarRunner>(
     runner: &R,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
@@ -224,6 +253,52 @@ async fn profiles_delete_with_runner<R: SidecarRunner>(
         json!({
             "storeRoot": store_root,
             "id": id,
+        }),
+    )
+    .await
+}
+
+async fn chromium_status_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "chromium.status",
+        json!({
+            "storeRoot": store_root,
+        }),
+    )
+    .await
+}
+
+async fn chromium_launch_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "chromium.launch",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+        }),
+    )
+    .await
+}
+
+async fn chromium_stop_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "chromium.stop",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
         }),
     )
     .await
@@ -763,6 +838,37 @@ mod tests {
         ))
     }
 
+    fn run_chromium_status(
+        runner: &FakeRunner,
+        store_root: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(chromium_status_with_runner(runner, store_root.to_string()))
+    }
+
+    fn run_chromium_launch(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(chromium_launch_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+        ))
+    }
+
+    fn run_chromium_stop(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(chromium_stop_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+        ))
+    }
+
     fn assert_request_params(request: &Value, method: &str, expected: &[(&str, Value)]) {
         assert_eq!(request["method"], method);
         let params = request["params"].as_object().expect("params object");
@@ -869,6 +975,97 @@ mod tests {
                 ("id", json!("profile-id")),
             ],
         );
+    }
+
+    #[test]
+    fn chromium_status_request_injects_only_store_root() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_chromium_status(&runner, "/app/data/root").expect("chromium status reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "chromium.status",
+            &[("storeRoot", json!("/app/data/root"))],
+        );
+    }
+
+    #[test]
+    fn chromium_launch_request_injects_store_root_and_profile_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_chromium_launch(&runner, "/app/data/root", "profile-id")
+            .expect("chromium launch reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "chromium.launch",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+            ],
+        );
+    }
+
+    #[test]
+    fn chromium_stop_request_injects_store_root_and_profile_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_chromium_stop(&runner, "/app/data/root", "profile-id")
+            .expect("chromium stop reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "chromium.stop",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+            ],
+        );
+    }
+
+    #[test]
+    fn chromium_lifecycle_error_is_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "CHROMIUM_EXECUTABLE_NOT_FOUND",
+            message: "Chromium executable was not found.",
+            detail_ref: "chromium-executable-detail",
+        });
+
+        let error = run_chromium_launch(&runner, "/app/data/root", "profile-id")
+            .expect_err("chromium lifecycle error surfaces");
+
+        assert_eq!(error.code, "CHROMIUM_EXECUTABLE_NOT_FOUND");
+        assert_eq!(error.message, "Chromium executable was not found.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "chromium-executable-detail");
+        assert_eq!(runner.last_request()["method"], "chromium.launch");
+    }
+
+    #[test]
+    fn chromium_bridge_timeout_maps_to_timeout_error() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_chromium_status(&runner, "/app/data/root")
+            .expect_err("chromium timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "chromium.status");
+    }
+
+    #[test]
+    fn chromium_malformed_stdout_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_chromium_stop(&runner, "/app/data/root", "profile-id")
+            .expect_err("chromium malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "chromium.stop");
     }
 
     #[test]

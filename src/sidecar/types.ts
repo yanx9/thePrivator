@@ -112,5 +112,63 @@ export interface ProfileMutationSnapshot extends ProfileMutationResult {
   receivedAt: string;
 }
 
+export type ChromiumRuntimeStatus = "running" | "stopped";
+
+export type ChromiumTermination = "already-stopped" | "graceful" | "forced" | "reconciled";
+
+export interface ChromiumRunningProfileState {
+  profileId: string;
+  status: Extract<ChromiumRuntimeStatus, "running">;
+  pid: number;
+  startedAt: string;
+  userDataDir: string;
+}
+
+export interface ChromiumStoppedProfileState {
+  profileId: string;
+  status: Extract<ChromiumRuntimeStatus, "stopped">;
+  stoppedAt: string;
+  termination: ChromiumTermination;
+  userDataDir: string;
+}
+
+export interface ChromiumStatusResult {
+  runningCount: number;
+  profiles: ChromiumRunningProfileState[];
+  reconciled: ChromiumStoppedProfileState[];
+}
+
+export interface ChromiumLaunchResult extends ChromiumRunningProfileState {
+  runningCount: number;
+}
+
+export interface ChromiumStopResult extends ChromiumStoppedProfileState {
+  runningCount: number;
+}
+
+export interface ChromiumStatusSnapshot extends ChromiumStatusResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ChromiumLaunchSnapshot extends ChromiumLaunchResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ChromiumStopSnapshot extends ChromiumStopResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export const SIDECAR_PROTOCOL_ERROR = "SIDECAR_PROTOCOL_ERROR";
 export const SIDECAR_BRIDGE_ERROR = "SIDECAR_BRIDGE_ERROR";

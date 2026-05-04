@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ChromiumLaunchResult,
+  ChromiumLaunchSnapshot,
+  ChromiumRunningProfileState,
+  ChromiumStatusResult,
+  ChromiumStatusSnapshot,
+  ChromiumStopResult,
+  ChromiumStoppedProfileState,
+  ChromiumStopSnapshot,
+  ChromiumTermination,
   JsonScalar,
   ProfileDefaults,
   ProfileListResult,
@@ -94,6 +103,33 @@ export async function deleteProfile(id: string): Promise<ProfileMutationSnapshot
   }
 }
 
+export async function getChromiumStatus(): Promise<ChromiumStatusSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("chromium_status");
+    return parseChromiumStatusEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function launchChromiumProfile(profileId: string): Promise<ChromiumLaunchSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("chromium_launch", { profileId });
+    return parseChromiumLaunchEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function stopChromiumProfile(profileId: string): Promise<ChromiumStopSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("chromium_stop", { profileId });
+    return parseChromiumStopEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
 export function normalizeSidecarError(error: unknown): SidecarClientError {
   if (isCommandErrorEnvelope(error)) {
     const source = sourceForCode(error.code);
@@ -150,6 +186,48 @@ function parseProfileMutationEnvelope(
 ): ProfileMutationSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseProfileMutationResult(envelope.result, options);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseChromiumStatusEnvelope(value: unknown, receivedAt: string): ChromiumStatusSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseChromiumStatusResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseChromiumLaunchEnvelope(value: unknown, receivedAt: string): ChromiumLaunchSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseChromiumLaunchResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseChromiumStopEnvelope(value: unknown, receivedAt: string): ChromiumStopSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseChromiumStopResult(envelope.result);
 
   return {
     requestId: formatRequestId(envelope.requestId),
@@ -264,6 +342,83 @@ function parseProfileMutationResult(
   };
 }
 
+function parseChromiumStatusResult(value: unknown): ChromiumStatusResult {
+  const record = requireRecord(value, "The sidecar Chromium status result must be an object.");
+  const profiles = parseChromiumRunningProfileArray(record.profiles, "profiles");
+  const runningCount = requireNonNegativeInteger(record.runningCount, "runningCount");
+  const reconciled = parseChromiumStoppedProfileArray(record.reconciled, "reconciled");
+
+  if (runningCount !== profiles.length) {
+    throw makeProtocolError("The sidecar Chromium status runningCount does not match the profiles array length.");
+  }
+
+  return {
+    runningCount,
+    profiles,
+    reconciled,
+  };
+}
+
+function parseChromiumLaunchResult(value: unknown): ChromiumLaunchResult {
+  const record = requireRecord(value, "The sidecar Chromium launch result must be an object.");
+  return {
+    ...parseChromiumRunningProfile(record, "launch"),
+    runningCount: requirePositiveInteger(record.runningCount, "runningCount"),
+  };
+}
+
+function parseChromiumStopResult(value: unknown): ChromiumStopResult {
+  const record = requireRecord(value, "The sidecar Chromium stop result must be an object.");
+  return {
+    ...parseChromiumStoppedProfile(record, "stop"),
+    runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
+  };
+}
+
+function parseChromiumRunningProfileArray(value: unknown, field: string): ChromiumRunningProfileState[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar Chromium result field ${field} must be an array.`);
+  }
+
+  return value.map((item, index) => parseChromiumRunningProfile(item, `${field}[${index}]`));
+}
+
+function parseChromiumStoppedProfileArray(value: unknown, field: string): ChromiumStoppedProfileState[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar Chromium result field ${field} must be an array.`);
+  }
+
+  return value.map((item, index) => parseChromiumStoppedProfile(item, `${field}[${index}]`));
+}
+
+function parseChromiumRunningProfile(value: unknown, field: string): ChromiumRunningProfileState {
+  const record = requireRecord(value, `The sidecar Chromium result field ${field} must be an object.`);
+  const profileId = requireNonBlankString(record.profileId, `${field}.profileId`);
+  requireLiteral(record.status, `${field}.status`, "running");
+
+  return {
+    profileId,
+    status: "running",
+    pid: requirePositiveInteger(record.pid, `${field}.pid`),
+    startedAt: requireIsoTimestamp(record.startedAt, `${field}.startedAt`),
+    userDataDir: requireChromiumUserDataDir(record.userDataDir, profileId, `${field}.userDataDir`),
+  };
+}
+
+function parseChromiumStoppedProfile(value: unknown, field: string): ChromiumStoppedProfileState {
+  const record = requireRecord(value, `The sidecar Chromium result field ${field} must be an object.`);
+  const profileId = requireNonBlankString(record.profileId, `${field}.profileId`);
+  requireLiteral(record.status, `${field}.status`, "stopped");
+
+  return {
+    profileId,
+    status: "stopped",
+    stoppedAt: requireIsoTimestamp(record.stoppedAt, `${field}.stoppedAt`),
+    termination: requireChromiumTermination(record.termination, `${field}.termination`),
+    userDataDir: requireChromiumUserDataDir(record.userDataDir, profileId, `${field}.userDataDir`),
+  };
+}
+
 function parseProfileArray(value: unknown): ProfileRecord[] {
   if (!Array.isArray(value)) {
     throw makeProtocolError("The sidecar profile result field profiles must be an array.");
@@ -356,6 +511,34 @@ function requireNonNegativeInteger(value: unknown, field: string): number {
   }
 
   return number;
+}
+
+function requirePositiveInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw makeProtocolError(`The sidecar response field ${field} must be a positive integer.`);
+  }
+
+  return number;
+}
+
+function requireChromiumTermination(value: unknown, field: string): ChromiumTermination {
+  if (value === "already-stopped" || value === "graceful" || value === "forced" || value === "reconciled") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar response field ${field} must be a known Chromium termination value.`);
+}
+
+function requireChromiumUserDataDir(value: unknown, profileId: string, field: string): string {
+  const userDataDir = requireRelativeStoragePath(value, field);
+  const expectedUserDataDir = `profile-store/profiles/${profileId}/user-data`;
+
+  if (userDataDir !== expectedUserDataDir) {
+    throw makeProtocolError(`The sidecar Chromium result field ${field} must match the profile id.`);
+  }
+
+  return userDataDir;
 }
 
 function requireLiteral<T extends string>(value: unknown, field: string, expected: T): T {

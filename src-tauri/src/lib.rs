@@ -32,7 +32,10 @@ pub fn run() {
             sidecar::profiles_list,
             sidecar::profiles_create,
             sidecar::profiles_update,
-            sidecar::profiles_delete
+            sidecar::profiles_delete,
+            sidecar::chromium_status,
+            sidecar::chromium_launch,
+            sidecar::chromium_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running ThePrivator Tauri application");
