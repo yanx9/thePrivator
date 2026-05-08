@@ -1,3 +1,4 @@
+use crate::diagnostics::{DiagnosticStore, StderrPersistOutcome};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -75,15 +76,24 @@ pub trait SidecarRunner: Send + Sync {
         request_line: String,
         timeout: Duration,
     ) -> Result<SidecarProcessOutput, SidecarRunnerError>;
+
+    fn diagnostics_store(&self) -> Option<&DiagnosticStore> {
+        None
+    }
 }
 
 pub struct TauriSidecarRunner {
     app: tauri::AppHandle,
+    diagnostics_store: Option<DiagnosticStore>,
 }
 
 impl TauriSidecarRunner {
     pub fn new(app: tauri::AppHandle) -> Self {
-        Self { app }
+        let diagnostics_store = DiagnosticStore::from_app_data_dir(app.path().app_data_dir()).ok();
+        Self {
+            app,
+            diagnostics_store,
+        }
     }
 }
 
@@ -104,6 +114,10 @@ impl SidecarRunner for TauriSidecarRunner {
         tokio::task::spawn_blocking(move || run_sidecar_process(command, request_line, timeout))
             .await
             .map_err(|_| SidecarRunnerError::Io)?
+    }
+
+    fn diagnostics_store(&self) -> Option<&DiagnosticStore> {
+        self.diagnostics_store.as_ref()
     }
 }
 
@@ -428,12 +442,51 @@ async fn invoke_method_with_params_timeout<R: SidecarRunner>(
         )
     })?;
 
-    let output = runner
-        .run(request_line, timeout)
-        .await
-        .map_err(|error| map_runner_error(error, method, &request_id))?;
+    let started = Instant::now();
+    let output = match runner.run(request_line, timeout).await {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(map_runner_error(
+                error,
+                method,
+                &request_id,
+                runner.diagnostics_store(),
+                duration_ms(started.elapsed()),
+            ));
+        }
+    };
+    let bridge_duration_ms = duration_ms(started.elapsed());
 
-    parse_process_output(output, method, &request_id)
+    if let Some(outcome) = persist_sidecar_stderr_diagnostics(
+        runner.diagnostics_store(),
+        &output.stderr,
+        method,
+        &request_id,
+    ) {
+        if outcome.malformed_lines > 0 {
+            let error = bridge_error(
+                SIDECAR_PROTOCOL_ERROR,
+                "The Python sidecar emitted malformed diagnostic stderr lines.",
+            );
+            log_bridge_failure(
+                method,
+                &request_id,
+                &error,
+                output.exit_code,
+                &output,
+                runner.diagnostics_store(),
+                bridge_duration_ms,
+            );
+        }
+    }
+
+    parse_process_output(
+        output,
+        method,
+        &request_id,
+        runner.diagnostics_store(),
+        bridge_duration_ms,
+    )
 }
 
 fn run_sidecar_process(
@@ -515,13 +568,23 @@ fn parse_process_output(
     output: SidecarProcessOutput,
     method: &str,
     request_id: &str,
+    diagnostics_store: Option<&DiagnosticStore>,
+    bridge_duration_ms: f64,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     if output.exit_code != Some(0) {
         let error = bridge_error(
             SIDECAR_PROCESS_ERROR,
             "The Python sidecar process exited before returning a successful response.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, &output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            &output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     }
 
@@ -537,7 +600,15 @@ fn parse_process_output(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar returned an invalid response envelope.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, &output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            &output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     }
 
@@ -546,11 +617,26 @@ fn parse_process_output(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar returned malformed JSON.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, &output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            &output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         error
     })?;
 
-    validate_envelope(envelope, method, request_id, &output)
+    validate_envelope(
+        envelope,
+        method,
+        request_id,
+        &output,
+        diagnostics_store,
+        bridge_duration_ms,
+    )
 }
 
 fn validate_envelope(
@@ -558,6 +644,8 @@ fn validate_envelope(
     method: &str,
     request_id: &str,
     output: &SidecarProcessOutput,
+    diagnostics_store: Option<&DiagnosticStore>,
+    bridge_duration_ms: f64,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let expected_id = Value::String(request_id.to_string());
     if envelope.id.as_ref() != Some(&expected_id) {
@@ -565,7 +653,15 @@ fn validate_envelope(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar response id did not match the bridge request id.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     }
 
@@ -574,7 +670,15 @@ fn validate_envelope(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar response is missing ok.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     };
 
@@ -583,7 +687,15 @@ fn validate_envelope(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar response is missing protocolVersion.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     };
 
@@ -592,7 +704,15 @@ fn validate_envelope(
             SIDECAR_PROTOCOL_ERROR,
             "The Python sidecar response is missing durationMs.",
         );
-        log_bridge_failure(method, request_id, &error, output.exit_code, output);
+        log_bridge_failure(
+            method,
+            request_id,
+            &error,
+            output.exit_code,
+            output,
+            diagnostics_store,
+            bridge_duration_ms,
+        );
         return Err(error);
     };
 
@@ -602,7 +722,15 @@ fn validate_envelope(
                 SIDECAR_PROTOCOL_ERROR,
                 "The Python sidecar success response is missing result.",
             );
-            log_bridge_failure(method, request_id, &error, output.exit_code, output);
+            log_bridge_failure(
+                method,
+                request_id,
+                &error,
+                output.exit_code,
+                output,
+                diagnostics_store,
+                bridge_duration_ms,
+            );
             return Err(error);
         };
 
@@ -611,7 +739,15 @@ fn validate_envelope(
                 SIDECAR_PROTOCOL_ERROR,
                 "The Python sidecar success result must be an object.",
             );
-            log_bridge_failure(method, request_id, &error, output.exit_code, output);
+            log_bridge_failure(
+                method,
+                request_id,
+                &error,
+                output.exit_code,
+                output,
+                diagnostics_store,
+                bridge_duration_ms,
+            );
             return Err(error);
         }
 
@@ -627,7 +763,15 @@ fn validate_envelope(
                 SIDECAR_PROTOCOL_ERROR,
                 "The Python sidecar error response is missing error.",
             );
-            log_bridge_failure(method, request_id, &error, output.exit_code, output);
+            log_bridge_failure(
+                method,
+                request_id,
+                &error,
+                output.exit_code,
+                output,
+                diagnostics_store,
+                bridge_duration_ms,
+            );
             return Err(error);
         };
 
@@ -644,6 +788,8 @@ fn map_runner_error(
     error: SidecarRunnerError,
     method: &str,
     request_id: &str,
+    diagnostics_store: Option<&DiagnosticStore>,
+    bridge_duration_ms: f64,
 ) -> SidecarCommandError {
     let mapped = match error {
         SidecarRunnerError::Configuration => bridge_error(
@@ -676,11 +822,13 @@ fn map_runner_error(
             stdout: String::new(),
             stderr: String::new(),
         },
+        diagnostics_store,
+        bridge_duration_ms,
     );
     mapped
 }
 
-fn bridge_error(code: &str, message: &str) -> SidecarCommandError {
+pub(crate) fn bridge_error(code: &str, message: &str) -> SidecarCommandError {
     SidecarCommandError {
         code: code.to_string(),
         message: message.to_string(),
@@ -703,23 +851,52 @@ fn make_detail_ref(prefix: &str) -> String {
     format!("{prefix}-{timestamp:x}-{sequence:x}")
 }
 
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn persist_sidecar_stderr_diagnostics(
+    diagnostics_store: Option<&DiagnosticStore>,
+    stderr: &str,
+    method: &str,
+    request_id: &str,
+) -> Option<StderrPersistOutcome> {
+    diagnostics_store.map(|store| store.append_sidecar_stderr_events(stderr, method, request_id))
+}
+
 fn log_bridge_failure(
     method: &str,
     request_id: &str,
     error: &SidecarCommandError,
     exit_code: Option<i32>,
     output: &SidecarProcessOutput,
+    diagnostics_store: Option<&DiagnosticStore>,
+    bridge_duration_ms: f64,
 ) {
-    let event = json!({
-        "event": "sidecar.bridge_failure",
-        "requestId": request_id,
-        "method": method,
-        "errorCode": error.code,
-        "detailRef": error.detail_ref,
-        "exitCode": exit_code,
-        "stdoutLines": output.stdout.lines().filter(|line| !line.trim().is_empty()).count(),
-        "stderrLines": output.stderr.lines().filter(|line| !line.trim().is_empty()).count(),
-    });
+    let stdout_lines = output
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let stderr_lines = output
+        .stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let event = crate::diagnostics::bridge_failure_event(
+        method,
+        request_id,
+        &error.code,
+        &error.detail_ref,
+        bridge_duration_ms,
+        exit_code,
+        stdout_lines,
+        stderr_lines,
+    );
+
+    if let Some(store) = diagnostics_store {
+        store.append_event(event.clone());
+    }
 
     eprintln!(
         "{}",
@@ -732,7 +909,11 @@ fn log_bridge_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[derive(Clone)]
     enum FakeMode {
@@ -755,6 +936,7 @@ mod tests {
         mode: FakeMode,
         last_request: Arc<Mutex<Option<Value>>>,
         last_timeout: Arc<Mutex<Option<Duration>>>,
+        diagnostics_store: Option<DiagnosticStore>,
     }
 
     impl FakeRunner {
@@ -763,6 +945,16 @@ mod tests {
                 mode,
                 last_request: Arc::new(Mutex::new(None)),
                 last_timeout: Arc::new(Mutex::new(None)),
+                diagnostics_store: None,
+            }
+        }
+
+        fn with_diagnostics(mode: FakeMode, diagnostics_store: DiagnosticStore) -> Self {
+            Self {
+                mode,
+                last_request: Arc::new(Mutex::new(None)),
+                last_timeout: Arc::new(Mutex::new(None)),
+                diagnostics_store: Some(diagnostics_store),
             }
         }
 
@@ -812,18 +1004,27 @@ mod tests {
                     code,
                     message,
                     detail_ref,
-                } => Ok(output_with_stdout(json!({
-                    "id": request_id,
-                    "ok": false,
-                    "protocolVersion": "1.0.0",
-                    "durationMs": 1.5,
-                    "error": {
-                        "code": code,
-                        "message": message,
-                        "recoverable": true,
+                } => Ok(output_with_stdout_and_stderr(
+                    json!({
+                        "id": request_id,
+                        "ok": false,
+                        "protocolVersion": "1.0.0",
+                        "durationMs": 1.5,
+                        "error": {
+                            "code": code,
+                            "message": message,
+                            "recoverable": true,
+                            "detailRef": detail_ref
+                        }
+                    }),
+                    json!({
+                        "event": "sidecar.request",
+                        "status": "error",
+                        "durationMs": 1.5,
+                        "errorCode": code,
                         "detailRef": detail_ref
-                    }
-                }))),
+                    }),
+                )),
                 FakeMode::Static(output) => Ok(output.clone()),
                 FakeMode::RunnerError(error) => Err(error.clone()),
                 FakeMode::MismatchedId => Ok(output_with_stdout(json!({
@@ -853,13 +1054,28 @@ mod tests {
                 }))),
             }
         }
+
+        fn diagnostics_store(&self) -> Option<&DiagnosticStore> {
+            self.diagnostics_store.as_ref()
+        }
     }
 
     fn output_with_stdout(value: Value) -> SidecarProcessOutput {
+        output_with_stdout_and_stderr(
+            value,
+            json!({
+                "event": "sidecar.request",
+                "status": "ok",
+                "durationMs": 1.25
+            }),
+        )
+    }
+
+    fn output_with_stdout_and_stderr(value: Value, stderr_event: Value) -> SidecarProcessOutput {
         SidecarProcessOutput {
             exit_code: Some(0),
             stdout: format!("{value}\n"),
-            stderr: "{\"event\":\"sidecar.request\"}\n".to_string(),
+            stderr: format!("{stderr_event}\n"),
         }
     }
 
@@ -869,6 +1085,20 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
         }
+    }
+
+    fn temp_diagnostics_store() -> DiagnosticStore {
+        let sequence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("theprivator-sidecar-diagnostics-{sequence}"));
+        let _ = fs::remove_dir_all(&root);
+        DiagnosticStore::new(root).expect("temp diagnostics root is absolute")
+    }
+
+    fn diagnostics_log_text(store: &DiagnosticStore) -> String {
+        fs::read_to_string(store.log_path()).expect("diagnostics log exists")
     }
 
     fn run_health(runner: &FakeRunner) -> Result<SidecarCommandSuccess, SidecarCommandError> {
@@ -997,6 +1227,124 @@ mod tests {
         for (key, value) in expected {
             assert_eq!(params.get(*key), Some(value), "param {key} mismatch");
         }
+    }
+
+    #[test]
+    fn health_status_stderr_diagnostic_is_persisted_without_store_root_param() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(FakeMode::HealthSuccess, store.clone());
+
+        let result = run_health(&runner).expect("health succeeds");
+        let request = runner.last_request();
+        let log_text = diagnostics_log_text(&store);
+
+        assert_eq!(result.result["status"], "healthy");
+        assert_eq!(request["method"], "health.status");
+        assert!(request["params"]
+            .as_object()
+            .expect("params object")
+            .is_empty());
+        assert!(log_text.contains("\"event\":\"sidecar.request\""));
+        assert!(log_text.contains("\"method\":\"health.status\""));
+        assert!(log_text.contains("\"requestId\":\"bridge-"));
+        assert!(!log_text.contains("storeRoot"));
+    }
+
+    #[test]
+    fn typed_sidecar_error_stderr_is_persisted_and_lookupable_by_detail_ref() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::TypedError {
+                code: "DIAGNOSTIC_FAILURE",
+                message: "Diagnostic failure requested.",
+                detail_ref: "sidecar-diagnostic-detail",
+            },
+            store.clone(),
+        );
+
+        let error = run_diagnostic_failure(&runner).expect_err("diagnostic failure surfaces");
+        let lookup = store.lookup(&error.detail_ref);
+
+        assert_eq!(error.code, "DIAGNOSTIC_FAILURE");
+        assert_eq!(error.detail_ref, "sidecar-diagnostic-detail");
+        assert!(lookup.found);
+        assert_eq!(lookup.entries.len(), 1);
+        assert_eq!(
+            lookup.entries[0]["source"],
+            crate::diagnostics::DIAGNOSTIC_SOURCE_PYTHON
+        );
+        assert_eq!(lookup.entries[0]["event"], "sidecar.request");
+        assert_eq!(lookup.entries[0]["method"], "diagnostics.fail");
+        assert_eq!(lookup.entries[0]["errorCode"], "DIAGNOSTIC_FAILURE");
+        assert_eq!(
+            lookup.log_path.as_deref(),
+            Some(crate::diagnostics::DIAGNOSTIC_RELATIVE_LOG_PATH)
+        );
+    }
+
+    #[test]
+    fn runner_failures_are_persisted_by_visible_bridge_detail_ref() {
+        let cases = [
+            (
+                SidecarRunnerError::Configuration,
+                SIDECAR_CONFIGURATION_ERROR,
+            ),
+            (SidecarRunnerError::Unavailable, SIDECAR_UNAVAILABLE),
+            (SidecarRunnerError::Timeout, SIDECAR_TIMEOUT),
+            (SidecarRunnerError::Io, SIDECAR_PROCESS_ERROR),
+        ];
+
+        for (runner_error, expected_code) in cases {
+            let store = temp_diagnostics_store();
+            let runner = FakeRunner::with_diagnostics(
+                FakeMode::RunnerError(runner_error.clone()),
+                store.clone(),
+            );
+
+            let error = run_health(&runner).expect_err("runner error surfaces");
+            let lookup = store.lookup(&error.detail_ref);
+
+            assert_eq!(error.code, expected_code);
+            assert!(error.detail_ref.starts_with("bridge-"));
+            assert!(lookup.found, "missing lookup for {}", expected_code);
+            assert_eq!(
+                lookup.entries[0]["source"],
+                crate::diagnostics::DIAGNOSTIC_SOURCE_RUST
+            );
+            assert_eq!(lookup.entries[0]["event"], "sidecar.bridge_failure");
+            assert_eq!(lookup.entries[0]["method"], "health.status");
+            assert_eq!(lookup.entries[0]["errorCode"], expected_code);
+            assert_eq!(lookup.entries[0]["detailRef"], error.detail_ref);
+            assert_eq!(lookup.entries[0]["stdoutLines"], 0);
+            assert_eq!(lookup.entries[0]["stderrLines"], 0);
+        }
+    }
+
+    #[test]
+    fn protocol_failures_are_persisted_with_line_counts_and_without_output_bodies() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::Static(output(
+                Some(0),
+                "{\"ok\":true}\n{\"ok\":true}\nSECRET_STDOUT_BODY\n",
+                "SECRET_STDERR_BODY /tmp/private\n",
+            )),
+            store.clone(),
+        );
+
+        let error = run_health(&runner).expect_err("multiple stdout lines surface");
+        let lookup = store.lookup(&error.detail_ref);
+        let log_text = diagnostics_log_text(&store);
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert!(lookup.found);
+        assert_eq!(lookup.entries[0]["event"], "sidecar.bridge_failure");
+        assert_eq!(lookup.entries[0]["errorCode"], SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(lookup.entries[0]["stdoutLines"], 3);
+        assert_eq!(lookup.entries[0]["stderrLines"], 1);
+        assert!(!log_text.contains("SECRET_STDOUT_BODY"));
+        assert!(!log_text.contains("SECRET_STDERR_BODY"));
+        assert!(!log_text.contains("/tmp/private"));
     }
 
     #[test]

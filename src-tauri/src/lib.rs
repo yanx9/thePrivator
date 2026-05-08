@@ -1,3 +1,4 @@
+mod diagnostics;
 mod sidecar;
 
 mod commands {
@@ -27,6 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::shell_status,
+            diagnostics::diagnostics_lookup,
             sidecar::sidecar_health,
             sidecar::sidecar_diagnostic_failure,
             sidecar::profiles_list,
