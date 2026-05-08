@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
 from . import chromium, legacy_import
+from .diagnostics import append_events
 from .profiles import ProfileStore, require_string_param
 from .protocol import (
     DIAGNOSTIC_FAILURE,
@@ -50,6 +51,7 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
     started = time.perf_counter()
     request_id = None
     method = None
+    request: Optional[SidecarRequest] = None
 
     try:
         request = parse_request_line(raw_line)
@@ -75,7 +77,7 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
         )
         diagnostics = [diagnostic]
         diagnostics.extend(_legacy_import_outcome_diagnostics(request.method, result))
-        return response, diagnostics
+        return response, _with_store_root_persistence(request, diagnostics)
 
     except SidecarError as error:
         duration_ms = _elapsed_ms(started)
@@ -92,7 +94,10 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
             error_code=error.code,
             detail_ref=error.detail_ref,
         )
-        return response, [diagnostic]
+        diagnostics = [diagnostic]
+        if request is None:
+            return response, diagnostics
+        return response, _with_store_root_persistence(request, diagnostics)
 
     except Exception:
         duration_ms = _elapsed_ms(started)
@@ -115,7 +120,28 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
             error_code=error.code,
             detail_ref=error.detail_ref,
         )
-        return response, [diagnostic]
+        diagnostics = [diagnostic]
+        if request is None:
+            return response, diagnostics
+        return response, _with_store_root_persistence(request, diagnostics)
+
+
+def _with_store_root_persistence(
+    request: SidecarRequest,
+    diagnostics: list[JsonObject],
+) -> list[JsonObject]:
+    """Persist store-root diagnostics without changing response authority."""
+    result = append_events(
+        request.params.get("storeRoot"),
+        diagnostics,
+        request_id=request.id,
+        method=request.method,
+    )
+    if result.get("ok") is False:
+        failure = result.get("diagnostic")
+        if isinstance(failure, dict):
+            return [*diagnostics, failure]
+    return diagnostics
 
 
 def dispatch(request: SidecarRequest) -> JsonObject:
