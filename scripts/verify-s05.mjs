@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -255,12 +255,35 @@ function writeLegacyConfig(profileDir, payload) {
   writeFileSync(join(profileDir, "config.json"), JSON.stringify(payload), "utf8");
 }
 
+function assertNoFrontendBypassImports() {
+  const appSource = readFileSync(join(ROOT_DIR, "src", "App.tsx"), "utf8");
+  const clientSource = readFileSync(join(ROOT_DIR, "src", "sidecar", "client.ts"), "utf8");
+
+  assert(appSource.includes("lookupDiagnosticDetail"), "App.tsx must render diagnostics through the strict sidecar client wrapper.");
+  assert(!appSource.includes("@tauri-apps/api/core"), "App.tsx must not import Tauri invoke directly.");
+  assert(!/@tauri-apps\/plugin-(dialog|fs|shell)/.test(appSource), "App.tsx must not import filesystem, dialog, or shell bypass plugins.");
+  assert(!/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|type=[\"']file[\"']/.test(appSource), "App.tsx must not add browser filesystem bypasses.");
+  assert(
+    clientSource.includes('invoke<unknown>("diagnostics_lookup", { detailRef: safeDetailRef })'),
+    "src/sidecar/client.ts must call diagnostics_lookup with only the validated detailRef.",
+  );
+  assert(
+    !/diagnostics_lookup[\s\S]{0,160}(logPath|storeRoot|legacyRoot|params|stdout|stderr)/.test(clientSource),
+    "src/sidecar/client.ts must not widen diagnostics_lookup inputs or raw diagnostic payload access.",
+  );
+}
+
 function main() {
   let tempRoot;
   try {
     const { binaryPath, targetTriple } = runStep("built-sidecar-present", () => {
       const resolved = resolveBuiltSidecar();
       return { value: resolved, binary: relative(ROOT_DIR, resolved.binaryPath), targetTriple: resolved.targetTriple };
+    });
+
+    runStep("frontend-diagnostic-boundary", () => {
+      assertNoFrontendBypassImports();
+      return { checkedFiles: ["src/App.tsx", "src/sidecar/client.ts"] };
     });
 
     tempRoot = mkdtempSync(join(tmpdir(), "theprivator-s05-"));
@@ -284,16 +307,33 @@ function main() {
         method: "profiles.create",
         params: { storeRoot, name: profileName.toLowerCase() },
       });
-      const error = assertError(duplicate.response, "s05-profile-duplicate", "PROFILE_DUPLICATE_NAME", "profiles.create");
-      findRecord(storeRoot, error.detailRef, {
+      const duplicateError = assertError(duplicate.response, "s05-profile-duplicate", "PROFILE_DUPLICATE_NAME", "profiles.create");
+      findRecord(storeRoot, duplicateError.detailRef, {
         source: "python-sidecar",
         event: "sidecar.request",
         status: "error",
         method: "profiles.create",
         errorCode: "PROFILE_DUPLICATE_NAME",
       });
-      const redaction = assertLogRedacted(storeRoot, profileName, profileName.toLowerCase());
-      return { value: seedResult.profile, detailRef: error.detailRef, ...redaction };
+
+      const invalidName = " S05 Invalid Secret Name ";
+      rememberSensitive(invalidName);
+      const invalid = callSidecar(binaryPath, {
+        id: "s05-profile-invalid-name",
+        method: "profiles.create",
+        params: { storeRoot, name: invalidName },
+      });
+      const invalidError = assertError(invalid.response, "s05-profile-invalid-name", "PROFILE_INVALID_NAME", "profiles.create");
+      findRecord(storeRoot, invalidError.detailRef, {
+        source: "python-sidecar",
+        event: "sidecar.request",
+        status: "error",
+        method: "profiles.create",
+        errorCode: "PROFILE_INVALID_NAME",
+      });
+
+      const redaction = assertLogRedacted(storeRoot, profileName, profileName.toLowerCase(), invalidName);
+      return { value: seedResult.profile, detailRefs: [duplicateError.detailRef, invalidError.detailRef], ...redaction };
     });
 
     runStep("chromium-diagnostic-correlation", () => {
