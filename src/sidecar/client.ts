@@ -9,6 +9,14 @@ import type {
   ChromiumStoppedProfileState,
   ChromiumStopSnapshot,
   ChromiumTermination,
+  DiagnosticEntry,
+  DiagnosticEvent,
+  DiagnosticLegacyContext,
+  DiagnosticLogPath,
+  DiagnosticLookupReason,
+  DiagnosticLookupResult,
+  DiagnosticSource,
+  DiagnosticStatus,
   JsonScalar,
   JsonObject,
   JsonValue,
@@ -38,7 +46,7 @@ import type {
   SidecarHealthPayload,
   SidecarHealthSnapshot,
 } from "./types";
-import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR } from "./types";
+import { DIAGNOSTIC_RELATIVE_LOG_PATH, SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR } from "./types";
 
 const BRIDGE_ERROR_CODES = new Set([
   "SIDECAR_CONFIGURATION_ERROR",
@@ -63,6 +71,20 @@ export async function triggerSidecarDiagnosticFailure(): Promise<never> {
   try {
     await invoke<unknown>("sidecar_diagnostic_failure");
     throw makeProtocolError("The diagnostic sidecar command unexpectedly returned success.");
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function lookupDiagnosticDetail(detailRef: string): Promise<DiagnosticLookupResult> {
+  try {
+    const safeDetailRef = requireDetailRef(detailRef, "detailRef");
+    const result = await invoke<unknown>("diagnostics_lookup", { detailRef: safeDetailRef });
+    return parseDiagnosticLookupResult(result, safeDetailRef);
   } catch (error) {
     if (isSidecarClientError(error)) {
       throw error;
@@ -198,6 +220,136 @@ function parseHealthEnvelope(value: unknown, checkedAt: string): SidecarHealthSn
     checkedAt,
     health,
   };
+}
+
+function parseDiagnosticLookupResult(value: unknown, requestedDetailRef: string): DiagnosticLookupResult {
+  const record = requireRecord(value, "The diagnostics lookup response must be an object.");
+  const found = requireBoolean(record.found, "diagnostics.found");
+  const detailRef = requireDetailRef(record.detailRef, "diagnostics.detailRef");
+  const reason = requireDiagnosticLookupReason(record.reason, "diagnostics.reason");
+  const logPath = parseDiagnosticLogPath(record.logPath, "diagnostics.logPath");
+  const entries = parseDiagnosticEntryArray(record.entries, detailRef);
+
+  if (detailRef !== requestedDetailRef) {
+    throw makeProtocolError("The diagnostics lookup response detailRef did not match the request.");
+  }
+
+  if (requestedDetailRef.startsWith("ui-")) {
+    if (found || reason !== "ui-local" || logPath !== null || entries.length !== 0) {
+      throw makeProtocolError("The diagnostics lookup response for a UI-local detailRef was malformed.");
+    }
+  } else if (reason === "ui-local" || reason === "invalid-detail-ref") {
+    throw makeProtocolError("The diagnostics lookup response reason did not match the requested detailRef.");
+  }
+
+  if (found) {
+    if (reason !== "found" || logPath !== DIAGNOSTIC_RELATIVE_LOG_PATH || entries.length === 0) {
+      throw makeProtocolError("The diagnostics lookup found response was malformed.");
+    }
+  } else {
+    if (entries.length !== 0) {
+      throw makeProtocolError("The diagnostics lookup response included entries for a missing detailRef.");
+    }
+    if (reason === "found") {
+      throw makeProtocolError("The diagnostics lookup response marked found without entries.");
+    }
+    if (reason === "not-persisted" && logPath !== DIAGNOSTIC_RELATIVE_LOG_PATH) {
+      throw makeProtocolError("The diagnostics lookup not-persisted response must include the fixed log path.");
+    }
+    if (reason === "ui-local" && logPath !== null) {
+      throw makeProtocolError("The diagnostics lookup no-log response must not include a log path.");
+    }
+  }
+
+  return {
+    found,
+    detailRef,
+    logPath,
+    reason,
+    entries,
+  };
+}
+
+function parseDiagnosticEntryArray(value: unknown, lookupDetailRef: string): DiagnosticEntry[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The diagnostics lookup entries field must be an array.");
+  }
+
+  return value.map((entry, index) => parseDiagnosticEntry(entry, `entries[${index}]`, lookupDetailRef));
+}
+
+function parseDiagnosticEntry(value: unknown, field: string, lookupDetailRef: string): DiagnosticEntry {
+  const record = requireRecord(value, `The diagnostics lookup field ${field} must be an object.`);
+  requireLiteralNumber(record.schemaVersion, `${field}.schemaVersion`, 1);
+  const ts = requireIsoTimestamp(record.ts, `${field}.ts`);
+  const source = requireDiagnosticSource(record.source, `${field}.source`);
+  const event = requireDiagnosticEvent(record.event, `${field}.event`);
+  const status = requireDiagnosticStatus(record.status, `${field}.status`);
+  const logPath = requireDiagnosticEntryLogPath(record.logPath, `${field}.logPath`);
+  const detailRef = requireDetailRef(record.detailRef, `${field}.detailRef`);
+  const errorCode = requireDiagnosticErrorCode(record.errorCode, `${field}.errorCode`);
+  const requestId = record.requestId === undefined ? undefined : parseDiagnosticJsonScalar(record.requestId, `${field}.requestId`);
+  const method = record.method === undefined ? undefined : requireSafeMethod(record.method, `${field}.method`);
+  const durationMs = record.durationMs === undefined ? undefined : requireNonNegativeNumber(record.durationMs, `${field}.durationMs`);
+
+  if (detailRef !== lookupDetailRef) {
+    throw makeProtocolError(`The diagnostics lookup field ${field}.detailRef did not match the lookup detailRef.`);
+  }
+
+  const base = compactOptionalFields({
+    schemaVersion: 1 as const,
+    ts,
+    source,
+    event,
+    status,
+    logPath,
+    requestId,
+    method,
+    durationMs,
+    errorCode,
+    detailRef,
+  });
+
+  if (source === "python-sidecar" && event === "sidecar.request" && status === "error") {
+    if (!detailRef.startsWith("sidecar-")) {
+      throw makeProtocolError(`The diagnostics lookup field ${field}.detailRef must be a sidecar detailRef.`);
+    }
+    if (record.context !== undefined) {
+      throw makeProtocolError(`The diagnostics lookup field ${field}.context is not allowed for sidecar requests.`);
+    }
+    return base as DiagnosticEntry;
+  }
+
+  if (source === "python-sidecar" && event === "legacy.import.outcome" && (status === "partial" || status === "failed")) {
+    if (!detailRef.startsWith("sidecar-")) {
+      throw makeProtocolError(`The diagnostics lookup field ${field}.detailRef must be a sidecar detailRef.`);
+    }
+    const context = record.context === undefined ? undefined : parseDiagnosticLegacyContext(record.context, `${field}.context`);
+    return compactOptionalFields({
+      ...base,
+      context,
+    }) as DiagnosticEntry;
+  }
+
+  if (source === "rust-bridge" && event === "sidecar.bridge_failure" && status === "error") {
+    if (!detailRef.startsWith("bridge-")) {
+      throw makeProtocolError(`The diagnostics lookup field ${field}.detailRef must be a bridge detailRef.`);
+    }
+    if (record.context !== undefined) {
+      throw makeProtocolError(`The diagnostics lookup field ${field}.context is not allowed for bridge failures.`);
+    }
+    const exitCode = record.exitCode === undefined ? undefined : parseDiagnosticExitCode(record.exitCode, `${field}.exitCode`);
+    const stdoutLines = record.stdoutLines === undefined ? undefined : requireNonNegativeInteger(record.stdoutLines, `${field}.stdoutLines`);
+    const stderrLines = record.stderrLines === undefined ? undefined : requireNonNegativeInteger(record.stderrLines, `${field}.stderrLines`);
+    return compactOptionalFields({
+      ...base,
+      exitCode,
+      stdoutLines,
+      stderrLines,
+    }) as DiagnosticEntry;
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} has an invalid source/event/status combination.`);
 }
 
 function parseProfileListEnvelope(value: unknown, receivedAt: string): ProfileListSnapshot {
@@ -772,16 +924,151 @@ function requireLiteralNumber<T extends number>(value: unknown, field: string, e
 
 function requireDetailRef(value: unknown, field: string): string {
   const detailRef = requireNonBlankString(value, field);
-  if (!detailRef.startsWith("sidecar-") && !detailRef.startsWith("bridge-") && !detailRef.startsWith("ui-")) {
+  if (!isValidDetailRef(detailRef)) {
     throw makeProtocolError(`The sidecar response field ${field} must be an opaque detailRef.`);
   }
 
   return detailRef;
 }
 
+function requireDiagnosticLookupReason(value: unknown, field: string): DiagnosticLookupReason {
+  if (value === "found" || value === "not-persisted" || value === "ui-local" || value === "invalid-detail-ref") {
+    return value;
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} must be a known reason.`);
+}
+
+function requireDiagnosticSource(value: unknown, field: string): DiagnosticSource {
+  if (value === "python-sidecar" || value === "rust-bridge") {
+    return value;
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} must be a known source.`);
+}
+
+function requireDiagnosticEvent(value: unknown, field: string): DiagnosticEvent {
+  if (value === "sidecar.request" || value === "sidecar.bridge_failure" || value === "legacy.import.outcome") {
+    return value;
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} must be a known event.`);
+}
+
+function requireDiagnosticStatus(value: unknown, field: string): DiagnosticStatus {
+  if (value === "ok" || value === "error" || value === "partial" || value === "failed") {
+    return value;
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} must be a known status.`);
+}
+
+function parseDiagnosticLogPath(value: unknown, field: string): DiagnosticLogPath | null {
+  if (value === null) {
+    return null;
+  }
+  const logPath = requireString(value, field);
+  if (logPath !== DIAGNOSTIC_RELATIVE_LOG_PATH) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must use the fixed relative diagnostics log path.`);
+  }
+
+  return DIAGNOSTIC_RELATIVE_LOG_PATH;
+}
+
+function requireDiagnosticEntryLogPath(value: unknown, field: string): DiagnosticLogPath {
+  const logPath = parseDiagnosticLogPath(value, field);
+  if (logPath === null) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must include the fixed relative diagnostics log path.`);
+  }
+
+  return logPath;
+}
+
+function requireDiagnosticErrorCode(value: unknown, field: string): string {
+  const errorCode = requireNonBlankString(value, field);
+  if (
+    errorCode.length > 96 ||
+    !/^[A-Z][A-Z0-9_]+$/.test(errorCode) ||
+    isPathLikeOrUrl(errorCode)
+  ) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must be a safe error code.`);
+  }
+
+  return errorCode;
+}
+
+function parseDiagnosticJsonScalar(value: unknown, field: string): JsonScalar {
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw makeProtocolError(`The diagnostics lookup field ${field} must be a finite scalar.`);
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    return requireSafeDiagnosticString(value, field);
+  }
+
+  throw makeProtocolError(`The diagnostics lookup field ${field} must be a JSON scalar.`);
+}
+
+function parseDiagnosticLegacyContext(value: unknown, field: string): DiagnosticLegacyContext {
+  const context = requireRecord(value, `The diagnostics lookup field ${field} must be an object.`);
+  const keys = Object.keys(context);
+  if (keys.length !== 1 || !keys.includes("legacyId")) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must contain only legacyId.`);
+  }
+
+  return {
+    legacyId: requireLegacyId(context.legacyId, `${field}.legacyId`),
+  };
+}
+
+function requireSafeMethod(value: unknown, field: string): string {
+  const method = requireSafeDiagnosticString(value, field);
+  if (!method.includes(".") || !method.split(".").every(isSafeMethodSegment)) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must be a safe method name.`);
+  }
+
+  return method;
+}
+
+function requireSafeDiagnosticString(value: unknown, field: string): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > 256 || isPathLikeOrUrl(text) || containsSensitiveDiagnosticMarker(text)) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must be a safe diagnostic string.`);
+  }
+
+  return text;
+}
+
+function requireNonNegativeNumber(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (number < 0) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must be non-negative.`);
+  }
+
+  return number;
+}
+
+function parseDiagnosticExitCode(value: unknown, field: string): number | null {
+  if (value === null) {
+    return null;
+  }
+  const exitCode = requireNumber(value, field);
+  if (!Number.isInteger(exitCode)) {
+    throw makeProtocolError(`The diagnostics lookup field ${field} must be an integer or null.`);
+  }
+
+  return exitCode;
+}
+
 function requireLegacyId(value: unknown, field: string): string {
   const legacyId = requireNonBlankString(value, field);
-  if (!legacyId.startsWith("legacy-")) {
+  const suffix = legacyId.startsWith("legacy-") ? legacyId.slice("legacy-".length) : "";
+  if (!legacyId.startsWith("legacy-") || !suffix || suffix.length > 96 || isPathLikeOrUrl(legacyId) || !/^[A-Za-z0-9_.:-]+$/.test(suffix)) {
     throw makeProtocolError(`The sidecar legacy field ${field} must be an opaque legacy id.`);
   }
 
@@ -859,7 +1146,51 @@ function parseSafeJsonValue(value: unknown, field: string): JsonValue {
 }
 
 function isPathLikeOrUrl(value: string): boolean {
-  return value.startsWith("/") || value.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(value) || value.includes("://") || value.includes("\0");
+  return (
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    value.startsWith("~") ||
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.includes("://") ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.includes("\0")
+  );
+}
+
+function isValidDetailRef(value: string): boolean {
+  if (value.length > 256 || isPathLikeOrUrl(value)) {
+    return false;
+  }
+  const [prefix, ...suffixParts] = value.split("-");
+  if (suffixParts.length === 0) {
+    return false;
+  }
+  if (prefix !== "sidecar" && prefix !== "bridge" && prefix !== "ui") {
+    return false;
+  }
+  const detailSuffix = suffixParts.join("-");
+  return detailSuffix.length > 0 && detailSuffix.length <= 127 && /^[A-Za-z0-9_.:-]+$/.test(detailSuffix);
+}
+
+function isSafeMethodSegment(segment: string): boolean {
+  return /^[a-z][a-z0-9_]*$/.test(segment);
+}
+
+function containsSensitiveDiagnosticMarker(value: string): boolean {
+  const lowered = value.toLowerCase();
+  return [
+    "traceback",
+    "stdout",
+    "stderr",
+    "params",
+    "proxy_user",
+    "proxy_pass",
+    "token=",
+    "password=",
+    "secret=",
+    "--user-data-dir",
+  ].some((marker) => lowered.includes(marker));
 }
 
 function compactOptionalFields<T extends Record<string, unknown>>(value: T): T {

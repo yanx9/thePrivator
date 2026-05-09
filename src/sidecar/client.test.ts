@@ -8,12 +8,13 @@ import {
   importLegacyProfiles,
   launchChromiumProfile,
   listProfiles,
+  lookupDiagnosticDetail,
   scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
 } from "./client";
-import { SIDECAR_PROTOCOL_ERROR } from "./types";
+import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -213,9 +214,199 @@ function legacyEnvelope(result: unknown, overrides: Record<string, unknown> = {}
   };
 }
 
+function diagnosticEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    ts: "2026-05-04T18:10:00.000Z",
+    source: "python-sidecar",
+    event: "sidecar.request",
+    status: "error",
+    requestId: "bridge-diagnostics-1",
+    method: "profiles.create",
+    durationMs: 3.5,
+    errorCode: "PROFILE_DUPLICATE_NAME",
+    detailRef: "sidecar-duplicate-detail",
+    logPath: "profile-store/diagnostics/events.jsonl",
+    ...overrides,
+  };
+}
+
+function diagnosticLookupResult(overrides: Record<string, unknown> = {}) {
+  const detailRef = typeof overrides.detailRef === "string" ? overrides.detailRef : "sidecar-duplicate-detail";
+  const entries = overrides.entries ?? [diagnosticEntry({ detailRef })];
+  return {
+    found: true,
+    detailRef,
+    logPath: "profile-store/diagnostics/events.jsonl",
+    reason: "found",
+    entries,
+    ...overrides,
+  };
+}
+
 describe("sidecar client", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+  });
+
+  it("looks up and validates a persisted sidecar diagnostic entry", async () => {
+    mockInvoke.mockResolvedValueOnce(diagnosticLookupResult());
+
+    const result = await lookupDiagnosticDetail("sidecar-duplicate-detail");
+
+    expect(mockInvoke).toHaveBeenCalledWith("diagnostics_lookup", { detailRef: "sidecar-duplicate-detail" });
+    expect(result).toEqual(diagnosticLookupResult());
+  });
+
+  it("validates persisted bridge and legacy diagnostic entry variants", async () => {
+    const bridgeEntry = diagnosticEntry({
+      source: "rust-bridge",
+      event: "sidecar.bridge_failure",
+      status: "error",
+      method: "health.status",
+      errorCode: "SIDECAR_PROTOCOL_ERROR",
+      detailRef: "bridge-protocol-detail",
+      exitCode: 2,
+      stdoutLines: 7,
+      stderrLines: 11,
+    });
+    const legacyEntry = diagnosticEntry({
+      source: "python-sidecar",
+      event: "legacy.import.outcome",
+      status: "failed",
+      method: "legacy.import",
+      errorCode: "LEGACY_USER_DATA_COPY_FAILED",
+      detailRef: "sidecar-legacy-detail",
+      context: { legacyId: "legacy-safe-id" },
+    });
+    mockInvoke
+      .mockResolvedValueOnce(diagnosticLookupResult({ detailRef: "bridge-protocol-detail", entries: [bridgeEntry] }))
+      .mockResolvedValueOnce(diagnosticLookupResult({ detailRef: "sidecar-legacy-detail", entries: [legacyEntry] }));
+
+    const bridge = await lookupDiagnosticDetail("bridge-protocol-detail");
+    const legacy = await lookupDiagnosticDetail("sidecar-legacy-detail");
+
+    expect(bridge.entries[0]).toMatchObject({
+      source: "rust-bridge",
+      event: "sidecar.bridge_failure",
+      detailRef: "bridge-protocol-detail",
+      stdoutLines: 7,
+      stderrLines: 11,
+    });
+    expect(legacy.entries[0]).toMatchObject({
+      source: "python-sidecar",
+      event: "legacy.import.outcome",
+      status: "failed",
+      detailRef: "sidecar-legacy-detail",
+      context: { legacyId: "legacy-safe-id" },
+    });
+  });
+
+  it("validates no-match and UI-local diagnostic lookup results", async () => {
+    const noMatch = diagnosticLookupResult({
+      found: false,
+      detailRef: "sidecar-not-yet-persisted",
+      logPath: "profile-store/diagnostics/events.jsonl",
+      reason: "not-persisted",
+      entries: [],
+    });
+    const uiLocal = diagnosticLookupResult({
+      found: false,
+      detailRef: "ui-protocol-local",
+      logPath: null,
+      reason: "ui-local",
+      entries: [],
+    });
+    mockInvoke.mockResolvedValueOnce(noMatch).mockResolvedValueOnce(uiLocal);
+
+    await expect(lookupDiagnosticDetail("sidecar-not-yet-persisted")).resolves.toEqual(noMatch);
+    await expect(lookupDiagnosticDetail("ui-protocol-local")).resolves.toEqual(uiLocal);
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "diagnostics_lookup", { detailRef: "sidecar-not-yet-persisted" });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "diagnostics_lookup", { detailRef: "ui-protocol-local" });
+  });
+
+  it.each([
+    ["blank", ""],
+    ["non-string", undefined as unknown as string],
+    ["unsupported prefix", "profile-detail"],
+    ["path-like", "sidecar-/tmp/detail"],
+  ])("rejects invalid diagnostic lookup detailRef inputs before invoking Tauri: %s", async (_caseName, detailRef) => {
+    await expect(lookupDiagnosticDetail(detailRef)).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing response detailRef", diagnosticLookupResult({ detailRef: undefined })],
+    ["mismatched response detailRef", diagnosticLookupResult({ detailRef: "sidecar-other-detail" })],
+    ["unknown reason", diagnosticLookupResult({ reason: "archived" })],
+    ["found without entries", diagnosticLookupResult({ entries: [] })],
+    ["missing entries", { found: true, detailRef: "sidecar-duplicate-detail", logPath: "profile-store/diagnostics/events.jsonl", reason: "found" }],
+    ["missing entry timestamp", diagnosticLookupResult({ entries: [diagnosticEntry({ ts: undefined })] })],
+    ["missing entry detailRef", diagnosticLookupResult({ entries: [diagnosticEntry({ detailRef: undefined })] })],
+    ["unknown source", diagnosticLookupResult({ entries: [diagnosticEntry({ source: "webview" })] })],
+    ["unknown event", diagnosticLookupResult({ entries: [diagnosticEntry({ event: "sidecar.stdout" })] })],
+    ["unknown status", diagnosticLookupResult({ entries: [diagnosticEntry({ status: "warning" })] })],
+    ["invalid source-event-status combination", diagnosticLookupResult({ entries: [diagnosticEntry({ source: "rust-bridge", event: "sidecar.request" })] })],
+    ["non-finite duration", diagnosticLookupResult({ entries: [diagnosticEntry({ durationMs: Number.POSITIVE_INFINITY })] })],
+    ["malformed UI-local response", diagnosticLookupResult({ found: false, detailRef: "ui-protocol-local", logPath: "profile-store/diagnostics/events.jsonl", reason: "not-persisted", entries: [] })],
+  ])("maps malformed diagnostic lookup payloads to protocol errors: %s", async (_caseName, payload) => {
+    mockInvoke.mockResolvedValueOnce(payload);
+
+    await expect(lookupDiagnosticDetail(_caseName === "malformed UI-local response" ? "ui-protocol-local" : "sidecar-duplicate-detail")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["unsafe response logPath", diagnosticLookupResult({ logPath: "/tmp/events.jsonl" })],
+    ["unsafe entry logPath", diagnosticLookupResult({ entries: [diagnosticEntry({ logPath: "https://example.invalid/events.jsonl" })] })],
+    ["path-like requestId", diagnosticLookupResult({ entries: [diagnosticEntry({ requestId: "/tmp/profile-root" })] })],
+    ["arbitrary legacy context key", diagnosticLookupResult({ entries: [diagnosticEntry({ event: "legacy.import.outcome", status: "failed", method: "legacy.import", context: { legacyId: "legacy-safe-id", rawPath: "/secret" } })] })],
+    ["path-like legacy context value", diagnosticLookupResult({ entries: [diagnosticEntry({ event: "legacy.import.outcome", status: "failed", method: "legacy.import", context: { legacyId: "legacy-/secret" } })] })],
+  ])("rejects unsafe diagnostic lookup paths and context values: %s", async (_caseName, payload) => {
+    mockInvoke.mockResolvedValueOnce(payload);
+
+    await expect(lookupDiagnosticDetail("sidecar-duplicate-detail")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it("normalizes diagnostic lookup command failures into SidecarClientError", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "SIDECAR_CONFIGURATION_ERROR",
+        message: "The Tauri app data directory could not be resolved for diagnostics lookup.",
+        recoverable: true,
+        detailRef: "bridge-config-detail",
+      })
+      .mockRejectedValueOnce(new Error("invoke failed"));
+
+    await expect(lookupDiagnosticDetail("sidecar-duplicate-detail")).rejects.toMatchObject({
+      code: "SIDECAR_CONFIGURATION_ERROR",
+      source: "bridge",
+      phase: "bridge-error",
+      detailRef: "bridge-config-detail",
+    });
+    await expect(lookupDiagnosticDetail("sidecar-duplicate-detail")).rejects.toMatchObject({
+      code: SIDECAR_BRIDGE_ERROR,
+      message: "The Tauri bridge rejected the sidecar request before returning a typed error.",
+      recoverable: true,
+      source: "bridge",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-bridge-/),
+    });
   });
 
   it("loads and validates the sidecar health envelope", async () => {

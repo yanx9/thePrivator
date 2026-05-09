@@ -67,6 +67,67 @@ export interface SidecarHealthSnapshot {
   health: SidecarHealthPayload;
 }
 
+export const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl" as const;
+
+export type DiagnosticSource = "python-sidecar" | "rust-bridge";
+export type DiagnosticEvent = "sidecar.request" | "sidecar.bridge_failure" | "legacy.import.outcome";
+export type DiagnosticStatus = "ok" | "error" | "partial" | "failed";
+export type DiagnosticLookupReason = "found" | "not-persisted" | "ui-local" | "invalid-detail-ref";
+export type DiagnosticLogPath = typeof DIAGNOSTIC_RELATIVE_LOG_PATH;
+
+export interface DiagnosticLegacyContext {
+  legacyId: string;
+}
+
+export interface DiagnosticEntryBase {
+  schemaVersion: 1;
+  ts: string;
+  source: DiagnosticSource;
+  event: DiagnosticEvent;
+  status: DiagnosticStatus;
+  logPath: DiagnosticLogPath;
+  requestId?: JsonScalar;
+  method?: string;
+  durationMs?: number;
+  errorCode: string;
+  detailRef: string;
+}
+
+export interface SidecarRequestDiagnosticEntry extends DiagnosticEntryBase {
+  source: "python-sidecar";
+  event: "sidecar.request";
+  status: "error";
+}
+
+export interface LegacyImportDiagnosticEntry extends DiagnosticEntryBase {
+  source: "python-sidecar";
+  event: "legacy.import.outcome";
+  status: "partial" | "failed";
+  context?: DiagnosticLegacyContext;
+}
+
+export interface BridgeFailureDiagnosticEntry extends DiagnosticEntryBase {
+  source: "rust-bridge";
+  event: "sidecar.bridge_failure";
+  status: "error";
+  exitCode?: number | null;
+  stdoutLines?: number;
+  stderrLines?: number;
+}
+
+export type DiagnosticEntry =
+  | SidecarRequestDiagnosticEntry
+  | LegacyImportDiagnosticEntry
+  | BridgeFailureDiagnosticEntry;
+
+export interface DiagnosticLookupResult {
+  found: boolean;
+  detailRef: string;
+  logPath: DiagnosticLogPath | null;
+  reason: DiagnosticLookupReason;
+  entries: DiagnosticEntry[];
+}
+
 export interface ProfileDefaults {
   browser: "chromium";
   startUrl: "about:blank";
