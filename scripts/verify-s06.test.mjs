@@ -161,11 +161,12 @@ describe("verify-s06 guard helpers", () => {
       rootDir: root,
       platform: "linux",
       env: { PATH: emptyBin },
+      cargoBin: emptyBin,
       strict: true,
     })).toThrow(VerifyFailure);
 
     try {
-      assertWebDriverPreflight({ rootDir: root, platform: "linux", env: { PATH: emptyBin }, strict: true });
+      assertWebDriverPreflight({ rootDir: root, platform: "linux", env: { PATH: emptyBin }, cargoBin: emptyBin, strict: true });
       throw new Error("expected preflight to fail");
     } catch (error) {
       expect(error).toBeInstanceOf(VerifyFailure);
