@@ -1,12 +1,15 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   statSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { homedir } from "node:os";
 import {
   basename,
@@ -20,6 +23,9 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import webdriver from "selenium-webdriver";
+
+const { Builder, By, Capabilities, until } = webdriver;
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SIDECAR_NAME = "theprivator-sidecar";
@@ -28,6 +34,11 @@ const SIDECAR_EXTERNAL_BIN = "binaries/theprivator-sidecar";
 const VERIFY_EVENT = "verify.s06";
 const BUILD_TIMEOUT_MS = Number(process.env.VERIFY_S06_BUILD_TIMEOUT_MS ?? 20 * 60_000);
 const COMMAND_TIMEOUT_MS = 30_000;
+const DRIVER_READY_TIMEOUT_MS = Number(process.env.VERIFY_S06_DRIVER_READY_TIMEOUT_MS ?? 20_000);
+const UI_WAIT_TIMEOUT_MS = Number(process.env.VERIFY_S06_UI_WAIT_TIMEOUT_MS ?? 60_000);
+const UI_POLL_MS = 250;
+const DRIVER_TAIL_LINES = 40;
+const VISIBLE_TEXT_SNIPPET_LIMIT = 520;
 const FRESHNESS_SKEW_MS = 1_500;
 const STEP_RESULTS = [];
 const STANDARD_CHROMIUM_NAMES = [
@@ -181,6 +192,30 @@ export function runStep(name, action, options = {}) {
   const started = performance.now();
   try {
     const result = action() ?? {};
+    const durationMs = Math.round(performance.now() - started);
+    const logResult = result.log ?? result;
+    const returnResult = result.value ?? result;
+    const record = { name, status: "pass", durationMs, ...redact(logResult, options) };
+    STEP_RESULTS.push(record);
+    emit({ step: name, status: "pass", durationMs, ...redact(logResult, options) });
+    return returnResult;
+  } catch (error) {
+    const durationMs = Math.round(performance.now() - started);
+    const message = error instanceof Error ? error.message : String(error);
+    const record = { name, status: "fail", durationMs, message };
+    STEP_RESULTS.push(record);
+    emit({ step: name, status: "fail", durationMs, message });
+    if (error?.details) {
+      emit({ step: name, status: "fail-details", details: redact(error.details, options) });
+    }
+    throw error;
+  }
+}
+
+export async function runStepAsync(name, action, options = {}) {
+  const started = performance.now();
+  try {
+    const result = (await action()) ?? {};
     const durationMs = Math.round(performance.now() - started);
     const logResult = result.log ?? result;
     const returnResult = result.value ?? result;
@@ -359,6 +394,116 @@ export function resolveChromiumExecutable(options = {}) {
   }, { rootDir });
 }
 
+function isoRunStamp(date) {
+  return date.toISOString().replace(/[-:.]/g, "");
+}
+
+function sanitizeRunIdPart(value, label) {
+  const text = String(value ?? "").trim();
+  assert(text.length > 0 && text.length <= 96 && /^[A-Za-z0-9_.-]+$/.test(text), `${label} must be a safe run identifier segment.`, {
+    code: "S06_RUN_ID_UNSAFE",
+    label,
+  });
+  return text;
+}
+
+export function createSmokeRunContext(options = {}) {
+  const rootDir = options.rootDir ?? ROOT_DIR;
+  const now = options.now ?? new Date();
+  const nonce = sanitizeRunIdPart(options.nonce ?? randomBytes(4).toString("hex"), "nonce");
+  const runId = sanitizeRunIdPart(options.runId ?? `${isoRunStamp(now)}-${nonce}`, "runId");
+  const smokeRoot = join(rootDir, "src-tauri", "target", "s06-smoke-data", runId);
+  const dataRoot = join(smokeRoot, "data");
+  const configRoot = join(smokeRoot, "config");
+  const cacheRoot = join(smokeRoot, "cache");
+  const smokeProfileName = `M001 Packaged Smoke ${runId}`;
+
+  if (existsSync(smokeRoot)) {
+    fail("S06 smoke data root already exists; refusing to reuse a duplicate smoke profile name.", {
+      code: "S06_SMOKE_ROOT_EXISTS",
+      smokeRoot: repoRelative(rootDir, smokeRoot),
+      smokeProfileName,
+    }, { rootDir, sensitiveValues: [smokeRoot] });
+  }
+
+  mkdirSync(dataRoot, { recursive: true });
+  mkdirSync(configRoot, { recursive: true });
+  mkdirSync(cacheRoot, { recursive: true });
+  GLOBAL_SENSITIVE_VALUES.add(smokeRoot);
+  GLOBAL_SENSITIVE_VALUES.add(dataRoot);
+  GLOBAL_SENSITIVE_VALUES.add(configRoot);
+  GLOBAL_SENSITIVE_VALUES.add(cacheRoot);
+
+  const driverEnv = {
+    ...(options.baseEnv ?? process.env),
+    XDG_DATA_HOME: dataRoot,
+    XDG_CONFIG_HOME: configRoot,
+    XDG_CACHE_HOME: cacheRoot,
+  };
+
+  const smokeRootRelative = repoRelative(rootDir, smokeRoot);
+  return {
+    runId,
+    smokeProfileName,
+    smokeRoot,
+    smokeRootRelative,
+    dataRoot,
+    configRoot,
+    cacheRoot,
+    driverEnv,
+    log: {
+      runId,
+      smokeProfileName,
+      smokeRoot: smokeRootRelative,
+      retained: true,
+    },
+  };
+}
+
+export function buildTauriWebDriverCapabilities(applicationPath) {
+  const capabilities = new Capabilities();
+  capabilities.setBrowserName("wry");
+  capabilities.set("tauri:options", { application: applicationPath });
+  return capabilities;
+}
+
+function findTauriDriverExecutable(options = {}) {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const pathEnv = options.pathEnv ?? env.PATH ?? "";
+  const cargoBin = options.cargoBin ?? join(homedir(), ".cargo", "bin");
+  GLOBAL_SENSITIVE_VALUES.add(cargoBin);
+  return findExecutableCandidate("tauri-driver", {
+    env,
+    pathEnv,
+    platform,
+    extraDirs: [cargoBin],
+  });
+}
+
+export function resolveTauriDriverExecutable(options = {}) {
+  const rootDir = options.rootDir ?? ROOT_DIR;
+  const candidate = findTauriDriverExecutable(options);
+  if (!candidate) {
+    fail("tauri-driver was not found for the packaged UI smoke.", {
+      code: "S06_TAURI_DRIVER_MISSING",
+      name: "tauri-driver",
+      instruction: "Install Tauri WebDriver support (for example cargo install tauri-cli --features webdriver) and ensure tauri-driver is on PATH or in ~/.cargo/bin.",
+    }, { rootDir });
+  }
+  return candidate;
+}
+
+export function safeVisibleTextSnippet(value, options = {}) {
+  const normalized = redact(String(value ?? ""), options)
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= VISIBLE_TEXT_SNIPPET_LIMIT) {
+    return normalized;
+  }
+  return `${normalized.slice(0, VISIBLE_TEXT_SNIPPET_LIMIT - 1)}…`;
+}
+
 export function assertWebDriverPreflight(options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const platform = options.platform ?? process.platform;
@@ -366,14 +511,12 @@ export function assertWebDriverPreflight(options = {}) {
   const strict = options.strict ?? true;
   const missing = [];
   const pathEnv = env.PATH ?? "";
-  const cargoBin = join(homedir(), ".cargo", "bin");
-  GLOBAL_SENSITIVE_VALUES.add(cargoBin);
 
-  const tauriDriver = findExecutableCandidate("tauri-driver", {
+  const tauriDriver = findTauriDriverExecutable({
     env,
     pathEnv,
     platform,
-    extraDirs: [cargoBin],
+    cargoBin: options.cargoBin,
   });
   if (!tauriDriver) {
     missing.push({
@@ -543,6 +686,58 @@ export function assertFreshBuildArtifacts(options = {}) {
 
   return {
     buildStartedAt: new Date(buildStartedAt instanceof Date ? buildStartedAt.getTime() : Number(buildStartedAt)).toISOString(),
+    releaseExecutable: repoRelative(rootDir, releaseExecutable),
+    releaseSidecar: repoRelative(rootDir, releaseSidecar),
+    targetTripleSidecar: repoRelative(rootDir, targetTripleSidecar),
+    packages: packagePaths.map((path) => repoRelative(rootDir, path)).sort(),
+  };
+}
+
+export function assertBuildArtifactsPresent(options = {}) {
+  const rootDir = options.rootDir ?? ROOT_DIR;
+  const platform = options.platform ?? process.platform;
+  const extension = platform === "win32" ? ".exe" : "";
+  const targetTriple = options.targetTriple;
+  assert(targetTriple && typeof targetTriple === "string", "Target triple is required for S06 artifact checks.", {
+    code: "S06_TARGET_TRIPLE_MISSING",
+  }, { rootDir });
+
+  const releaseExecutable = join(rootDir, "src-tauri", "target", "release", executableName(APP_BINARY_NAME, platform));
+  const releaseSidecar = join(rootDir, "src-tauri", "target", "release", `${SIDECAR_NAME}${extension}`);
+  const targetTripleSidecar = join(rootDir, "src-tauri", "binaries", `${SIDECAR_NAME}-${targetTriple}${extension}`);
+  assertExecutableFile(releaseExecutable, "release executable", rootDir, platform);
+  assertExecutableFile(releaseSidecar, "release sidecar", rootDir, platform);
+  assertExecutableFile(targetTripleSidecar, "target-triple sidecar", rootDir, platform);
+
+  const packages = findPackageArtifacts(rootDir);
+  const debs = packages.filter((path) => extname(path) === ".deb");
+  const rpms = packages.filter((path) => extname(path) === ".rpm");
+  const appImages = packages.filter((path) => [".AppImage", ".appimage"].includes(extname(path)));
+  if (platform === "linux") {
+    assert(appImages.length === 0, "Linux package output unexpectedly included AppImage without S06 proof.", {
+      code: "S06_APPIMAGE_UNPROVEN",
+      artifacts: appImages.map((path) => repoRelative(rootDir, path)),
+    }, { rootDir });
+    assert(debs.length > 0, "Linux package output is missing a .deb artifact for ui-only smoke.", {
+      code: "S06_DEB_MISSING",
+      bundleRoot: "src-tauri/target/release/bundle",
+    }, { rootDir });
+    assert(rpms.length > 0, "Linux package output is missing a .rpm artifact for ui-only smoke.", {
+      code: "S06_RPM_MISSING",
+      bundleRoot: "src-tauri/target/release/bundle",
+    }, { rootDir });
+  }
+
+  const packagePaths = [...debs, ...rpms];
+  for (const artifact of packagePaths) {
+    const stats = statSync(artifact);
+    assert(stats.isFile(), "Package artifact is not a file.", {
+      code: "S06_PACKAGE_NOT_FILE",
+      artifact: repoRelative(rootDir, artifact),
+    }, { rootDir });
+  }
+
+  return {
     releaseExecutable: repoRelative(rootDir, releaseExecutable),
     releaseSidecar: repoRelative(rootDir, releaseSidecar),
     targetTripleSidecar: repoRelative(rootDir, targetTripleSidecar),
@@ -720,12 +915,680 @@ function inspectPackageContents(packages, rootDir) {
   return { inspections };
 }
 
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+async function allocateLoopbackPort() {
+  return new Promise((resolvePort, rejectPort) => {
+    const server = createServer();
+    server.once("error", rejectPort);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      server.close(() => {
+        if (typeof port === "number") {
+          resolvePort(port);
+        } else {
+          rejectPort(new Error("Failed to allocate a loopback port."));
+        }
+      });
+    });
+  });
+}
+
+function redactionOptionsForSmoke(rootDir, smokeContext) {
+  return {
+    rootDir,
+    sensitiveValues: smokeContext
+      ? [smokeContext.smokeRoot, smokeContext.dataRoot, smokeContext.configRoot, smokeContext.cacheRoot]
+      : [],
+  };
+}
+
+function createTailRecorder(child, options = {}) {
+  const stdout = [];
+  const stderr = [];
+  const push = (bucket, chunk) => {
+    const lines = String(chunk).split(/\r?\n/).filter(Boolean);
+    bucket.push(...lines);
+    while (bucket.length > DRIVER_TAIL_LINES) {
+      bucket.shift();
+    }
+  };
+
+  child.stdout?.on("data", (chunk) => push(stdout, chunk));
+  child.stderr?.on("data", (chunk) => push(stderr, chunk));
+
+  return {
+    stdoutTail() {
+      return normalizeOutputTail(stdout.join("\n"), options);
+    },
+    stderrTail() {
+      return normalizeOutputTail(stderr.join("\n"), options);
+    },
+  };
+}
+
+function driverTailDetails(driverProcess) {
+  if (!driverProcess) {
+    return {};
+  }
+  return {
+    driverStdoutTail: driverProcess.tail.stdoutTail(),
+    driverStderrTail: driverProcess.tail.stderrTail(),
+  };
+}
+
+async function waitForDriverStatus(driverProcess, port, rootDir, smokeContext) {
+  const started = Date.now();
+  const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
+  while (Date.now() - started < DRIVER_READY_TIMEOUT_MS) {
+    if (driverProcess.child.exitCode !== null || driverProcess.child.signalCode !== null) {
+      fail("tauri-driver exited before WebDriver status became available.", {
+        code: "S06_TAURI_DRIVER_EARLY_EXIT",
+        step: "webdriver-driver-start",
+        exitCode: driverProcess.child.exitCode,
+        signal: driverProcess.child.signalCode,
+        smokeProfileName: smokeContext.smokeProfileName,
+        smokeRoot: smokeContext.smokeRootRelative,
+        ...driverTailDetails(driverProcess),
+      }, redactionOptions);
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/status`);
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // Keep polling until the bounded readiness timeout expires.
+    }
+    await sleep(200);
+  }
+
+  fail("Timed out waiting for tauri-driver WebDriver status.", {
+    code: "S06_TAURI_DRIVER_TIMEOUT",
+    step: "webdriver-driver-start",
+    timeoutMs: DRIVER_READY_TIMEOUT_MS,
+    smokeProfileName: smokeContext.smokeProfileName,
+    smokeRoot: smokeContext.smokeRootRelative,
+    ...driverTailDetails(driverProcess),
+  }, redactionOptions);
+}
+
+async function stopChildProcess(child, timeoutMs = 5_000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return { status: "not-running" };
+  }
+  const exited = new Promise((resolveExit) => {
+    child.once("exit", (code, signal) => resolveExit({ status: "exited", code, signal }));
+  });
+  child.kill("SIGTERM");
+  const timeout = sleep(timeoutMs).then(() => ({ status: "timeout" }));
+  const result = await Promise.race([exited, timeout]);
+  if (result.status === "timeout" && child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    return { status: "killed" };
+  }
+  return result;
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function quitDriverSession(driver) {
+  if (!driver) {
+    return { status: "not-started" };
+  }
+  await withTimeout(driver.quit(), 10_000, "WebDriver session quit");
+  return { status: "quit" };
+}
+
+async function startTauriDriverProcess({ rootDir, smokeContext, platform = process.platform, env = process.env }) {
+  const tauriDriver = resolveTauriDriverExecutable({ rootDir, platform, env });
+  const port = await allocateLoopbackPort();
+  const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
+  const child = spawn(tauriDriver.path, ["--port", String(port)], {
+    cwd: rootDir,
+    env: smokeContext.driverEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const tail = createTailRecorder(child, redactionOptions);
+  const driverProcess = { child, port, tail, tauriDriver };
+
+  child.once("error", (error) => {
+    emit({
+      step: "webdriver-driver-start",
+      status: "process-error",
+      code: "S06_TAURI_DRIVER_PROCESS_ERROR",
+      message: error.message,
+      smokeProfileName: smokeContext.smokeProfileName,
+      smokeRoot: smokeContext.smokeRootRelative,
+    });
+  });
+
+  await waitForDriverStatus(driverProcess, port, rootDir, smokeContext);
+  return {
+    value: driverProcess,
+    log: {
+      port,
+      tauriDriver: { name: tauriDriver.name, source: "PATH-or-cargo-bin" },
+      smokeProfileName: smokeContext.smokeProfileName,
+      smokeRoot: smokeContext.smokeRootRelative,
+    },
+  };
+}
+
+async function createTauriWebDriverSession({ applicationPath, applicationRelativePath, driverProcess, rootDir, smokeContext }) {
+  const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
+  try {
+    const capabilities = buildTauriWebDriverCapabilities(applicationPath);
+    const driver = await new Builder()
+      .usingServer(`http://127.0.0.1:${driverProcess.port}`)
+      .withCapabilities(capabilities)
+      .build();
+    const session = await driver.getSession();
+    const sessionId = typeof session?.getId === "function" ? session.getId() : null;
+    if (!sessionId) {
+      try {
+        await quitDriverSession(driver);
+      } catch {
+        // The failure below is the actionable setup error.
+      }
+      fail("WebDriver setup returned a malformed session response.", {
+        code: "S06_WEBDRIVER_SESSION_MALFORMED",
+        step: "webdriver-session-start",
+        application: applicationRelativePath,
+        smokeProfileName: smokeContext.smokeProfileName,
+        smokeRoot: smokeContext.smokeRootRelative,
+        ...driverTailDetails(driverProcess),
+      }, redactionOptions);
+    }
+    return {
+      value: driver,
+      log: {
+        application: applicationRelativePath,
+        browserName: "wry",
+        session: "created",
+        smokeProfileName: smokeContext.smokeProfileName,
+        smokeRoot: smokeContext.smokeRootRelative,
+      },
+    };
+  } catch (error) {
+    if (error instanceof VerifyFailure) {
+      throw error;
+    }
+    fail("Failed to create a Tauri WebDriver session for the packaged app.", {
+      code: "S06_WEBDRIVER_SESSION_FAILED",
+      step: "webdriver-session-start",
+      application: applicationRelativePath,
+      message: error instanceof Error ? error.message : String(error),
+      smokeProfileName: smokeContext.smokeProfileName,
+      smokeRoot: smokeContext.smokeRootRelative,
+      ...driverTailDetails(driverProcess),
+      instruction: "Ensure tauri-driver and the platform WebDriver are installed; on Linux also ensure WebKitWebDriver can launch the packaged executable from a visible display or xvfb-run.",
+    }, redactionOptions);
+  }
+}
+
+function xpathLiteral(value) {
+  if (!value.includes("'")) {
+    return `'${value}'`;
+  }
+  if (!value.includes('"')) {
+    return `"${value}"`;
+  }
+  return `concat(${value.split("'").map((part) => `'${part}'`).join(', "\'", ')})`;
+}
+
+async function getVisibleText(driver) {
+  try {
+    const body = await driver.findElement(By.css("body"));
+    return await body.getText();
+  } catch {
+    return "";
+  }
+}
+
+async function safeSelectorContext(driver, rootDir, smokeContext) {
+  const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
+  const visibleText = await getVisibleText(driver);
+  let buttons = [];
+  try {
+    const buttonElements = await driver.findElements(By.css("button"));
+    buttons = (await Promise.all(buttonElements.slice(0, 16).map(async (button) => {
+      try {
+        const text = (await button.getText()).trim();
+        return text || null;
+      } catch {
+        return null;
+      }
+    }))).filter(Boolean);
+  } catch {
+    buttons = [];
+  }
+  let hasProfileNameInput = false;
+  try {
+    hasProfileNameInput = (await driver.findElements(By.css("#profile-name"))).length > 0;
+  } catch {
+    hasProfileNameInput = false;
+  }
+  const detailRefs = Array.from(new Set((visibleText.match(/\b(?:sidecar|bridge|ui)-[A-Za-z0-9_.:-]+\b/g) ?? []).slice(-6)));
+
+  return {
+    visibleText: safeVisibleTextSnippet(visibleText, redactionOptions),
+    buttons,
+    hasProfileNameInput,
+    detailRefs,
+  };
+}
+
+async function failUi(driver, runtime, message, details = {}) {
+  const { rootDir, smokeContext, driverProcess } = runtime;
+  const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
+  const selectorContext = driver ? await safeSelectorContext(driver, rootDir, smokeContext) : {};
+  fail(message, {
+    code: details.code ?? "S06_UI_CONTRACT_DRIFT",
+    step: details.step,
+    smokeProfileName: smokeContext.smokeProfileName,
+    smokeRoot: smokeContext.smokeRootRelative,
+    ...details,
+    selectorContext,
+    ...driverTailDetails(driverProcess),
+  }, redactionOptions);
+}
+
+async function pollForValue(driver, runtime, description, predicate, options = {}) {
+  const timeoutMs = options.timeoutMs ?? UI_WAIT_TIMEOUT_MS;
+  const started = Date.now();
+  let lastMessage = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const value = await predicate();
+      if (value) {
+        return value;
+      }
+    } catch (error) {
+      lastMessage = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(options.pollMs ?? UI_POLL_MS);
+  }
+  await failUi(driver, runtime, `Timed out waiting for ${description}.`, {
+    code: "S06_UI_TIMEOUT",
+    step: options.step,
+    description,
+    timeoutMs,
+    lastMessage,
+  });
+}
+
+async function waitForVisibleElement(driver, by, runtime, description, options = {}) {
+  try {
+    const element = await driver.wait(until.elementLocated(by), options.timeoutMs ?? UI_WAIT_TIMEOUT_MS, undefined, UI_POLL_MS);
+    await driver.wait(until.elementIsVisible(element), options.timeoutMs ?? UI_WAIT_TIMEOUT_MS, undefined, UI_POLL_MS);
+    return element;
+  } catch (error) {
+    await failUi(driver, runtime, `Missing visible UI element: ${description}.`, {
+      code: "S06_UI_SELECTOR_MISSING",
+      step: options.step,
+      description,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function waitForVisibleText(driver, expectedText, runtime, options = {}) {
+  return pollForValue(driver, runtime, `visible text ${expectedText}`, async () => {
+    const text = await getVisibleText(driver);
+    return text.includes(expectedText) ? { text: expectedText } : null;
+  }, { ...options, step: options.step ?? "visible-text" });
+}
+
+function profileCardByName(name) {
+  return By.xpath(`//article[contains(concat(' ', normalize-space(@class), ' '), ' profile-card ')][.//h3[normalize-space()=${xpathLiteral(name)}]]`);
+}
+
+async function waitForProfileCard(driver, profileName, runtime, options = {}) {
+  return waitForVisibleElement(driver, profileCardByName(profileName), runtime, `profile card ${profileName}`, {
+    ...options,
+    step: options.step ?? "profile-card",
+  });
+}
+
+async function waitForProfileButton(driver, profileName, buttonText, runtime, options = {}) {
+  return pollForValue(driver, runtime, `${buttonText} button for ${profileName}`, async () => {
+    const cards = await driver.findElements(profileCardByName(profileName));
+    for (const card of cards) {
+      if (!(await card.isDisplayed())) {
+        continue;
+      }
+      const buttons = await card.findElements(By.xpath(`.//button[normalize-space()=${xpathLiteral(buttonText)}]`));
+      for (const button of buttons) {
+        if ((await button.isDisplayed()) && (await button.isEnabled())) {
+          return button;
+        }
+      }
+    }
+    return null;
+  }, { ...options, step: options.step ?? "profile-button" });
+}
+
+async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedValue, runtime, options = {}) {
+  const selector = By.xpath(`//section[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1][normalize-space()=${xpathLiteral(String(expectedValue))}]`);
+  return waitForVisibleElement(driver, selector, runtime, `${sectionLabel} metric ${metricLabel}=${expectedValue}`, {
+    ...options,
+    step: options.step ?? "metric-value",
+  });
+}
+
+async function assertInitialPackagedUi(driver, runtime) {
+  await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-ui-initial" });
+  await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "packaged-ui-initial" });
+  await waitForVisibleText(driver, "Bring old ThePrivator profiles into the sidecar store deliberately.", runtime, { step: "packaged-ui-initial" });
+  return {
+    heading: "Persistent profiles, transient browsers.",
+    profileNameInput: "visible",
+    legacyImportSurface: "visible",
+    smokeProfileName: runtime.smokeContext.smokeProfileName,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function createSmokeProfile(driver, runtime) {
+  const input = await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "packaged-profile-create" });
+  try {
+    await input.clear();
+    await input.sendKeys(runtime.smokeContext.smokeProfileName);
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to type the smoke profile name into the visible form.", {
+      code: "S06_UI_INPUT_FAILED",
+      step: "packaged-profile-create",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const createButton = await waitForVisibleElement(
+    driver,
+    By.xpath("//form[@aria-label='Create profile']//button[normalize-space()='Create profile']"),
+    runtime,
+    "Create profile button",
+    { step: "packaged-profile-create" },
+  );
+  try {
+    await driver.wait(until.elementIsEnabled(createButton), UI_WAIT_TIMEOUT_MS, undefined, UI_POLL_MS);
+    await createButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Create profile button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-profile-create",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "packaged-profile-create" });
+  return {
+    smokeProfileName: runtime.smokeContext.smokeProfileName,
+    profileCard: "visible",
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function launchSmokeChromium(driver, runtime) {
+  const launchButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Launch Chromium", runtime, {
+    step: "packaged-chromium-launch",
+  });
+  try {
+    await launchButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Launch Chromium button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-chromium-launch",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForVisibleText(driver, "Running from sidecar runtime bookkeeping", runtime, { step: "packaged-chromium-launch" });
+  await waitForMetricValue(driver, "Profile observability", "Running count", "1", runtime, { step: "packaged-chromium-launch" });
+  return {
+    smokeProfileName: runtime.smokeContext.smokeProfileName,
+    lifecycle: "running",
+    runningCount: 1,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function stopSmokeChromium(driver, runtime) {
+  const stopButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Stop Chromium", runtime, {
+    step: "packaged-chromium-stop",
+  });
+  try {
+    await stopButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Stop Chromium button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-chromium-stop",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Launch Chromium", runtime, {
+    step: "packaged-chromium-stop",
+  });
+  await waitForMetricValue(driver, "Profile observability", "Running count", "0", runtime, { step: "packaged-chromium-stop" });
+  return {
+    smokeProfileName: runtime.smokeContext.smokeProfileName,
+    lifecycle: "stopped",
+    runningCount: 0,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function assertRestartPersistence(driver, runtime) {
+  await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-restart-persistence" });
+  await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "packaged-restart-persistence" });
+  return {
+    smokeProfileName: runtime.smokeContext.smokeProfileName,
+    profileCard: "visible-after-restart",
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+function collectRuntimeFiles(dir, output = []) {
+  if (!existsSync(dir)) {
+    return output;
+  }
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectRuntimeFiles(fullPath, output);
+    } else if (entry.isFile() && entry.name === "chromium-processes.json") {
+      output.push(fullPath);
+    }
+  }
+  return output;
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readOwnedRuntimePids(smokeContext) {
+  const pids = new Set();
+  for (const path of collectRuntimeFiles(smokeContext.smokeRoot)) {
+    try {
+      const payload = JSON.parse(readFileSync(path, "utf8"));
+      const records = Array.isArray(payload) ? payload : Object.values(payload ?? {});
+      for (const record of records) {
+        const pid = record?.pid;
+        if (Number.isInteger(pid) && pid > 0) {
+          pids.add(pid);
+        }
+      }
+    } catch {
+      // Malformed cleanup state is reported by T03; cleanup remains best-effort here.
+    }
+  }
+  return Array.from(pids);
+}
+
+async function attemptOwnedChromiumCleanup(driver, runtime) {
+  const cleanup = { uiStop: "not-needed", runtimePids: [] };
+  try {
+    if (driver) {
+      const stopButtons = await driver.findElements(By.xpath(`//article[contains(concat(' ', normalize-space(@class), ' '), ' profile-card ')][.//h3[normalize-space()=${xpathLiteral(runtime.smokeContext.smokeProfileName)}]]//button[normalize-space()='Stop Chromium']`));
+      for (const button of stopButtons) {
+        if ((await button.isDisplayed()) && (await button.isEnabled())) {
+          await button.click();
+          await waitForMetricValue(driver, "Profile observability", "Running count", "0", runtime, {
+            step: "cleanup",
+            timeoutMs: 15_000,
+          });
+          cleanup.uiStop = "pass";
+          break;
+        }
+      }
+    }
+  } catch (error) {
+    cleanup.uiStop = `failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  for (const pid of readOwnedRuntimePids(runtime.smokeContext)) {
+    if (!isPidAlive(pid)) {
+      cleanup.runtimePids.push({ pid, status: "not-running" });
+      continue;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+      cleanup.runtimePids.push({ pid, status: "sigterm" });
+    } catch (error) {
+      cleanup.runtimePids.push({ pid, status: "kill-failed", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return cleanup;
+}
+
+async function cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved }) {
+  return runStepAsync("cleanup", async () => {
+    const cleanup = {
+      smokeProfileName: runtime?.smokeContext?.smokeProfileName,
+      smokeRoot: runtime?.smokeContext?.smokeRootRelative,
+      retainedSmokeRoot: true,
+      ownedChromium: "not-observed",
+      webdriverSession: "not-started",
+      driverProcess: "not-started",
+    };
+
+    if (runningObserved && runtime?.smokeContext) {
+      cleanup.ownedChromium = await attemptOwnedChromiumCleanup(driver, runtime);
+    }
+
+    if (driver) {
+      try {
+        cleanup.webdriverSession = await quitDriverSession(driver);
+      } catch (error) {
+        cleanup.webdriverSession = { status: "quit-failed", message: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
+    if (driverProcess?.child) {
+      cleanup.driverProcess = await stopChildProcess(driverProcess.child);
+      cleanup.driverStdoutTail = driverProcess.tail.stdoutTail();
+      cleanup.driverStderrTail = driverProcess.tail.stderrTail();
+    }
+
+    return cleanup;
+  }, runtime ? redactionOptionsForSmoke(runtime.rootDir, runtime.smokeContext) : { rootDir: ROOT_DIR });
+}
+
+async function runPackagedUiSmoke(proof, options = {}) {
+  const rootDir = options.rootDir ?? ROOT_DIR;
+  const platform = options.platform ?? process.platform;
+  const applicationPath = join(rootDir, proof.releaseExecutable);
+  const smokeContext = runStep("smoke-root", () => createSmokeRunContext({
+    rootDir,
+    baseEnv: process.env,
+  }), { rootDir });
+  const runtime = { rootDir, smokeContext, driverProcess: null };
+  let driverProcess = null;
+  let driver = null;
+  let runningObserved = false;
+  let smokeProof = null;
+
+  try {
+    driverProcess = await runStepAsync("webdriver-driver-start", async () => startTauriDriverProcess({
+      rootDir,
+      smokeContext,
+      platform,
+      env: process.env,
+    }), redactionOptionsForSmoke(rootDir, smokeContext));
+    runtime.driverProcess = driverProcess;
+
+    driver = await runStepAsync("webdriver-session-start", async () => createTauriWebDriverSession({
+      applicationPath,
+      applicationRelativePath: proof.releaseExecutable,
+      driverProcess,
+      rootDir,
+      smokeContext,
+    }), redactionOptionsForSmoke(rootDir, smokeContext));
+
+    await runStepAsync("packaged-ui-initial", async () => assertInitialPackagedUi(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    await runStepAsync("packaged-profile-create", async () => createSmokeProfile(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    await runStepAsync("packaged-chromium-launch", async () => launchSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    runningObserved = true;
+    await runStepAsync("packaged-chromium-stop", async () => stopSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    runningObserved = false;
+
+    await runStepAsync("webdriver-session-quit", async () => quitDriverSession(driver), redactionOptionsForSmoke(rootDir, smokeContext));
+    driver = null;
+    driver = await runStepAsync("webdriver-session-restart", async () => createTauriWebDriverSession({
+      applicationPath,
+      applicationRelativePath: proof.releaseExecutable,
+      driverProcess,
+      rootDir,
+      smokeContext,
+    }), redactionOptionsForSmoke(rootDir, smokeContext));
+    await runStepAsync("packaged-restart-persistence", async () => assertRestartPersistence(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+
+    smokeProof = {
+      application: proof.releaseExecutable,
+      smokeProfileName: smokeContext.smokeProfileName,
+      smokeRoot: smokeContext.smokeRootRelative,
+      lifecycle: "created-launched-stopped-restarted",
+      legacyImportSurface: "visible",
+      retainedSmokeRoot: true,
+    };
+    return smokeProof;
+  } finally {
+    await cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved });
+  }
+}
+
 function parseArgs(argv) {
   const flags = new Set(argv);
   return {
     buildOnly: flags.has("--build-only"),
     preflightOnly: flags.has("--preflight-only"),
     strictPreflight: flags.has("--strict-preflight"),
+    skipBuild: flags.has("--skip-build") || flags.has("--ui-only"),
+    uiOnly: flags.has("--ui-only"),
   };
 }
 
@@ -760,7 +1623,7 @@ function runBuildOnly(options = {}) {
   return { targetTriple, ...artifacts };
 }
 
-function runCli(argv = process.argv.slice(2)) {
+async function runCli(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.preflightOnly) {
     runStep("preflight", () => assertWebDriverPreflight({ rootDir: ROOT_DIR, env: process.env, strict: true }), { rootDir: ROOT_DIR });
@@ -768,11 +1631,46 @@ function runCli(argv = process.argv.slice(2)) {
     return;
   }
 
-  const proof = runBuildOnly({ rootDir: ROOT_DIR, strictPreflight: args.strictPreflight && args.buildOnly });
+  if (args.buildOnly) {
+    const proof = runBuildOnly({ rootDir: ROOT_DIR, strictPreflight: args.strictPreflight });
+    emit({
+      status: "pass",
+      mode: "build-only",
+      proof,
+      checks: STEP_RESULTS,
+    });
+    return;
+  }
+
+  let proof;
+  if (args.skipBuild) {
+    const targetTriple = runStep("target-triple", () => ({ targetTriple: readTargetTriple(ROOT_DIR) }), { rootDir: ROOT_DIR }).targetTriple;
+    runStep("tauri-config-capability", () => assertTauriGuardrails({ rootDir: ROOT_DIR, platform: process.platform }), { rootDir: ROOT_DIR });
+    runStep("preflight", () => {
+      const preflight = assertWebDriverPreflight({ rootDir: ROOT_DIR, platform: process.platform, env: process.env, strict: true });
+      return {
+        strict: preflight.strict,
+        missingPrerequisites: preflight.missing.map((item) => item.name),
+        display: preflight.display,
+        chromium: preflight.chromium,
+      };
+    }, { rootDir: ROOT_DIR });
+    proof = runStep("artifact-shape", () => assertBuildArtifactsPresent({
+      rootDir: ROOT_DIR,
+      platform: process.platform,
+      targetTriple,
+    }), { rootDir: ROOT_DIR });
+    runStep("package-sidecar-shape", () => inspectPackageContents(proof.packages, ROOT_DIR), { rootDir: ROOT_DIR });
+  } else {
+    proof = runBuildOnly({ rootDir: ROOT_DIR, strictPreflight: true });
+  }
+
+  const smoke = await runPackagedUiSmoke(proof, { rootDir: ROOT_DIR, platform: process.platform });
   emit({
     status: "pass",
-    mode: args.buildOnly ? "build-only" : "build-only-skeleton",
+    mode: args.uiOnly || args.skipBuild ? "ui-only" : "full",
     proof,
+    smoke,
     checks: STEP_RESULTS,
   });
 }
@@ -780,7 +1678,7 @@ function runCli(argv = process.argv.slice(2)) {
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   try {
-    runCli();
+    await runCli();
   } catch (error) {
     if (error instanceof VerifyFailure) {
       console.error(error.message);

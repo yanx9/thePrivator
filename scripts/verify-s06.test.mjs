@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,9 +7,13 @@ import {
   assertFreshBuildArtifacts,
   assertTauriGuardrails,
   assertWebDriverPreflight,
+  buildTauriWebDriverCapabilities,
+  createSmokeRunContext,
   executableName,
   redact,
   resolveChromiumExecutable,
+  resolveTauriDriverExecutable,
+  safeVisibleTextSnippet,
 } from "./verify-s06.mjs";
 
 const tempRoots = [];
@@ -205,5 +209,67 @@ describe("verify-s06 guard helpers", () => {
     expect(text).not.toMatch(/--user-data-dir=\S+/);
     expect(text).not.toMatch(/THEPRIVATOR_CHROMIUM_PATH=\S+/);
     expect(text).toContain("<repo>");
+  });
+
+  it("creates a retained isolated S06 smoke root with a unique visible profile name and XDG app environment", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "abc123",
+      baseEnv: { PATH: "/usr/bin" },
+    });
+
+    expect(context.runId).toBe("20260509T101112000Z-abc123");
+    expect(context.smokeProfileName).toBe("M001 Packaged Smoke 20260509T101112000Z-abc123");
+    expect(context.smokeRootRelative).toBe("src-tauri/target/s06-smoke-data/20260509T101112000Z-abc123");
+    expect(existsSync(context.smokeRoot)).toBe(true);
+    expect(context.driverEnv).toMatchObject({
+      PATH: "/usr/bin",
+      XDG_DATA_HOME: join(context.smokeRoot, "data"),
+      XDG_CONFIG_HOME: join(context.smokeRoot, "config"),
+      XDG_CACHE_HOME: join(context.smokeRoot, "cache"),
+    });
+    expect(JSON.stringify(context.log)).not.toContain(root);
+    expect(() => createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "abc123",
+      baseEnv: {},
+    })).toThrow(/already exists/i);
+  });
+
+  it("builds standard Tauri WebDriver capabilities without smuggling store roots or sidecar params", () => {
+    const capabilities = buildTauriWebDriverCapabilities("/tmp/theprivator");
+    expect(capabilities.get("browserName")).toBe("wry");
+    expect(capabilities.get("tauri:options")).toEqual({ application: "/tmp/theprivator" });
+
+    const serialized = JSON.stringify(capabilities);
+    expect(serialized).not.toContain("storeRoot");
+    expect(serialized).not.toContain("profileId");
+    expect(serialized).not.toContain("chromium");
+    expect(serialized).not.toContain("sidecar");
+  });
+
+  it("resolves tauri-driver from PATH or an injected cargo bin and redacts visible UI failure snippets", () => {
+    const root = makeRoot();
+    const cargoBin = join(root, "home", ".cargo", "bin");
+    writeExecutable(join(cargoBin, "tauri-driver"));
+
+    expect(resolveTauriDriverExecutable({
+      rootDir: root,
+      platform: "linux",
+      env: { PATH: join(root, "empty") },
+      cargoBin,
+    })).toMatchObject({ name: "tauri-driver", path: join(cargoBin, "tauri-driver") });
+
+    const snippet = safeVisibleTextSnippet(
+      `Profile failed at ${root} with --user-data-dir=${join(root, "profile-store", "profiles", "p1", "user-data")} and Traceback secret`,
+      { rootDir: root, sensitiveValues: [root] },
+    );
+    expect(snippet).not.toContain(root);
+    expect(snippet).not.toMatch(/--user-data-dir=\S+/);
+    expect(snippet).not.toContain("Traceback");
+    expect(snippet.length).toBeLessThanOrEqual(520);
   });
 });
