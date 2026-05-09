@@ -5,8 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   VerifyFailure,
   assertFreshBuildArtifacts,
+  assertPostSmokeDiagnostics,
+  assertPostSmokeProfileStore,
+  assertPostSmokeRedaction,
   assertTauriGuardrails,
   assertWebDriverPreflight,
+  buildFinalSummary,
   buildTauriWebDriverCapabilities,
   createSmokeRunContext,
   executableName,
@@ -271,5 +275,205 @@ describe("verify-s06 guard helpers", () => {
     expect(snippet).not.toMatch(/--user-data-dir=\S+/);
     expect(snippet).not.toContain("Traceback");
     expect(snippet.length).toBeLessThanOrEqual(520);
+  });
+
+  it("asserts packaged profile persistence from a discovered app-data root", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "persist123",
+      baseEnv: {},
+    });
+    const profileId = "11111111-1111-4111-8111-111111111111";
+    const appDataRoot = join(context.dataRoot, "Com.ThePrivator.Desktop");
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 1,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          createdAt: "2026-05-09T10:11:12.000Z",
+          updatedAt: "2026-05-09T10:11:12.000Z",
+          defaults: {
+            browser: "chromium",
+            startUrl: "about:blank",
+            proxyMode: "direct",
+            fingerprintMode: "disabled",
+          },
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+        },
+      ],
+    });
+
+    const proof = assertPostSmokeProfileStore({ rootDir: root, smokeContext: context });
+
+    expect(proof).toMatchObject({
+      smokeProfileName: context.smokeProfileName,
+      smokeRoot: context.smokeRootRelative,
+      appDataRoot: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop",
+      profileStore: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop/profile-store/profiles.json",
+      profileId,
+      persistedRuntimeFields: 0,
+      storage: {
+        profileDir: `profile-store/profiles/${profileId}`,
+        userDataDir: `profile-store/profiles/${profileId}/user-data`,
+      },
+    });
+    expect(JSON.stringify(proof)).not.toContain(root);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 1,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          status: "running",
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/runtime truth/i);
+  });
+
+  it("asserts packaged diagnostics correlation and rejects unsafe diagnostic rows", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "diag123",
+      baseEnv: {},
+    });
+    const profileId = "22222222-2222-4222-8222-222222222222";
+    const appDataRoot = join(context.dataRoot, "theprivator-desktop");
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 1,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          createdAt: "2026-05-09T10:11:12.000Z",
+          updatedAt: "2026-05-09T10:11:12.000Z",
+          defaults: {
+            browser: "chromium",
+            startUrl: "about:blank",
+            proxyMode: "direct",
+            fingerprintMode: "disabled",
+          },
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+        },
+      ],
+    });
+    const diagnosticsPath = join(appDataRoot, "profile-store", "diagnostics", "events.jsonl");
+    mkdirSync(dirname(diagnosticsPath), { recursive: true });
+    writeFileSync(diagnosticsPath, [
+      "not-json-but-safe",
+      ...["profiles.create", "chromium.launch", "chromium.stop"].map((method, index) => JSON.stringify({
+        schemaVersion: 1,
+        ts: `2026-05-09T10:11:1${index}.000Z`,
+        source: "python-sidecar",
+        event: "sidecar.request",
+        status: "ok",
+        requestId: `s06-${index}`,
+        method,
+        durationMs: index,
+        errorCode: null,
+        detailRef: null,
+        logPath: "profile-store/diagnostics/events.jsonl",
+      })),
+    ].join("\n"), "utf8");
+
+    const proof = assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context });
+
+    expect(proof.requiredMethods).toEqual(["profiles.create", "chromium.launch", "chromium.stop"]);
+    expect(proof.malformedRows).toBe(1);
+    expect(proof.validRows).toBe(3);
+    expect(JSON.stringify(proof)).not.toContain(root);
+
+    writeFileSync(diagnosticsPath, `${JSON.stringify({
+      schemaVersion: 1,
+      ts: "2026-05-09T10:11:12.000Z",
+      source: "python-sidecar",
+      event: "sidecar.request",
+      status: "ok",
+      method: "profiles.create",
+      durationMs: 1,
+      logPath: "/tmp/unsafe-events.jsonl",
+    })}\n`, "utf8");
+    expect(() => assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context })).toThrow(/unsafe logPath/i);
+  });
+
+  it("emits a redacted final summary with the S01-S05 regression gate set", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "summary123",
+      baseEnv: {},
+    });
+    const profileId = "33333333-3333-4333-8333-333333333333";
+    const appDataRoot = join(context.dataRoot, "theprivator");
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 1,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+        },
+      ],
+    });
+
+    const redaction = assertPostSmokeRedaction({
+      rootDir: root,
+      smokeContext: context,
+      evidence: { artifact: "src-tauri/target/release/theprivator" },
+    });
+    const summary = buildFinalSummary({
+      mode: "full",
+      platform: "linux",
+      arch: "x64",
+      proof: {
+        releaseExecutable: "src-tauri/target/release/theprivator",
+        releaseSidecar: "src-tauri/target/release/theprivator-sidecar",
+        targetTripleSidecar: "src-tauri/binaries/theprivator-sidecar-x86_64-unknown-linux-gnu",
+        packages: ["src-tauri/target/release/bundle/deb/ThePrivator_2.1.0_amd64.deb"],
+      },
+      smoke: {
+        smokeProfileName: context.smokeProfileName,
+        smokeRoot: context.smokeRootRelative,
+        lifecycle: "created-launched-stopped-restarted",
+        diagnostics: { diagnosticsLog: "src-tauri/target/s06-smoke-data/run/data/app/profile-store/diagnostics/events.jsonl" },
+        redaction,
+      },
+      checks: [{ name: "package-sidecar-shape", inspections: [{ artifact: "pkg.deb", status: "pass" }] }],
+    });
+
+    expect(summary.supportingRegressions).toEqual([
+      "npm run verify:s01",
+      "npm run verify:s03",
+      "npm run verify:s04",
+      "npm run verify:s05",
+      "npm run verify:s06",
+    ]);
+    expect(summary.sidecarBundledInvocation.sourceSidecarSubprocess).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain(root);
+    expect(() => assertPostSmokeRedaction({
+      rootDir: root,
+      smokeContext: context,
+      evidence: { leaked: `--user-data-dir=${join(root, "profile-store", "profiles", profileId, "user-data")}` },
+    })).toThrow(/leaked/i);
   });
 });
