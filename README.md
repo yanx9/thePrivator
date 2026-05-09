@@ -62,11 +62,11 @@ pip install .
 python -m theprivator
 ```
 
-### Tauri rewrite spine health smoke
+### Tauri packaged first profile loop
 
-The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. For a current-OS desktop smoke, install the Node/Python/Rust prerequisites, run `npm run verify:s01`, then build and open the packaged Tauri artifact with `npm run tauri build`.
+The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. The health-only S01 smoke is an early guardrail; the final current-OS packaged proof is `npm run verify:s06`, which rebuilds the Tauri artifact, opens the packaged app through WebDriver, creates a profile, launches real Chromium, stops it, verifies restart persistence, and checks the diagnostics/import surfaces.
 
-See [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) for the full contributor runbook, including `npm run tauri dev`, packaged-artifact checks, and the expected health/error UI states.
+Start with the [packaged first profile loop runbook](docs/packaged-first-profile-loop.md) for prerequisites, command order, Linux `.deb`/`.rpm` artifact expectations, manual fallback UAT, and troubleshooting. Use [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) when you only need to validate the sidecar health spine or diagnose an upstream health/error regression before the packaged loop.
 
 ### Creating Your First Profile
 

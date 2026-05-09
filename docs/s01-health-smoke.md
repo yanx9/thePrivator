@@ -2,6 +2,8 @@
 
 This runbook is for a fresh local contributor who wants to prove the rewrite spine on their current OS. After following it, you should be able to run the dev shell, build a packaged Tauri artifact, open it, and see the same sidecar health and recoverable error states without manually starting a Python service.
 
+S01 is a health-spine guardrail, not the final packaged product-loop proof. After S01 passes, use the [packaged first profile loop runbook](packaged-first-profile-loop.md) and `npm run verify:s06` to prove profile creation, real Chromium launch/stop, restart persistence, legacy import presence, and packaged diagnostics through the bundled sidecar.
+
 ## What this smoke proves
 
 - The React UI invokes typed Tauri commands rather than calling the sidecar directly.
