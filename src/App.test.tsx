@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { DIAGNOSTIC_RELATIVE_LOG_PATH } from "./sidecar/types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -212,6 +213,34 @@ function legacyEnvelope(result: unknown, overrides: Record<string, unknown> = {}
     protocolVersion: "1.0.0",
     durationMs: 8.25,
     result,
+    ...overrides,
+  };
+}
+
+function diagnosticEntry(detailRef: string, overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    ts: "2026-05-04T18:10:00.000Z",
+    source: "python-sidecar",
+    event: "sidecar.request",
+    status: "error",
+    logPath: DIAGNOSTIC_RELATIVE_LOG_PATH,
+    requestId: "request-lookup-1",
+    method: "profiles.create",
+    durationMs: 12.5,
+    errorCode: "PROFILE_INVALID_NAME",
+    detailRef,
+    ...overrides,
+  };
+}
+
+function diagnosticLookupResult(detailRef: string, overrides: Record<string, unknown> = {}) {
+  return {
+    found: true,
+    detailRef,
+    reason: "found",
+    logPath: DIAGNOSTIC_RELATIVE_LOG_PATH,
+    entries: [diagnosticEntry(detailRef)],
     ...overrides,
   };
 }
@@ -883,6 +912,179 @@ describe("ThePrivator profile library UI", () => {
     expect(within(row).getByLabelText(/target profile name/i)).toHaveValue("Malformed Import");
   });
 
+  it("looks up profile diagnostic refs with safe event summaries while retaining profile form state", async () => {
+    const detailRef = "sidecar-profile-invalid";
+    mockStartup([]);
+    mockInvoke
+      .mockRejectedValueOnce(profileError("PROFILE_INVALID_NAME", "Profile name is invalid.", detailRef))
+      .mockResolvedValueOnce(
+        diagnosticLookupResult(detailRef, {
+          entries: [
+            diagnosticEntry(detailRef, {
+              errorCode: "PROFILE_INVALID_NAME",
+              method: "profiles.create",
+              requestId: "profile-request-1",
+            }),
+          ],
+        }),
+      );
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    const input = screen.getByLabelText(/profile name/i);
+    fireEvent.change(input, { target: { value: "bad/name" } });
+    fireEvent.click(screen.getByRole("button", { name: /^create profile$/i }));
+
+    const feedback = await screen.findByLabelText(/profile operation feedback/i);
+    expect(feedback).toHaveTextContent(/PROFILE_INVALID_NAME/i);
+    fireEvent.click(within(feedback).getByRole("button", { name: /lookup diagnostics for sidecar-profile-invalid/i }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/sidecar-profile-invalid/i);
+    expect(lookupPanel).toHaveTextContent(/sidecar\.request/i);
+    expect(lookupPanel).toHaveTextContent(/python-sidecar/i);
+    expect(lookupPanel).toHaveTextContent(/profiles\.create/i);
+    expect(lookupPanel).toHaveTextContent(/PROFILE_INVALID_NAME/i);
+    expect(lookupPanel).toHaveTextContent(DIAGNOSTIC_RELATIVE_LOG_PATH);
+    expect(lookupPanel).not.toHaveTextContent("/tmp/legacy-root");
+    expect(lookupPanel).not.toHaveTextContent("stdout body");
+    expect(lookupPanel).not.toHaveTextContent("stderr body");
+    expect(input).toHaveValue("bad/name");
+    expect(screen.getByLabelText(/empty profile library/i)).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenLastCalledWith("diagnostics_lookup", { detailRef });
+  });
+
+  it("shows UI-local no-log explanations and recovers from lookup command rejection without clearing legacy state", async () => {
+    const detailRef = "ui-legacy-legacy-root-required";
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce({ found: false, detailRef, reason: "ui-local", logPath: null, entries: [] })
+      .mockRejectedValueOnce(profileError("SIDECAR_TIMEOUT", "Diagnostics lookup timed out.", "bridge-lookup-timeout"))
+      .mockResolvedValueOnce({ found: false, detailRef, reason: "ui-local", logPath: null, entries: [] });
+
+    render(<App />);
+
+    await screen.findByLabelText(/empty profile library/i);
+    fireEvent.submit(screen.getByRole("form", { name: /scan legacy profiles/i }));
+
+    const scanError = await screen.findByText(/Enter a legacy ThePrivator profile root/i);
+    const legacyPanel = scanError.closest("section") ?? screen.getByLabelText(/scan legacy profiles/i);
+    fireEvent.click(within(legacyPanel as HTMLElement).getByRole("button", { name: /lookup diagnostics for ui-legacy-legacy-root-required/i }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/UI-local reference/i);
+    expect(lookupPanel).toHaveTextContent(/no durable diagnostic log/i);
+    expect(lookupPanel).not.toHaveTextContent(DIAGNOSTIC_RELATIVE_LOG_PATH);
+
+    fireEvent.click(within(legacyPanel as HTMLElement).getByRole("button", { name: /lookup diagnostics for ui-legacy-legacy-root-required/i }));
+    await waitFor(() => expect(lookupPanel).toHaveTextContent(/Diagnostics lookup timed out/i));
+    expect(lookupPanel).toHaveTextContent(/SIDECAR_TIMEOUT/i);
+    expect(screen.getByText(/Enter a legacy ThePrivator profile root/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/empty profile library/i)).toBeInTheDocument();
+
+    fireEvent.click(within(lookupPanel).getByRole("button", { name: /retry diagnostics lookup for ui-legacy-legacy-root-required/i }));
+    await waitFor(() => expect(lookupPanel).toHaveTextContent(/UI-local reference/i));
+  });
+
+  it("switches selected diagnostics across Chromium lifecycle, legacy issues, and legacy outcomes", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const issueDetailRef = "sidecar-legacy-duplicate";
+    const outcomeDetailRef = "sidecar-copy-partial";
+    mockStartup([profile]);
+    mockInvoke
+      .mockRejectedValueOnce(
+        profileError("CHROMIUM_EXECUTABLE_NOT_FOUND", "Chromium executable was not found.", "sidecar-missing-chromium-detail"),
+      )
+      .mockResolvedValueOnce(
+        diagnosticLookupResult("sidecar-missing-chromium-detail", {
+          entries: [
+            diagnosticEntry("sidecar-missing-chromium-detail", {
+              errorCode: "CHROMIUM_EXECUTABLE_NOT_FOUND",
+              method: "chromium.launch",
+            }),
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        legacyEnvelope(
+          legacyScanResult({
+            candidates: [
+              legacyCandidate({
+                legacyId: "legacy-needs-fix",
+                folderName: "needs-fix",
+                legacyName: "Legacy Needs Fix",
+                targetName: "Legacy Needs Fix",
+                issues: [legacyIssue({ code: "PROFILE_DUPLICATE_NAME", detailRef: issueDetailRef })],
+              }),
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce({ found: false, detailRef: issueDetailRef, reason: "not-persisted", logPath: DIAGNOSTIC_RELATIVE_LOG_PATH, entries: [] })
+      .mockResolvedValueOnce(
+        legacyEnvelope(
+          legacyImportResult({
+            outcomes: [
+              legacyOutcome({
+                legacyId: "legacy-needs-fix",
+                targetName: "Legacy Needs Fix",
+                status: "partial",
+                copyStatus: "failed",
+                profileId: profile.id,
+                error: legacyError({ code: "LEGACY_USER_DATA_COPY_FAILED", detailRef: outcomeDetailRef }),
+              }),
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(profileEnvelope(profileResult([profile])))
+      .mockResolvedValueOnce(
+        diagnosticLookupResult(outcomeDetailRef, {
+          entries: [
+            diagnosticEntry(outcomeDetailRef, {
+              event: "legacy.import.outcome",
+              status: "partial",
+              method: "legacy.import",
+              errorCode: "LEGACY_USER_DATA_COPY_FAILED",
+              context: { legacyId: "legacy-needs-fix" },
+            }),
+          ],
+        }),
+      );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    const recovery = await within(card).findByLabelText(/research lifecycle recovery/i);
+    fireEvent.click(within(recovery).getByRole("button", { name: /lookup diagnostics for sidecar-missing-chromium-detail/i }));
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/CHROMIUM_EXECUTABLE_NOT_FOUND/i);
+    expect(lookupPanel).toHaveTextContent(/chromium\.launch/i);
+
+    fireEvent.change(screen.getByLabelText(/legacy profile root/i), { target: { value: "/tmp/legacy-root" } });
+    fireEvent.click(screen.getByRole("button", { name: /scan legacy root/i }));
+    const issue = await screen.findByText(/PROFILE_DUPLICATE_NAME/i);
+    const issueCard = issue.closest("article") as HTMLElement;
+    fireEvent.click(within(issueCard).getByRole("button", { name: /lookup diagnostics for sidecar-legacy-duplicate/i }));
+    await waitFor(() => expect(lookupPanel).toHaveTextContent(/sidecar-legacy-duplicate/i));
+    expect(lookupPanel).toHaveTextContent(/No persisted diagnostic event matched/i);
+
+    const candidateRow = await screen.findByRole("listitem", { name: /legacy needs fix/i });
+    fireEvent.click(within(candidateRow).getByRole("checkbox", { name: /select profile/i }));
+    fireEvent.click(screen.getByRole("button", { name: /import selected \(1\)/i }));
+    const outcomes = await screen.findByLabelText(/legacy import outcomes/i);
+    fireEvent.click(within(outcomes).getByRole("button", { name: /lookup diagnostics for sidecar-copy-partial/i }));
+
+    await waitFor(() => expect(lookupPanel).toHaveTextContent(/legacy\.import\.outcome/i));
+    expect(lookupPanel).toHaveTextContent(/legacy-needs-fix/i);
+    expect(lookupPanel).toHaveTextContent(/LEGACY_USER_DATA_COPY_FAILED/i);
+    expect(lookupPanel).not.toHaveTextContent("/tmp/legacy-root");
+    expect(commandCalls("diagnostics_lookup")).toHaveLength(3);
+  });
+
   it("does not add direct browser or Tauri filesystem bypasses for legacy import", () => {
     const source = appSource();
 
@@ -895,7 +1097,18 @@ describe("ThePrivator profile library UI", () => {
 
   it("keeps the S01 diagnostic recovery pattern in the compact system panel", async () => {
     mockStartup([]);
-    mockInvoke.mockRejectedValueOnce(profileError("DIAGNOSTIC_FAILURE", "Diagnostic failure requested.", "sidecar-detail-ref"));
+    mockInvoke
+      .mockRejectedValueOnce(profileError("DIAGNOSTIC_FAILURE", "Diagnostic failure requested.", "sidecar-detail-ref"))
+      .mockResolvedValueOnce(
+        diagnosticLookupResult("sidecar-detail-ref", {
+          entries: [
+            diagnosticEntry("sidecar-detail-ref", {
+              errorCode: "DIAGNOSTIC_FAILURE",
+              method: "diagnostics.fail",
+            }),
+          ],
+        }),
+      );
 
     render(<App />);
 
@@ -907,5 +1120,12 @@ describe("ThePrivator profile library UI", () => {
     expect(systemStatus).toHaveTextContent(/DIAGNOSTIC_FAILURE/i);
     expect(systemStatus).toHaveTextContent(/sidecar-detail-ref/i);
     expect(mockInvoke).toHaveBeenLastCalledWith("sidecar_diagnostic_failure");
+
+    fireEvent.click(within(systemStatus).getByRole("button", { name: /lookup diagnostics for sidecar-detail-ref/i }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/DIAGNOSTIC_FAILURE/i);
+    expect(lookupPanel).toHaveTextContent(/diagnostics\.fail/i);
+    expect(mockInvoke).toHaveBeenLastCalledWith("diagnostics_lookup", { detailRef: "sidecar-detail-ref" });
   });
 });

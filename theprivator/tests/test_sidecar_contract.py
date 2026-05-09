@@ -744,9 +744,10 @@ def test_legacy_import_ndjson_dispatch_reports_success_partial_failed_and_redact
         "legacy-stale-selection": "LEGACY_SELECTION_INVALID",
     }
     for diagnostic in outcome_diagnostics:
-        assert set(diagnostic) == {"event", "legacyId", "status", "errorCode", "detailRef"}
+        assert set(diagnostic) == {"event", "legacyId", "status", "errorCode", "detailRef", "durationMs"}
         assert diagnostic["event"] == "legacy.import.outcome"
         assert diagnostic["status"] in {"partial", "failed"}
+        assert isinstance(diagnostic["durationMs"], (int, float))
         assert diagnostic["detailRef"].startswith("sidecar-")
 
     combined = import_proc.stdout + import_proc.stderr

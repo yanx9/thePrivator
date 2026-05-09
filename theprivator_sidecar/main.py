@@ -76,7 +76,7 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
             detail_ref=None,
         )
         diagnostics = [diagnostic]
-        diagnostics.extend(_legacy_import_outcome_diagnostics(request.method, result))
+        diagnostics.extend(_legacy_import_outcome_diagnostics(request.method, result, duration_ms))
         return response, _with_store_root_persistence(request, diagnostics)
 
     except SidecarError as error:
@@ -266,7 +266,7 @@ def dispatch_legacy_request(request: SidecarRequest) -> JsonObject:
         ) from error
 
 
-def _legacy_import_outcome_diagnostics(method: str, result: JsonObject) -> list[JsonObject]:
+def _legacy_import_outcome_diagnostics(method: str, result: JsonObject, duration_ms: float) -> list[JsonObject]:
     if method != "legacy.import":
         return []
 
@@ -292,6 +292,7 @@ def _legacy_import_outcome_diagnostics(method: str, result: JsonObject) -> list[
                 status=status if isinstance(status, str) else None,
                 error_code=error_code if isinstance(error_code, str) else None,
                 detail_ref=detail_ref if isinstance(detail_ref, str) else None,
+                duration_ms=duration_ms,
             )
         )
     return diagnostics

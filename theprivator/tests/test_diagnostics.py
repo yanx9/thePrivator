@@ -257,6 +257,7 @@ def test_legacy_import_outcome_diagnostics_are_persisted_per_failed_or_partial_i
         assert lookup["entries"][0]["status"] in {"partial", "failed"}
         assert lookup["entries"][0]["errorCode"] == stderr_outcome["errorCode"]
         assert lookup["entries"][0]["detailRef"] == stderr_outcome["detailRef"]
+        assert isinstance(lookup["entries"][0]["durationMs"], (int, float))
         assert lookup["entries"][0]["context"] == {"legacyId": stderr_outcome["legacyId"]}
 
     assert_redacted_log_text(

@@ -7,6 +7,7 @@ import {
   importLegacyProfiles,
   launchChromiumProfile,
   listProfiles,
+  lookupDiagnosticDetail,
   scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
@@ -16,6 +17,8 @@ import type {
   ChromiumRunningProfileState,
   ChromiumStatusSnapshot,
   ChromiumStoppedProfileState,
+  DiagnosticEntry,
+  DiagnosticLookupResult,
   LegacyImportOutcome,
   LegacyImportSelection,
   LegacyImportSnapshot,
@@ -49,6 +52,16 @@ type LegacyImportRefreshState = {
   error: SidecarClientError;
   occurredAt: string;
 } | null;
+
+type DiagnosticLookupPhase = "idle" | "loading" | "ready" | "error";
+
+type DiagnosticLookupState = {
+  detailRef: string | null;
+  phase: DiagnosticLookupPhase;
+  result: DiagnosticLookupResult | null;
+  error: SidecarClientError | null;
+  checkedAt: string | null;
+};
 
 type LegacySelectionState = Record<string, boolean>;
 type LegacyTargetNameState = Record<string, string>;
@@ -87,6 +100,14 @@ const INITIAL_HEALTH_STATE: HealthViewState = {
   health: null,
   error: null,
   lastCheckedAt: null,
+};
+
+const INITIAL_DIAGNOSTIC_LOOKUP_STATE: DiagnosticLookupState = {
+  detailRef: null,
+  phase: "idle",
+  result: null,
+  error: null,
+  checkedAt: null,
 };
 
 const HEALTH_PHASE_LABELS: Record<SidecarUiPhase, string> = {
@@ -188,10 +209,12 @@ export function App() {
   const [legacyScanError, setLegacyScanError] = useState<SidecarClientError | null>(null);
   const [legacyImportError, setLegacyImportError] = useState<SidecarClientError | null>(null);
   const [legacyImportRefreshState, setLegacyImportRefreshState] = useState<LegacyImportRefreshState>(null);
+  const [diagnosticLookupState, setDiagnosticLookupState] = useState<DiagnosticLookupState>(INITIAL_DIAGNOSTIC_LOOKUP_STATE);
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
   const chromiumStatusInFlightRef = useRef(false);
+  const diagnosticLookupRequestIdRef = useRef(0);
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
 
@@ -704,6 +727,51 @@ export function App() {
     }
   }, [finishHealthWithError]);
 
+  const runDiagnosticLookup = useCallback(async (detailRef: string) => {
+    const requestId = diagnosticLookupRequestIdRef.current + 1;
+    diagnosticLookupRequestIdRef.current = requestId;
+    setDiagnosticLookupState({
+      detailRef,
+      phase: "loading",
+      result: null,
+      error: null,
+      checkedAt: null,
+    });
+
+    try {
+      const result = await lookupDiagnosticDetail(detailRef);
+      if (diagnosticLookupRequestIdRef.current !== requestId) {
+        return;
+      }
+      setDiagnosticLookupState({
+        detailRef: result.detailRef,
+        phase: "ready",
+        result,
+        error: null,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (diagnosticLookupRequestIdRef.current !== requestId) {
+        return;
+      }
+      setDiagnosticLookupState({
+        detailRef,
+        phase: "error",
+        result: null,
+        error: error as SidecarClientError,
+        checkedAt: new Date().toISOString(),
+      });
+    }
+  }, []);
+
+  const retryDiagnosticLookup = useCallback(() => {
+    if (!diagnosticLookupState.detailRef) {
+      return;
+    }
+
+    void runDiagnosticLookup(diagnosticLookupState.detailRef);
+  }, [diagnosticLookupState.detailRef, runDiagnosticLookup]);
+
   const profileCount = profiles.length;
   const isProfileBusy = isProfileLoading || mutationPhase !== "idle";
   const isEmpty = !isProfileLoading && profileCount === 0;
@@ -776,16 +844,19 @@ export function App() {
           />
 
           <ProfileFeedback
+            diagnosticLookupState={diagnosticLookupState}
             error={profileError}
             isLoading={isProfileLoading}
             lastListSnapshot={lastListSnapshot}
             mutationPhase={mutationPhase}
             profileCount={profileCount}
+            onDiagnosticLookup={runDiagnosticLookup}
           />
 
           <LegacyImportPanel
             canImport={legacyCanImport}
             canScan={legacyCanScan}
+            diagnosticLookupState={diagnosticLookupState}
             importError={legacyImportError}
             importPhase={legacyImportPhase}
             importRefreshState={legacyImportRefreshState}
@@ -800,6 +871,7 @@ export function App() {
             selectedById={legacySelectedById}
             selectedCount={legacySelectedCount}
             targetNamesById={legacyTargetNamesById}
+            onDiagnosticLookup={runDiagnosticLookup}
             onImportSubmit={handleLegacyImportSubmit}
             onRootChange={handleLegacyRootChange}
             onScanSubmit={handleLegacyScanSubmit}
@@ -821,6 +893,7 @@ export function App() {
                 <ProfileCard
                   key={profile.id}
                   deleteCandidate={deleteCandidate}
+                  diagnosticLookupState={diagnosticLookupState}
                   editing={editing}
                   isLifecycleActionBusy={chromiumMutation !== null}
                   isProfileBusy={isProfileBusy}
@@ -833,6 +906,7 @@ export function App() {
                   onCancelDelete={() => setDeleteCandidate(null)}
                   onConfirmDelete={handleConfirmDelete}
                   onDeleteRequest={setDeleteCandidate}
+                  onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
                   onLaunch={handleLaunchProfile}
                   onRefreshStatus={() => void refreshChromiumStatus("manual")}
@@ -851,11 +925,14 @@ export function App() {
 
         <aside className="system-column" aria-label="Diagnostics and observability">
           <SystemStatusPanel
+            diagnosticLookupState={diagnosticLookupState}
             healthBusyAction={healthBusyAction}
             healthState={healthState}
+            onDiagnosticLookup={runDiagnosticLookup}
             onRefreshHealth={refreshHealth}
             onTriggerDiagnostic={triggerDiagnosticError}
           />
+          <DiagnosticLookupPanel state={diagnosticLookupState} onRetry={retryDiagnosticLookup} />
           <ProfileTelemetry
             chromiumPhase={chromiumPhase}
             chromiumRunningCount={chromiumRunningCount}
@@ -882,6 +959,7 @@ export function App() {
 function LegacyImportPanel({
   canImport,
   canScan,
+  diagnosticLookupState,
   importError,
   importPhase,
   importRefreshState,
@@ -896,6 +974,7 @@ function LegacyImportPanel({
   selectedById,
   selectedCount,
   targetNamesById,
+  onDiagnosticLookup,
   onImportSubmit,
   onRootChange,
   onScanSubmit,
@@ -904,6 +983,7 @@ function LegacyImportPanel({
 }: {
   canImport: boolean;
   canScan: boolean;
+  diagnosticLookupState: DiagnosticLookupState;
   importError: SidecarClientError | null;
   importPhase: LegacyImportPhase;
   importRefreshState: LegacyImportRefreshState;
@@ -918,6 +998,7 @@ function LegacyImportPanel({
   selectedById: LegacySelectionState;
   selectedCount: number;
   targetNamesById: LegacyTargetNameState;
+  onDiagnosticLookup: (detailRef: string) => void;
   onImportSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRootChange: (value: string) => void;
   onScanSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -981,10 +1062,24 @@ function LegacyImportPanel({
         <Metric label="Last import detailRef" value={importError?.detailRef ?? importRefreshState?.error.detailRef} />
       </dl>
 
-      {scanError ? <LegacyErrorFeedback id="legacy-scan-error" title="Scan failed safely" error={scanError} /> : null}
+      {scanError ? (
+        <LegacyErrorFeedback
+          diagnosticLookupState={diagnosticLookupState}
+          id="legacy-scan-error"
+          title="Scan failed safely"
+          error={scanError}
+          onDiagnosticLookup={onDiagnosticLookup}
+        />
+      ) : null}
 
       {scanSnapshot?.issues.length ? (
-        <LegacyIssueList id="legacy-root-issues" label="Root scan issues" issues={scanSnapshot.issues} />
+        <LegacyIssueList
+          diagnosticLookupState={diagnosticLookupState}
+          id="legacy-root-issues"
+          label="Root scan issues"
+          issues={scanSnapshot.issues}
+          onDiagnosticLookup={onDiagnosticLookup}
+        />
       ) : null}
 
       {hasScan ? (
@@ -1013,8 +1108,10 @@ function LegacyImportPanel({
                 <LegacyCandidateRow
                   key={candidate.legacyId}
                   candidate={candidate}
+                  diagnosticLookupState={diagnosticLookupState}
                   isSelected={Boolean(selectedById[candidate.legacyId])}
                   targetName={targetNamesById[candidate.legacyId] ?? candidate.targetName}
+                  onDiagnosticLookup={onDiagnosticLookup}
                   onSelectionChange={onSelectionChange}
                   onTargetNameChange={onTargetNameChange}
                 />
@@ -1022,12 +1119,21 @@ function LegacyImportPanel({
             </div>
           )}
 
-          {importError ? <LegacyErrorFeedback title="Import failed safely" error={importError} /> : null}
+          {importError ? (
+            <LegacyErrorFeedback
+              diagnosticLookupState={diagnosticLookupState}
+              title="Import failed safely"
+              error={importError}
+              onDiagnosticLookup={onDiagnosticLookup}
+            />
+          ) : null}
           {importRefreshState ? (
             <LegacyErrorFeedback
+              diagnosticLookupState={diagnosticLookupState}
               title="Profile list refresh after import failed"
               error={importRefreshState.error}
               description={`Import outcomes remain visible. Retry Refresh profiles after resolving the list reload issue from ${formatProfileTimestamp(importRefreshState.occurredAt)}.`}
+              onDiagnosticLookup={onDiagnosticLookup}
             />
           ) : null}
 
@@ -1042,21 +1148,29 @@ function LegacyImportPanel({
         </form>
       ) : null}
 
-      <LegacyImportOutcomes snapshot={importSnapshot} />
+      <LegacyImportOutcomes
+        diagnosticLookupState={diagnosticLookupState}
+        snapshot={importSnapshot}
+        onDiagnosticLookup={onDiagnosticLookup}
+      />
     </section>
   );
 }
 
 function LegacyCandidateRow({
   candidate,
+  diagnosticLookupState,
   isSelected,
   targetName,
+  onDiagnosticLookup,
   onSelectionChange,
   onTargetNameChange,
 }: {
   candidate: LegacyScanCandidate;
+  diagnosticLookupState: DiagnosticLookupState;
   isSelected: boolean;
   targetName: string;
+  onDiagnosticLookup: (detailRef: string) => void;
   onSelectionChange: (legacyId: string, selected: boolean) => void;
   onTargetNameChange: (legacyId: string, targetName: string) => void;
 }) {
@@ -1108,7 +1222,14 @@ function LegacyCandidateRow({
         </div>
 
         {candidate.issues.length ? (
-          <LegacyIssueList id={issueListId} label="Candidate validation issues" issues={candidate.issues} compact />
+          <LegacyIssueList
+            diagnosticLookupState={diagnosticLookupState}
+            id={issueListId}
+            label="Candidate validation issues"
+            issues={candidate.issues}
+            compact
+            onDiagnosticLookup={onDiagnosticLookup}
+          />
         ) : null}
       </div>
     </article>
@@ -1117,14 +1238,18 @@ function LegacyCandidateRow({
 
 function LegacyIssueList({
   compact = false,
+  diagnosticLookupState,
   id,
   issues,
   label,
+  onDiagnosticLookup,
 }: {
   compact?: boolean;
+  diagnosticLookupState: DiagnosticLookupState;
   id?: string;
   issues: LegacyIssue[];
   label: string;
+  onDiagnosticLookup: (detailRef: string) => void;
 }) {
   return (
     <section className={`legacy-issue-list ${compact ? "legacy-issue-list--compact" : ""}`} id={id} aria-label={label}>
@@ -1139,6 +1264,7 @@ function LegacyIssueList({
             <dl className="metric-list metric-list--inline">
               <Metric label="detailRef" value={issue.detailRef} />
             </dl>
+            <DiagnosticReference detailRef={issue.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
           </article>
         ))}
       </div>
@@ -1148,14 +1274,18 @@ function LegacyIssueList({
 
 function LegacyErrorFeedback({
   description,
+  diagnosticLookupState,
   error,
   id,
   title,
+  onDiagnosticLookup,
 }: {
   description?: string;
+  diagnosticLookupState: DiagnosticLookupState;
   error: SidecarClientError;
   id?: string;
   title: string;
+  onDiagnosticLookup: (detailRef: string) => void;
 }) {
   return (
     <section className="legacy-error-feedback" id={id} role="status" aria-live="polite" aria-atomic="true">
@@ -1167,11 +1297,20 @@ function LegacyErrorFeedback({
         <Metric label="Recoverable" value={error.recoverable ? "yes" : "no"} />
         <Metric label="detailRef" value={error.detailRef} />
       </dl>
+      <DiagnosticReference detailRef={error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
     </section>
   );
 }
 
-function LegacyImportOutcomes({ snapshot }: { snapshot: LegacyImportSnapshot | null }) {
+function LegacyImportOutcomes({
+  diagnosticLookupState,
+  snapshot,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  snapshot: LegacyImportSnapshot | null;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
   if (!snapshot) {
     return null;
   }
@@ -1194,14 +1333,27 @@ function LegacyImportOutcomes({ snapshot }: { snapshot: LegacyImportSnapshot | n
 
       <div className="legacy-outcome-list" role="list" aria-label="Per-profile legacy import result cards">
         {snapshot.outcomes.map((outcome) => (
-          <LegacyOutcomeCard key={`${outcome.legacyId}-${outcome.targetName}-${outcome.status}`} outcome={outcome} />
+          <LegacyOutcomeCard
+            key={`${outcome.legacyId}-${outcome.targetName}-${outcome.status}`}
+            diagnosticLookupState={diagnosticLookupState}
+            outcome={outcome}
+            onDiagnosticLookup={onDiagnosticLookup}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-function LegacyOutcomeCard({ outcome }: { outcome: LegacyImportOutcome }) {
+function LegacyOutcomeCard({
+  diagnosticLookupState,
+  outcome,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  outcome: LegacyImportOutcome;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
   const titleId = `legacy-outcome-${outcome.legacyId}-${outcome.status}`;
   const statusLabel = outcome.status === "success" ? "Imported" : outcome.status === "partial" ? "Imported with copy issue" : "Import failed";
 
@@ -1232,6 +1384,7 @@ function LegacyOutcomeCard({ outcome }: { outcome: LegacyImportOutcome }) {
             <Metric label="Recoverable" value={outcome.error.recoverable ? "yes" : "no"} />
             <Metric label="detailRef" value={outcome.error.detailRef} />
           </dl>
+          <DiagnosticReference detailRef={outcome.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
         </section>
       ) : null}
     </article>
@@ -1282,17 +1435,21 @@ function CreateProfileForm({
 }
 
 function ProfileFeedback({
+  diagnosticLookupState,
   error,
   isLoading,
   lastListSnapshot,
   mutationPhase,
   profileCount,
+  onDiagnosticLookup,
 }: {
+  diagnosticLookupState: DiagnosticLookupState;
   error: ProfileUiError | null;
   isLoading: boolean;
   lastListSnapshot: ProfileListSnapshot | ProfileMutationSnapshot | null;
   mutationPhase: ProfileMutationPhase;
   profileCount: number;
+  onDiagnosticLookup: (detailRef: string) => void;
 }) {
   const message = useMemo(() => {
     if (error) {
@@ -1326,6 +1483,7 @@ function ProfileFeedback({
             <Metric label="Recoverable" value={error.error.recoverable ? "yes" : "no"} />
             <Metric label="detailRef" value={error.error.detailRef} />
           </dl>
+          <DiagnosticReference detailRef={error.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
         </>
       ) : (
         <dl className="metric-list metric-list--inline">
@@ -1369,6 +1527,7 @@ function ProfileLoadRecoveryState({ isBusy, onRetry }: { isBusy: boolean; onRetr
 
 function ProfileCard({
   deleteCandidate,
+  diagnosticLookupState,
   editing,
   isLifecycleActionBusy,
   isProfileBusy,
@@ -1378,6 +1537,7 @@ function ProfileCard({
   onCancelDelete,
   onConfirmDelete,
   onDeleteRequest,
+  onDiagnosticLookup,
   onEditNameChange,
   onLaunch,
   onRefreshStatus,
@@ -1390,6 +1550,7 @@ function ProfileCard({
   runningState,
 }: {
   deleteCandidate: ProfileRecord | null;
+  diagnosticLookupState: DiagnosticLookupState;
   editing: EditingState | null;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
@@ -1399,6 +1560,7 @@ function ProfileCard({
   onCancelDelete: () => void;
   onConfirmDelete: (profile: ProfileRecord) => void;
   onDeleteRequest: (profile: ProfileRecord) => void;
+  onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
   onLaunch: (profile: ProfileRecord) => void;
   onRefreshStatus: () => void;
@@ -1518,6 +1680,7 @@ function ProfileCard({
             <Metric label="Recoverable" value={lifecycleError.error.recoverable ? "yes" : "no"} />
             <Metric label="detailRef" value={lifecycleError.error.detailRef} />
           </dl>
+          <DiagnosticReference detailRef={lifecycleError.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
           <button type="button" className="button--secondary" onClick={retryLifecycle} disabled={disableLifecycleControls}>
             {lifecycleError.action === "status" ? "Retry status refresh" : lifecycleError.action === "stop" ? "Retry stop" : "Retry launch"}
           </button>
@@ -1577,13 +1740,17 @@ function ProfileCard({
 }
 
 function SystemStatusPanel({
+  diagnosticLookupState,
   healthBusyAction,
   healthState,
+  onDiagnosticLookup,
   onRefreshHealth,
   onTriggerDiagnostic,
 }: {
+  diagnosticLookupState: DiagnosticLookupState;
   healthBusyAction: HealthBusyAction;
   healthState: HealthViewState;
+  onDiagnosticLookup: (detailRef: string) => void;
   onRefreshHealth: () => void;
   onTriggerDiagnostic: () => void;
 }) {
@@ -1615,6 +1782,7 @@ function SystemStatusPanel({
             <Metric label="Code" value={healthState.error.code} />
             <Metric label="Source" value={healthState.error.source} />
           </dl>
+          <DiagnosticReference detailRef={healthState.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
         </div>
       ) : null}
 
@@ -1627,6 +1795,123 @@ function SystemStatusPanel({
         </button>
       </div>
     </section>
+  );
+}
+
+function DiagnosticReference({
+  detailRef,
+  state,
+  onLookup,
+}: {
+  detailRef: string;
+  state: DiagnosticLookupState;
+  onLookup: (detailRef: string) => void;
+}) {
+  const isSelected = state.detailRef === detailRef;
+  const isLoading = isSelected && state.phase === "loading";
+
+  return (
+    <div className={`diagnostic-reference ${isSelected ? "diagnostic-reference--selected" : ""}`}>
+      <span>
+        Diagnostic reference <code>{detailRef}</code>
+      </span>
+      <button
+        type="button"
+        className="button--secondary diagnostic-reference__button"
+        onClick={() => onLookup(detailRef)}
+        disabled={isLoading}
+        aria-label={`Lookup diagnostics for ${detailRef}`}
+      >
+        {isLoading ? "Looking up…" : "Lookup diagnostics"}
+      </button>
+    </div>
+  );
+}
+
+function DiagnosticLookupPanel({ state, onRetry }: { state: DiagnosticLookupState; onRetry: () => void }) {
+  const lookupTone = state.phase === "error" ? "error" : state.phase === "loading" ? "pending" : "ready";
+
+  return (
+    <section className={`sidecar-card diagnostic-lookup-card sidecar-card--${lookupTone}`} aria-label="Diagnostic lookup">
+      <div className="sidecar-card__header">
+        <div>
+          <p className="kicker">Diagnostic lookup</p>
+          <h2>{formatDiagnosticLookupHeading(state)}</h2>
+        </div>
+        <span className="mini-phase">{state.phase}</span>
+      </div>
+
+      {state.phase === "idle" ? (
+        <p className="diagnostic-lookup-card__empty">
+          Select a Lookup diagnostics action from a visible error to fetch a bounded, redacted event summary. The app never reads log files directly.
+        </p>
+      ) : null}
+
+      {state.phase === "loading" && state.detailRef ? (
+        <div className="diagnostic-lookup-card__status" role="status" aria-live="polite">
+          Looking up redacted diagnostics for <code>{state.detailRef}</code>…
+        </div>
+      ) : null}
+
+      {state.phase === "error" && state.detailRef && state.error ? (
+        <div className="diagnostic-lookup-card__error" role="status" aria-live="polite">
+          <p>{state.error.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Selected detailRef" value={state.detailRef} />
+            <Metric label="Lookup code" value={state.error.code} />
+            <Metric label="Lookup source" value={state.error.source} />
+            <Metric label="Lookup detailRef" value={state.error.detailRef} />
+            <Metric label="Checked" value={formatProfileTimestamp(state.checkedAt)} />
+          </dl>
+          <button type="button" className="button--secondary" onClick={onRetry} aria-label={`Retry diagnostics lookup for ${state.detailRef}`}>
+            Retry diagnostics lookup
+          </button>
+        </div>
+      ) : null}
+
+      {state.phase === "ready" && state.result ? (
+        <div className="diagnostic-lookup-card__result" aria-live="polite">
+          <p>{formatDiagnosticLookupReason(state.result)}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="detailRef" value={state.result.detailRef} />
+            <Metric label="Reason" value={state.result.reason} />
+            <Metric label="Log path" value={state.result.logPath ?? "No durable diagnostic log"} />
+            <Metric label="Checked" value={formatProfileTimestamp(state.checkedAt)} />
+            <Metric label="Entries" value={state.result.entries.length} />
+          </dl>
+
+          {state.result.entries.length ? (
+            <div className="diagnostic-entry-list" role="list" aria-label={`Diagnostic events for ${state.result.detailRef}`}>
+              {state.result.entries.map((entry, index) => (
+                <DiagnosticEntrySummary key={`${entry.detailRef}-${entry.event}-${entry.ts}-${index}`} entry={entry} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function DiagnosticEntrySummary({ entry }: { entry: DiagnosticEntry }) {
+  return (
+    <article className="diagnostic-entry" role="listitem">
+      <strong>{entry.event}</strong>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Source" value={entry.source} />
+        <Metric label="Status" value={entry.status} />
+        <Metric label="Method" value={entry.method} />
+        <Metric label="Error code" value={entry.errorCode} />
+        <Metric label="Request" value={entry.requestId === undefined ? undefined : String(entry.requestId)} />
+        <Metric label="Duration" value={formatDiagnosticDuration(entry.durationMs)} />
+        <Metric label="Occurred" value={formatProfileTimestamp(entry.ts)} />
+        <Metric label="Log path" value={entry.logPath} />
+        {"context" in entry ? <Metric label="Legacy ID" value={entry.context?.legacyId} /> : null}
+        {"exitCode" in entry ? <Metric label="Exit code" value={entry.exitCode === null ? "not available" : entry.exitCode} /> : null}
+        {"stdoutLines" in entry ? <Metric label="Stdout lines" value={entry.stdoutLines} /> : null}
+        {"stderrLines" in entry ? <Metric label="Stderr lines" value={entry.stderrLines} /> : null}
+      </dl>
+    </article>
   );
 }
 
@@ -1779,6 +2064,43 @@ function makeLegacyUiError(code: string, message: string): SidecarClientError {
     source: "ui",
     phase: "recoverable-error",
   };
+}
+
+function formatDiagnosticLookupHeading(state: DiagnosticLookupState): string {
+  if (state.phase === "idle") {
+    return "No diagnostic reference selected.";
+  }
+  if (state.phase === "loading") {
+    return "Looking up redacted diagnostics.";
+  }
+  if (state.phase === "error") {
+    return "Diagnostic lookup failed safely.";
+  }
+  if (state.result?.found) {
+    return "Diagnostic events found.";
+  }
+
+  return "No persisted event found.";
+}
+
+function formatDiagnosticLookupReason(result: DiagnosticLookupResult): string {
+  if (result.found) {
+    return "Persisted diagnostic event summaries matched this detailRef.";
+  }
+
+  if (result.reason === "ui-local") {
+    return "UI-local reference: no durable diagnostic log is available for this browser-local detailRef.";
+  }
+
+  if (result.reason === "not-persisted") {
+    return "No persisted diagnostic event matched this detailRef yet. Retry after the sidecar writes its bounded event summary.";
+  }
+
+  return "The diagnostics store reported this detailRef as invalid or unavailable without exposing raw log text.";
+}
+
+function formatDiagnosticDuration(value: number | undefined): string {
+  return typeof value === "number" ? `${value.toFixed(2)} ms` : "Unavailable";
 }
 
 function formatValue(value: string | number | null | undefined): string {

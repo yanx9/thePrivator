@@ -15,7 +15,8 @@
     "verify:s01": "node scripts/verify-s01.mjs",
     "verify:s01:packaged": "node scripts/verify-s01.mjs --package-artifacts-only",
     "verify:s03": "node scripts/verify-s03.mjs",
-    "verify:s04": "node scripts/verify-s04.mjs"
+    "verify:s04": "node scripts/verify-s04.mjs",
+    "verify:s05": "node scripts/verify-s05.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

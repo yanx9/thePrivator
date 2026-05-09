@@ -424,10 +424,11 @@ function runLegacySmoke(binaryPath) {
       assert(diagnosticCodes.has(expectedCode), "Import outcome diagnostic missing expected error code.", { expectedCode, outcomeDiagnostics });
     }
     for (const event of outcomeDiagnostics) {
-      assert(Object.keys(event).sort().join(",") === "detailRef,errorCode,event,legacyId,status", "Outcome diagnostic leaked forbidden fields.", event);
+      assert(Object.keys(event).sort().join(",") === "detailRef,durationMs,errorCode,event,legacyId,status", "Outcome diagnostic leaked forbidden fields.", event);
       assert(event.event === "legacy.import.outcome", "Outcome diagnostic event name mismatch.", event);
       assert(event.legacyId?.startsWith("legacy-"), "Outcome diagnostic legacyId is not opaque.", event);
       assert(event.status === "partial" || event.status === "failed", "Outcome diagnostic status mismatch.", event);
+      assert(typeof event.durationMs === "number" && event.durationMs >= 0, "Outcome diagnostic duration missing.", event);
       assert(typeof event.detailRef === "string" && event.detailRef.startsWith("sidecar-"), "Outcome diagnostic lost detailRef.", event);
     }
 
