@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
 from . import chromium, legacy_import
 from .diagnostics import append_events
+from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
 from .profiles import ProfileStore, require_string_param
 from .protocol import (
     DIAGNOSTIC_FAILURE,
@@ -157,6 +158,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
             method=request.method,
         )
 
+    if request.method.startswith("identity."):
+        return dispatch_identity_request(request)
+
     if request.method.startswith("profiles."):
         return dispatch_profile_request(request)
 
@@ -172,6 +176,40 @@ def dispatch(request: SidecarRequest) -> JsonObject:
         request_id=request.id,
         method=request.method,
     )
+
+
+def dispatch_identity_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch sidecar-owned identity validation and preset commands."""
+    try:
+        if request.method == "identity.presets.list":
+            presets = [curated_preset(preset_id) for preset_id in sorted(IDENTITY_PRESETS)]
+            return {
+                "identityVersion": IDENTITY_VERSION,
+                "presets": presets,
+                "count": len(presets),
+            }
+
+        if request.method == "identity.validate":
+            normalized = validate_identity(request.params.get("identity"))
+            return {
+                "identityVersion": IDENTITY_VERSION,
+                "identity": normalized,
+                "warnings": warnings_for_identity(normalized),
+            }
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
 
 
 def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
@@ -212,6 +250,25 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
                 "Profile id is required.",
             )
             return store.delete(profile_id)
+        if request.method == "profiles.identity.applyPreset":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            preset_id = require_string_param(
+                request.params,
+                "presetId",
+                "Identity preset id is required.",
+            )
+            return store.apply_identity_preset(profile_id, preset_id)
+        if request.method == "profiles.identity.update":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            return store.update_identity(profile_id, request.params.get("identity"))
 
         raise SidecarError(
             code=UNKNOWN_COMMAND,

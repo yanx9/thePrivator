@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,7 +43,34 @@ function readTargetTriple() {
   }
 }
 
-function parseNdjsonLines(streamName, value, expectedCount) {
+function redactText(value, sensitiveValues = []) {
+  let redacted = String(value ?? "");
+  for (const sensitive of sensitiveValues) {
+    if (typeof sensitive === "string" && sensitive.length > 0) {
+      redacted = redacted.split(sensitive).join("<redacted>");
+    }
+  }
+  return redacted
+    .replace(/--remote-debugging-port(?:=|\s+)\d+/gi, "--remote-debugging-port=<redacted>")
+    .replace(/debugPort[\"':\s=]+\d+/gi, "debugPort=<redacted>")
+    .replace(/9222/g, "<redacted-port>");
+}
+
+function redactedTail(value, sensitiveValues = [], maxLength = 600) {
+  const text = redactText(value, sensitiveValues);
+  return text.length > maxLength ? text.slice(-maxLength) : text;
+}
+
+function redactedProcessDetails(result, sensitiveValues = []) {
+  return {
+    status: result.status,
+    signal: result.signal,
+    stdoutTail: redactedTail(result.stdout, sensitiveValues),
+    stderrTail: redactedTail(result.stderr, sensitiveValues),
+  };
+}
+
+function parseNdjsonLines(streamName, value, expectedCount, sensitiveValues = []) {
   const lines = value
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -51,7 +79,10 @@ function parseNdjsonLines(streamName, value, expectedCount) {
   if (lines.length !== expectedCount) {
     fail(
       `${streamName} emitted ${lines.length} NDJSON line(s), expected ${expectedCount}.`,
-      `${streamName}LineCount=${lines.length}`,
+      {
+        [`${streamName}LineCount`]: lines.length,
+        [`${streamName}Tail`]: redactedTail(value, sensitiveValues),
+      },
     );
   }
 
@@ -59,7 +90,10 @@ function parseNdjsonLines(streamName, value, expectedCount) {
     try {
       return JSON.parse(line);
     } catch (error) {
-      fail(`${streamName} line ${index + 1} is not valid JSON.`, error.message);
+      fail(`${streamName} line ${index + 1} is not valid JSON.`, {
+        parserMessage: error.message,
+        [`${streamName}Tail`]: redactedTail(value, sensitiveValues),
+      });
     }
   });
 }
@@ -111,13 +145,7 @@ function assertTargetBinary(binaryPath, targetTriple) {
   };
 }
 
-function runSidecarSmoke(binaryPath) {
-  const input = [
-    JSON.stringify({ id: "verify-health", method: "health.status", params: {} }),
-    JSON.stringify({ id: "verify-error", method: "diagnostics.fail", params: {} }),
-    "{ invalid json",
-  ].join("\n") + "\n";
-
+function runSidecarRaw(binaryPath, input, expectedStdoutCount, expectedStderrCount, sensitiveValues = []) {
   const result = spawnSync(binaryPath, {
     cwd: ROOT_DIR,
     input,
@@ -128,18 +156,69 @@ function runSidecarSmoke(binaryPath) {
 
   if (result.error) {
     if (result.error.code === "ETIMEDOUT") {
-      fail("Sidecar smoke timed out and the child process was killed.", result.error.message);
+      fail("Sidecar smoke timed out and the child process was killed.", {
+        error: result.error.message,
+        ...redactedProcessDetails(result, sensitiveValues),
+      });
     }
-    fail("Sidecar smoke process failed.", result.error.message);
+    fail("Sidecar smoke process failed.", {
+      error: result.error.message,
+      ...redactedProcessDetails(result, sensitiveValues),
+    });
   }
 
   if (result.status !== 0) {
-    fail(`Sidecar exited with status ${result.status ?? "unknown"}.`, "Expected status 0.");
+    fail(`Sidecar exited with status ${result.status ?? "unknown"}.`, {
+      expectedStatus: 0,
+      ...redactedProcessDetails(result, sensitiveValues),
+    });
   }
 
-  const stdoutEvents = parseNdjsonLines("stdout", result.stdout, 3);
-  const stderrEvents = parseNdjsonLines("stderr", result.stderr, 3);
-  return { stdoutEvents, stderrEvents };
+  const stdoutEvents = parseNdjsonLines(
+    "stdout",
+    result.stdout,
+    expectedStdoutCount,
+    sensitiveValues,
+  );
+  const stderrEvents = parseNdjsonLines(
+    "stderr",
+    result.stderr,
+    expectedStderrCount,
+    sensitiveValues,
+  );
+
+  return {
+    stdoutEvents,
+    stderrEvents,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+function runSidecarRequest(binaryPath, payload, sensitiveValues = []) {
+  const result = runSidecarRaw(
+    binaryPath,
+    `${JSON.stringify(payload)}\n`,
+    1,
+    1,
+    sensitiveValues,
+  );
+  return {
+    response: result.stdoutEvents[0],
+    diagnostic: result.stderrEvents[0],
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+function runSidecarInvalidInput(binaryPath, sensitiveValues = []) {
+  const result = runSidecarRaw(binaryPath, "{ invalid json\n", 1, 1, sensitiveValues);
+  return {
+    response: result.stdoutEvents[0],
+    diagnostic: result.stderrEvents[0],
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
 }
 
 function assertHealthEnvelope(health, healthLog) {
@@ -193,8 +272,64 @@ function assertInvalidInputEnvelope(invalidInput, invalidLog) {
   return { errorCode: invalidInput.error.code };
 }
 
-function assertDiagnosticLogs(stderrEvents) {
-  for (const [index, event] of stderrEvents.entries()) {
+function assertProfileCreateEnvelope(response, diagnostic, profileName) {
+  assert(response.id === "verify-profile-create", "Profile create did not echo request id.");
+  assert(response.ok === true, "Profile create did not return ok:true.");
+  assert(response.result?.storeVersion === 2, "Profile create did not return storeVersion 2.");
+  assert(response.result?.profile?.id, "Profile create is missing profile id.");
+  assert(response.result?.profile?.name === profileName, "Profile create returned the wrong profile name.");
+  assert(
+    response.result?.profile?.identity?.identityVersion === 1,
+    "Profile create is missing default identity v1.",
+  );
+  assert(diagnostic.status === "ok", "Profile create diagnostic did not report ok status.");
+  assert(diagnostic.errorCode === null, "Profile create diagnostic should not include an error code.");
+  return { profileId: response.result.profile.id, storeVersion: response.result.storeVersion };
+}
+
+function assertPresetListEnvelope(response, diagnostic) {
+  assert(response.id === "verify-identity-presets", "Preset list did not echo request id.");
+  assert(response.ok === true, "Preset list did not return ok:true.");
+  assert(response.result?.identityVersion === 1, "Preset list did not return identityVersion 1.");
+  assert(Array.isArray(response.result?.presets), "Preset list did not return presets array.");
+  assert(response.result.count === response.result.presets.length, "Preset list count mismatch.");
+  const presetIds = response.result.presets.map((preset) => preset.presetId);
+  assert(
+    presetIds.includes("windows-10-chrome-120"),
+    "Preset list did not include windows-10-chrome-120.",
+  );
+  assert(diagnostic.status === "ok", "Preset list diagnostic did not report ok status.");
+  return { presetId: "windows-10-chrome-120", presetCount: response.result.count };
+}
+
+function assertApplyPresetEnvelope(response, diagnostic, presetId) {
+  assert(response.id === "verify-identity-apply", "Identity apply did not echo request id.");
+  assert(response.ok === true, "Identity apply did not return ok:true.");
+  assert(response.result?.storeVersion === 2, "Identity apply did not return storeVersion 2.");
+  assert(Array.isArray(response.result?.warnings), "Identity apply did not return warnings array.");
+  assert(response.result.warnings.length === 0, "Curated preset apply should not warn.");
+  assert(
+    response.result?.profile?.identity?.presetId === presetId,
+    "Identity apply did not persist the selected preset id.",
+  );
+  assert(diagnostic.status === "ok", "Identity apply diagnostic did not report ok status.");
+  return { presetId: response.result.profile.identity.presetId };
+}
+
+function assertInvalidIdentityEnvelope(response, diagnostic) {
+  assert(response.id === "verify-identity-invalid", "Invalid identity did not echo request id.");
+  assert(response.ok === false, "Invalid identity did not return ok:false.");
+  assert(response.error?.code === "IDENTITY_INVALID", "Invalid identity did not return IDENTITY_INVALID.");
+  assert(response.error?.recoverable === true, "Invalid identity error is not recoverable.");
+  assert(response.error?.detailRef, "Invalid identity error is missing detailRef.");
+  assert(diagnostic.status === "error", "Invalid identity diagnostic did not report error status.");
+  assert(diagnostic.errorCode === "IDENTITY_INVALID", "Invalid identity diagnostic lost errorCode.");
+  assert(diagnostic.detailRef === response.error.detailRef, "Invalid identity detailRef mismatch.");
+  return { errorCode: response.error.code };
+}
+
+function assertDiagnosticLogs(diagnostics) {
+  for (const [index, event] of diagnostics.entries()) {
     assert(event.event === "sidecar.request", `stderr event ${index + 1} has the wrong event name.`);
     assert("requestId" in event, `stderr event ${index + 1} is missing requestId.`);
     assert("method" in event, `stderr event ${index + 1} is missing method.`);
@@ -204,7 +339,22 @@ function assertDiagnosticLogs(stderrEvents) {
     assert("detailRef" in event, `stderr event ${index + 1} is missing detailRef.`);
     assert(!("params" in event), `stderr event ${index + 1} leaked request params.`);
   }
-  return { diagnosticLines: stderrEvents.length };
+  return { diagnosticLines: diagnostics.length };
+}
+
+function assertRedactedSmokeOutput(transcripts, { storeRoot, profileName }) {
+  const stdout = transcripts.map((item) => item.stdout).join("\n");
+  const stderr = transcripts.map((item) => item.stderr).join("\n");
+  const combined = `${stdout}\n${stderr}`;
+
+  assert(!combined.includes(storeRoot), "Smoke output leaked the temporary app-data root.");
+  assert(!stderr.includes(profileName), "Smoke diagnostics leaked the profile name.");
+  assert(!stderr.includes("params"), "Smoke diagnostics leaked raw params.");
+  assert(!combined.includes("--remote-debugging-port"), "Smoke output leaked debug-port command details.");
+  assert(!combined.includes("debugPort"), "Smoke output leaked debugPort details.");
+  assert(!combined.includes("9222"), "Smoke output leaked debug-port value.");
+  assert(!combined.includes("Traceback"), "Smoke output leaked a Python traceback.");
+  return { transcriptCount: transcripts.length };
 }
 
 try {
@@ -222,20 +372,127 @@ try {
   );
 
   runStep("target-binary", () => assertTargetBinary(binaryPath, targetTriple));
-  const { stdoutEvents, stderrEvents } = runStep("sidecar-ndjson", () => {
-    const result = runSidecarSmoke(binaryPath);
-    return {
-      value: result,
-      log: {
-        stdoutLines: result.stdoutEvents.length,
-        stderrLines: result.stderrEvents.length,
-      },
+
+  const storeRoot = mkdtempSync(join(tmpdir(), "theprivator-sidecar-smoke-"));
+  const profileName = "Smoke Profile Should Not Leak";
+  const sensitiveValues = [storeRoot, profileName, "debugPort", "9222", "--remote-debugging-port=9222"];
+  const transcripts = [];
+  const diagnostics = [];
+
+  try {
+    const health = runStep("health-envelope", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        { id: "verify-health", method: "health.status", params: {} },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    runStep("health-assertions", () => assertHealthEnvelope(health.response, health.diagnostic));
+
+    const deliberateError = runStep("deliberate-error-envelope", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        { id: "verify-error", method: "diagnostics.fail", params: {} },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    runStep("deliberate-error-assertions", () =>
+      assertDeliberateErrorEnvelope(deliberateError.response, deliberateError.diagnostic),
+    );
+
+    const invalidInput = runStep("invalid-input-envelope", () => {
+      const result = runSidecarInvalidInput(binaryPath, sensitiveValues);
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { errorCode: result.response.error?.code } };
+    });
+    runStep("invalid-input-assertions", () =>
+      assertInvalidInputEnvelope(invalidInput.response, invalidInput.diagnostic),
+    );
+
+    const created = runStep("profile-create", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        {
+          id: "verify-profile-create",
+          method: "profiles.create",
+          params: { storeRoot, name: profileName },
+        },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    const { profileId } = runStep("profile-create-assertions", () =>
+      assertProfileCreateEnvelope(created.response, created.diagnostic, profileName),
+    );
+
+    const presets = runStep("identity-presets-list", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        { id: "verify-identity-presets", method: "identity.presets.list", params: {} },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    const { presetId } = runStep("identity-presets-assertions", () =>
+      assertPresetListEnvelope(presets.response, presets.diagnostic),
+    );
+
+    const applied = runStep("identity-apply-preset", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        {
+          id: "verify-identity-apply",
+          method: "profiles.identity.applyPreset",
+          params: { storeRoot, profileId, presetId },
+        },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    runStep("identity-apply-assertions", () =>
+      assertApplyPresetEnvelope(applied.response, applied.diagnostic, presetId),
+    );
+
+    const invalidIdentity = {
+      ...applied.response.result.profile.identity,
+      debugPort: 9222,
     };
-  });
-  runStep("health-envelope", () => assertHealthEnvelope(stdoutEvents[0], stderrEvents[0]));
-  runStep("deliberate-error-envelope", () => assertDeliberateErrorEnvelope(stdoutEvents[1], stderrEvents[1]));
-  runStep("invalid-input-envelope", () => assertInvalidInputEnvelope(stdoutEvents[2], stderrEvents[2]));
-  runStep("redacted-diagnostic-logs", () => assertDiagnosticLogs(stderrEvents));
+    const invalidIdentityResult = runStep("identity-invalid-update", () => {
+      const result = runSidecarRequest(
+        binaryPath,
+        {
+          id: "verify-identity-invalid",
+          method: "profiles.identity.update",
+          params: { storeRoot, profileId, identity: invalidIdentity },
+        },
+        sensitiveValues,
+      );
+      transcripts.push(result);
+      diagnostics.push(result.diagnostic);
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    runStep("identity-invalid-assertions", () =>
+      assertInvalidIdentityEnvelope(invalidIdentityResult.response, invalidIdentityResult.diagnostic),
+    );
+
+    runStep("diagnostic-log-shape", () => assertDiagnosticLogs(diagnostics));
+    runStep("redacted-smoke-output", () => assertRedactedSmokeOutput(transcripts, { storeRoot, profileName }));
+  } finally {
+    rmSync(storeRoot, { recursive: true, force: true });
+  }
 
   emit({ status: "pass", checks: STEP_RESULTS });
 } catch {

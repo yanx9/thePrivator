@@ -138,6 +138,45 @@ pub async fn sidecar_diagnostic_failure(
 }
 
 #[tauri::command]
+pub async fn identity_presets_list(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let runner = TauriSidecarRunner::new(app);
+    identity_presets_list_with_runner(&runner).await
+}
+
+#[tauri::command]
+pub async fn identity_validate(
+    app: tauri::AppHandle,
+    identity: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let runner = TauriSidecarRunner::new(app);
+    identity_validate_with_runner(&runner, identity).await
+}
+
+#[tauri::command]
+pub async fn profiles_identity_apply_preset(
+    app: tauri::AppHandle,
+    profile_id: String,
+    preset_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_identity_apply_preset_with_runner(&runner, store_root, profile_id, preset_id).await
+}
+
+#[tauri::command]
+pub async fn profiles_identity_update(
+    app: tauri::AppHandle,
+    profile_id: String,
+    identity: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_identity_update_with_runner(&runner, store_root, profile_id, identity).await
+}
+
+#[tauri::command]
 pub async fn profiles_list(
     app: tauri::AppHandle,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
@@ -237,6 +276,62 @@ pub async fn sidecar_diagnostic_failure_with_runner<R: SidecarRunner>(
     runner: &R,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     invoke_fixed_method(runner, "diagnostics.fail").await
+}
+
+pub async fn identity_presets_list_with_runner<R: SidecarRunner>(
+    runner: &R,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_fixed_method(runner, "identity.presets.list").await
+}
+
+pub async fn identity_validate_with_runner<R: SidecarRunner>(
+    runner: &R,
+    identity: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "identity.validate",
+        json!({
+            "identity": identity,
+        }),
+    )
+    .await
+}
+
+async fn profiles_identity_apply_preset_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    preset_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.identity.applyPreset",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "presetId": preset_id,
+        }),
+    )
+    .await
+}
+
+async fn profiles_identity_update_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    identity: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.identity.update",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "identity": identity,
+        }),
+    )
+    .await
 }
 
 async fn profiles_list_with_runner<R: SidecarRunner>(
@@ -918,6 +1013,7 @@ mod tests {
     #[derive(Clone)]
     enum FakeMode {
         HealthSuccess,
+        SuccessResult(Value),
         TypedError {
             code: &'static str,
             message: &'static str,
@@ -999,6 +1095,13 @@ mod tests {
                     "protocolVersion": "1.0.0",
                     "durationMs": 1.25,
                     "result": { "status": "healthy" }
+                }))),
+                FakeMode::SuccessResult(result) => Ok(output_with_stdout(json!({
+                    "id": request_id,
+                    "ok": true,
+                    "protocolVersion": "1.0.0",
+                    "durationMs": 1.25,
+                    "result": result.clone()
                 }))),
                 FakeMode::TypedError {
                     code,
@@ -1109,6 +1212,47 @@ mod tests {
         runner: &FakeRunner,
     ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
         tauri::async_runtime::block_on(sidecar_diagnostic_failure_with_runner(runner))
+    }
+
+    fn run_identity_presets_list(
+        runner: &FakeRunner,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_presets_list_with_runner(runner))
+    }
+
+    fn run_identity_validate(
+        runner: &FakeRunner,
+        identity: Value,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_validate_with_runner(runner, identity))
+    }
+
+    fn run_profiles_identity_apply_preset(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        preset_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_identity_apply_preset_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            preset_id.to_string(),
+        ))
+    }
+
+    fn run_profiles_identity_update(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        identity: Value,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_identity_update_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            identity,
+        ))
     }
 
     fn run_profiles_list(
@@ -1379,6 +1523,139 @@ mod tests {
         assert!(error.recoverable);
         assert_eq!(error.detail_ref, "sidecar-test-detail");
         assert_eq!(runner.last_request()["method"], "diagnostics.fail");
+    }
+
+    #[test]
+    fn identity_presets_list_request_uses_empty_params() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_identity_presets_list(&runner).expect("identity preset list reaches sidecar");
+
+        let request = runner.last_request();
+        assert_eq!(request["method"], "identity.presets.list");
+        assert!(request["params"]
+            .as_object()
+            .expect("params object")
+            .is_empty());
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn identity_validate_request_passes_identity_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let identity = json!({
+            "identityVersion": 1,
+            "label": "Real identity",
+            "presetId": null,
+            "browser": { "mode": "real" },
+            "navigator": { "mode": "real" },
+            "screen": { "mode": "real" },
+            "locale": { "mode": "real" },
+            "canvas": { "mode": "real" },
+            "audio": { "mode": "real" },
+            "webgl": { "mode": "real" },
+            "webrtc": { "mode": "real", "policy": "real" }
+        });
+
+        run_identity_validate(&runner, identity.clone()).expect("identity validate reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(&request, "identity.validate", &[("identity", identity)]);
+    }
+
+    #[test]
+    fn profiles_identity_apply_preset_injects_store_root_profile_id_and_preset_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_identity_apply_preset(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "windows-10-chrome-120",
+        )
+        .expect("identity preset apply reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.identity.applyPreset",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("presetId", json!("windows-10-chrome-120")),
+            ],
+        );
+    }
+
+    #[test]
+    fn profiles_identity_update_injects_store_root_profile_id_and_identity_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let identity = json!({ "identityVersion": 1, "label": "Custom" });
+
+        run_profiles_identity_update(&runner, "/app/data/root", "profile-id", identity.clone())
+            .expect("identity update reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.identity.update",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("identity", identity),
+            ],
+        );
+    }
+
+    #[test]
+    fn identity_warning_payloads_pass_through_success_envelopes() {
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({
+            "identityVersion": 1,
+            "identity": { "identityVersion": 1, "label": "Suspicious" },
+            "warnings": [
+                {
+                    "code": "IDENTITY_UNUSUAL_CPU",
+                    "message": "Hardware concurrency is valid but uncommon for desktop Chromium.",
+                    "surface": "navigator",
+                    "path": "navigator.hardwareConcurrency"
+                }
+            ]
+        })));
+
+        let result = run_identity_validate(&runner, json!({ "identityVersion": 1 }))
+            .expect("identity validate warnings pass through");
+
+        assert_eq!(result.result["warnings"][0]["code"], "IDENTITY_UNUSUAL_CPU");
+        assert_eq!(runner.last_request()["method"], "identity.validate");
+    }
+
+    #[test]
+    fn identity_typed_error_is_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "IDENTITY_INVALID",
+            message: "Identity payload must be a JSON object.",
+            detail_ref: "identity-invalid-detail",
+        });
+
+        let error = run_identity_validate(&runner, json!("not-an-object"))
+            .expect_err("identity invalid error surfaces");
+
+        assert_eq!(error.code, "IDENTITY_INVALID");
+        assert_eq!(error.message, "Identity payload must be a JSON object.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "identity-invalid-detail");
+        assert_eq!(runner.last_request()["method"], "identity.validate");
+    }
+
+    #[test]
+    fn identity_mismatched_request_id_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::MismatchedId);
+
+        let error = run_identity_presets_list(&runner)
+            .expect_err("identity mismatched id surfaces as protocol error");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "identity.presets.list");
     }
 
     #[test]

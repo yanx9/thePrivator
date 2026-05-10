@@ -1,5 +1,6 @@
 """Contract tests for the ThePrivator Python sidecar NDJSON protocol."""
 
+import copy
 import json
 import os
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from theprivator import __version__ as app_version
-from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -77,6 +78,36 @@ def make_fake_chromium(tmp_path):
     )
     script.chmod(0o755)
     return script
+
+
+def with_identity_change(identity, path, value):
+    changed = copy.deepcopy(identity)
+    target = changed
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return changed
+
+
+def warning_codes(result):
+    warnings = result["warnings"]
+    for warning in warnings:
+        assert set(warning) == {"code", "message", "surface", "path"}
+        assert warning["code"].startswith("IDENTITY_")
+        assert warning["message"]
+        assert warning["path"].startswith(warning["surface"])
+    return {warning["code"] for warning in warnings}
+
+
+def assert_redacted_stderr(*procs, store_root, profile_name=None):
+    stderr = "".join(proc.stderr for proc in procs)
+    assert store_root not in stderr
+    if profile_name is not None:
+        assert profile_name not in stderr
+    assert "params" not in stderr
+    assert "debugPort" not in stderr
+    assert "9222" not in stderr
+    assert "Traceback" not in stderr
 
 
 def test_health_status_success_returns_runtime_metadata_and_diagnostics():
@@ -298,6 +329,247 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     assert delete_response["result"] == {"storeVersion": 2, "profiles": [], "count": 0}
 
 
+def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_diagnostics(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    profile_name = "Identity Profile Should Not Leak"
+
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": profile_name},
+            }
+        )
+    )
+    create_response = parse_ndjson(create_proc.stdout)[0]
+    assert create_response["ok"] is True
+    assert create_response["result"]["storeVersion"] == 2
+    profile = create_response["result"]["profile"]
+    assert profile["identity"] == DEFAULT_REAL_IDENTITY
+
+    presets_proc = run_sidecar(
+        request_line({"id": "identity-presets", "method": "identity.presets.list", "params": {}})
+    )
+    presets_response = parse_ndjson(presets_proc.stdout)[0]
+    assert presets_response["ok"] is True
+    presets_result = presets_response["result"]
+    assert presets_result["identityVersion"] == 1
+    assert presets_result["count"] == len(presets_result["presets"])
+    preset_ids = [preset["presetId"] for preset in presets_result["presets"]]
+    assert preset_ids == sorted(preset_ids)
+    assert {"windows-10-chrome-120", "macos-ventura-chrome-120"} <= set(preset_ids)
+
+    suspicious_identity = with_identity_change(
+        with_identity_change(curated_preset("windows-10-chrome-120"), ["screen", "width"], 900),
+        ["screen", "height"],
+        1440,
+    )
+    validate_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-validate",
+                "method": "identity.validate",
+                "params": {"identity": suspicious_identity},
+            }
+        )
+    )
+    validate_response = parse_ndjson(validate_proc.stdout)[0]
+    assert validate_response["ok"] is True
+    assert validate_response["result"]["identity"] == suspicious_identity
+    assert "IDENTITY_DESKTOP_PORTRAIT_SCREEN" in warning_codes(validate_response["result"])
+
+    apply_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-apply-preset",
+                "method": "profiles.identity.applyPreset",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "presetId": "macos-ventura-chrome-120",
+                },
+            }
+        )
+    )
+    apply_response = parse_ndjson(apply_proc.stdout)[0]
+    assert apply_response["ok"] is True
+    assert apply_response["result"]["warnings"] == []
+    assert apply_response["result"]["profile"]["identity"] == curated_preset("macos-ventura-chrome-120")
+
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-update",
+                "method": "profiles.identity.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "identity": suspicious_identity,
+                },
+            }
+        )
+    )
+    update_response = parse_ndjson(update_proc.stdout)[0]
+    assert update_response["ok"] is True
+    assert update_response["result"]["profile"]["identity"] == suspicious_identity
+    assert "IDENTITY_DESKTOP_PORTRAIT_SCREEN" in warning_codes(update_response["result"])
+
+    reload_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-reload",
+                "method": "profiles.list",
+                "params": {"storeRoot": store_root},
+            }
+        )
+    )
+    reload_response = parse_ndjson(reload_proc.stdout)[0]
+    assert reload_response["ok"] is True
+    assert reload_response["result"]["profiles"][0]["identity"] == suspicious_identity
+
+    assert_redacted_stderr(
+        create_proc,
+        presets_proc,
+        validate_proc,
+        apply_proc,
+        update_proc,
+        reload_proc,
+        store_root=store_root,
+        profile_name=profile_name,
+    )
+
+
+def test_identity_commands_return_typed_errors_without_persisting_bad_shapes_or_leaking_params(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    profile_name = "Invalid Identity Should Not Leak"
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-error-profile",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": profile_name},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    invalid_mode_identity = with_identity_change(
+        curated_preset("windows-10-chrome-120"), ["browser", "mode"], "noise"
+    )
+    debug_port_identity = {**curated_preset("windows-10-chrome-120"), "debugPort": 9222}
+
+    cases = [
+        (
+            {
+                "id": "identity-validate-non-object",
+                "method": "identity.validate",
+                "params": {"identity": "not-an-object"},
+            },
+            "IDENTITY_INVALID",
+        ),
+        (
+            {
+                "id": "identity-apply-missing-preset",
+                "method": "profiles.identity.applyPreset",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "presetId": "missing-preset",
+                },
+            },
+            "IDENTITY_PRESET_NOT_FOUND",
+        ),
+        (
+            {
+                "id": "identity-update-invalid-mode",
+                "method": "profiles.identity.update",
+                "params": {"storeRoot": store_root, "profileId": profile["id"], "identity": invalid_mode_identity},
+            },
+            "IDENTITY_UNSUPPORTED_MODE",
+        ),
+        (
+            {
+                "id": "identity-update-debug-port",
+                "method": "profiles.identity.update",
+                "params": {"storeRoot": store_root, "profileId": profile["id"], "identity": debug_port_identity},
+            },
+            "IDENTITY_INVALID",
+        ),
+        (
+            {
+                "id": "identity-update-missing-profile",
+                "method": "profiles.identity.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": "missing-profile",
+                    "identity": curated_preset("windows-10-chrome-120"),
+                },
+            },
+            "PROFILE_NOT_FOUND",
+        ),
+    ]
+
+    procs = []
+    for payload, expected_code in cases:
+        proc = run_sidecar(request_line(payload))
+        procs.append(proc)
+        response = parse_ndjson(proc.stdout)[0]
+        diagnostic = parse_ndjson(proc.stderr)[0]
+        error = assert_error_envelope(response, expected_code, payload["id"])
+        assert diagnostic["event"] == "sidecar.request"
+        assert diagnostic["method"] == payload["method"]
+        assert diagnostic["status"] == "error"
+        assert diagnostic["errorCode"] == expected_code
+        assert diagnostic["detailRef"] == error["detailRef"]
+
+    reload_proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-error-reload",
+                "method": "profiles.list",
+                "params": {"storeRoot": store_root},
+            }
+        )
+    )
+    assert parse_ndjson(reload_proc.stdout)[0]["result"]["profiles"][0]["identity"] == DEFAULT_REAL_IDENTITY
+    assert_redacted_stderr(
+        create_proc,
+        *procs,
+        reload_proc,
+        store_root=store_root,
+        profile_name=profile_name,
+    )
+
+
+def test_profile_identity_command_corrupt_store_surfaces_existing_typed_error(tmp_path):
+    store_root = tmp_path / "corrupt-app-data-path-should-not-leak"
+    store_file = store_root / "profile-store" / "profiles.json"
+    store_file.parent.mkdir(parents=True)
+    store_file.write_text("{not-json", encoding="utf-8")
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "identity-corrupt-store",
+                "method": "profiles.identity.applyPreset",
+                "params": {
+                    "storeRoot": str(store_root),
+                    "profileId": "missing-profile",
+                    "presetId": "windows-10-chrome-120",
+                },
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "PROFILE_STORE_CORRUPT", "identity-corrupt-store")
+    assert diagnostic["errorCode"] == "PROFILE_STORE_CORRUPT"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    assert str(store_root) not in proc.stderr
+    assert "Traceback" not in proc.stdout + proc.stderr
+
+
 def test_profiles_diagnostics_are_redacted_even_when_stdout_contains_profile_data(tmp_path):
     store_root = str(tmp_path / "app-data-path-should-not-leak")
     profile_name = "Visible Profile Name"
@@ -421,6 +693,46 @@ def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_
             "id": "chromium-blank-profile",
             "method": "chromium.stop",
             "params": {"storeRoot": "root", "profileId": "   "},
+        },
+        {
+            "id": "identity-apply-missing-store",
+            "method": "profiles.identity.applyPreset",
+            "params": {"profileId": "profile-id", "presetId": "windows-10-chrome-120"},
+        },
+        {
+            "id": "identity-apply-bad-store",
+            "method": "profiles.identity.applyPreset",
+            "params": {"storeRoot": 42, "profileId": "profile-id", "presetId": "windows-10-chrome-120"},
+        },
+        {
+            "id": "identity-apply-missing-profile",
+            "method": "profiles.identity.applyPreset",
+            "params": {"storeRoot": "root", "presetId": "windows-10-chrome-120"},
+        },
+        {
+            "id": "identity-apply-blank-profile",
+            "method": "profiles.identity.applyPreset",
+            "params": {"storeRoot": "root", "profileId": "   ", "presetId": "windows-10-chrome-120"},
+        },
+        {
+            "id": "identity-apply-missing-preset",
+            "method": "profiles.identity.applyPreset",
+            "params": {"storeRoot": "root", "profileId": "profile-id"},
+        },
+        {
+            "id": "identity-apply-bad-preset",
+            "method": "profiles.identity.applyPreset",
+            "params": {"storeRoot": "root", "profileId": "profile-id", "presetId": 42},
+        },
+        {
+            "id": "identity-update-missing-store",
+            "method": "profiles.identity.update",
+            "params": {"profileId": "profile-id", "identity": DEFAULT_REAL_IDENTITY},
+        },
+        {
+            "id": "identity-update-missing-profile",
+            "method": "profiles.identity.update",
+            "params": {"storeRoot": "root", "identity": DEFAULT_REAL_IDENTITY},
         },
     ],
 )
