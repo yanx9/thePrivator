@@ -1,0 +1,540 @@
+"""Generate deterministic per-profile MV3 identity runtime extensions."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Union
+
+from .protocol import IDENTITY_EXTENSION_FAILED, JsonObject, SidecarError
+
+MANIFEST_NAME = "manifest.json"
+CONFIG_SCRIPT_NAME = "identity_config.js"
+PROTECTOR_SCRIPT_NAME = "identity_protector.js"
+GENERATED_EXTENSIONS_DIR = "identity-extensions"
+CONFIG_GLOBAL_NAME = "__THEPRIVATOR_IDENTITY_CONFIG__"
+_SAFE_EXTENSION_MESSAGE = "Identity extension could not be prepared."
+
+_ALLOWED_TOP_LEVEL = {
+    "schemaVersion",
+    "navigator",
+    "locale",
+    "screen",
+    "canvas",
+    "audio",
+    "webgl",
+    "webrtc",
+}
+_ALLOWED_NAVIGATOR = {"platform", "hardwareConcurrency", "deviceMemory", "userAgentData"}
+_ALLOWED_USER_AGENT_DATA = {"platform", "platformVersion", "architecture", "mobile", "bitness", "model"}
+_ALLOWED_LOCALE = {"locale", "languages", "timezoneId"}
+_ALLOWED_SCREEN = {"width", "height", "viewportWidth", "viewportHeight", "colorDepth", "pixelRatio"}
+_ALLOWED_NOISE = {"enabled", "noiseSeed"}
+_ALLOWED_WEBGL = {"enabled", "vendor", "renderer", "noiseSeed"}
+_ALLOWED_WEBRTC_POLICIES = {"disableNonProxiedUdp", "block"}
+_FORBIDDEN_TEXT_MARKERS = (
+    "DevToolsActivePort",
+    "ws://",
+    "wss://",
+    "--remote-debugging-port",
+    "debugPort",
+    "Traceback",
+)
+
+
+@dataclass(frozen=True)
+class IdentityExtensionArtifact:
+    """Internal extension artifact metadata safe to summarize without config bodies."""
+
+    extension_dir: Path
+    profile_key: str
+    files: list[str]
+
+    def to_safe_dict(self) -> JsonObject:
+        return {
+            "profileKey": self.profile_key,
+            "files": list(self.files),
+        }
+
+
+def runtime_identity_extension_root(store_root: Union[str, Path]) -> Path:
+    """Return the app-owned generated extension root for a store root."""
+    return Path(store_root) / "profile-store" / "runtime" / GENERATED_EXTENSIONS_DIR
+
+
+def generate_identity_extension(
+    extension_root: Union[str, Path],
+    profile_id: str,
+    plan_or_config: Any,
+) -> IdentityExtensionArtifact:
+    """Write a static MV3 extension from a runtime plan or extension config."""
+    temp_dir: Path | None = None
+    try:
+        config = _extract_extension_config(plan_or_config)
+        _validate_extension_config(config)
+        profile_key = _profile_key(profile_id)
+        root = Path(extension_root)
+        root.mkdir(parents=True, exist_ok=True)
+        target_dir = root / profile_key
+        temp_dir = root / f".{profile_key}.{uuid.uuid4().hex}.tmp"
+        _remove_path(temp_dir)
+        temp_dir.mkdir(parents=False)
+
+        _write_json(temp_dir / MANIFEST_NAME, _manifest())
+        _write_text(temp_dir / CONFIG_SCRIPT_NAME, _config_script(config))
+        _write_text(temp_dir / PROTECTOR_SCRIPT_NAME, _protector_script())
+        validate_identity_extension(temp_dir)
+
+        _remove_path(target_dir)
+        os.replace(temp_dir, target_dir)
+        temp_dir = None
+        return IdentityExtensionArtifact(
+            extension_dir=target_dir,
+            profile_key=profile_key,
+            files=[MANIFEST_NAME, CONFIG_SCRIPT_NAME, PROTECTOR_SCRIPT_NAME],
+        )
+    except SidecarError:
+        _remove_path(temp_dir)
+        raise
+    except Exception as exc:
+        _remove_path(temp_dir)
+        raise _extension_error() from exc
+
+
+def validate_identity_extension(extension_dir: Union[str, Path]) -> None:
+    """Validate generated extension files before launch can consume them."""
+    try:
+        root = Path(extension_dir)
+        if not root.is_dir():
+            raise ValueError("extension directory is unavailable")
+        manifest_path = root / MANIFEST_NAME
+        config_path = root / CONFIG_SCRIPT_NAME
+        protector_path = root / PROTECTOR_SCRIPT_NAME
+        if not manifest_path.is_file() or not config_path.is_file() or not protector_path.is_file():
+            raise ValueError("generated extension files are incomplete")
+
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if not isinstance(manifest, Mapping):
+            raise ValueError("manifest must be an object")
+        _validate_manifest(manifest)
+
+        config_text = config_path.read_text(encoding="utf-8")
+        protector_text = protector_path.read_text(encoding="utf-8")
+        if CONFIG_GLOBAL_NAME not in config_text or "Object.freeze" not in config_text:
+            raise ValueError("config script shape is invalid")
+        if "fetch(" in config_text or "config.json" in config_text:
+            raise ValueError("config script must not fetch async config")
+        for required in ("Navigator.prototype", "Screen.prototype", "RTCPeerConnection"):
+            if required not in protector_text:
+                raise ValueError("protector script shape is invalid")
+        _assert_no_forbidden_text(config_text)
+        _assert_no_forbidden_text(protector_text)
+    except SidecarError:
+        raise
+    except Exception as exc:
+        raise _extension_error() from exc
+
+
+def _extract_extension_config(plan_or_config: Any) -> JsonObject:
+    if hasattr(plan_or_config, "extension_config"):
+        raw_config = getattr(plan_or_config, "extension_config")
+    else:
+        raw_config = plan_or_config
+    if not isinstance(raw_config, Mapping):
+        raise _extension_error()
+    return _json_copy(raw_config)
+
+
+def _validate_extension_config(config: Mapping[str, Any]) -> None:
+    if not config:
+        raise _extension_error()
+    _ensure_keys(config, _ALLOWED_TOP_LEVEL)
+    if config.get("schemaVersion") != 1:
+        raise _extension_error()
+    if set(config) == {"schemaVersion"}:
+        raise _extension_error()
+
+    if "navigator" in config:
+        navigator = _require_object(config["navigator"])
+        _ensure_keys(navigator, _ALLOWED_NAVIGATOR)
+        _require_string(navigator.get("platform"))
+        _require_int(navigator.get("hardwareConcurrency"), minimum=1, maximum=128)
+        _require_number(navigator.get("deviceMemory"), minimum=0.25, maximum=128)
+        user_agent_data = _require_object(navigator.get("userAgentData"))
+        _ensure_keys(user_agent_data, _ALLOWED_USER_AGENT_DATA)
+        for key in ("platform", "platformVersion", "architecture", "bitness", "model"):
+            if key in user_agent_data:
+                _require_string(user_agent_data[key], allow_empty=key in {"platformVersion", "model"})
+        if not isinstance(user_agent_data.get("mobile"), bool):
+            raise _extension_error()
+
+    if "locale" in config:
+        locale = _require_object(config["locale"])
+        _ensure_keys(locale, _ALLOWED_LOCALE)
+        _require_string(locale.get("locale"))
+        _require_string(locale.get("timezoneId"))
+        languages = locale.get("languages")
+        if not isinstance(languages, list) or not languages:
+            raise _extension_error()
+        for language in languages:
+            _require_string(language)
+
+    if "screen" in config:
+        screen = _require_object(config["screen"])
+        _ensure_keys(screen, _ALLOWED_SCREEN)
+        for key in ("width", "height", "viewportWidth", "viewportHeight", "colorDepth"):
+            _require_int(screen.get(key), minimum=1, maximum=10_000 if key != "colorDepth" else 64)
+        _require_number(screen.get("pixelRatio"), minimum=0.25, maximum=8)
+
+    for key in ("canvas", "audio"):
+        if key in config:
+            surface = _require_object(config[key])
+            _ensure_keys(surface, _ALLOWED_NOISE)
+            if surface.get("enabled") is not True:
+                raise _extension_error()
+            _require_int(surface.get("noiseSeed"), minimum=0, maximum=1_000_000)
+
+    if "webgl" in config:
+        webgl = _require_object(config["webgl"])
+        _ensure_keys(webgl, _ALLOWED_WEBGL)
+        if webgl.get("enabled") is not True:
+            raise _extension_error()
+        _require_string(webgl.get("vendor"))
+        _require_string(webgl.get("renderer"))
+        if "noiseSeed" in webgl:
+            _require_int(webgl.get("noiseSeed"), minimum=0, maximum=1_000_000)
+
+    if "webrtc" in config:
+        webrtc = _require_object(config["webrtc"])
+        _ensure_keys(webrtc, {"policy"})
+        if webrtc.get("policy") not in _ALLOWED_WEBRTC_POLICIES:
+            raise _extension_error()
+
+    _assert_no_forbidden_text(json.dumps(config, ensure_ascii=True, allow_nan=False, sort_keys=True))
+
+
+def _validate_manifest(manifest: Mapping[str, Any]) -> None:
+    content_scripts = manifest.get("content_scripts")
+    if manifest.get("manifest_version") != 3 or not isinstance(content_scripts, list) or len(content_scripts) != 1:
+        raise _extension_error()
+    script = content_scripts[0]
+    if not isinstance(script, Mapping):
+        raise _extension_error()
+    if script.get("js") != [CONFIG_SCRIPT_NAME, PROTECTOR_SCRIPT_NAME]:
+        raise _extension_error()
+    if script.get("run_at") != "document_start" or script.get("world") != "MAIN":
+        raise _extension_error()
+    if script.get("matches") != ["<all_urls>"]:
+        raise _extension_error()
+    if script.get("all_frames") is not True or script.get("match_about_blank") is not True:
+        raise _extension_error()
+
+
+def _manifest() -> JsonObject:
+    return {
+        "manifest_version": 3,
+        "name": "thePrivator Identity Runtime",
+        "version": "1.0.0",
+        "description": "Applies sidecar-generated identity overrides.",
+        "content_scripts": [
+            {
+                "matches": ["<all_urls>"],
+                "js": [CONFIG_SCRIPT_NAME, PROTECTOR_SCRIPT_NAME],
+                "run_at": "document_start",
+                "world": "MAIN",
+                "all_frames": True,
+                "match_about_blank": True,
+                "match_origin_as_fallback": True,
+            }
+        ],
+    }
+
+
+def _config_script(config: Mapping[str, Any]) -> str:
+    encoded = json.dumps(config, ensure_ascii=True, separators=(",", ":"), sort_keys=True, allow_nan=False)
+    return "\n".join(
+        [
+            "(() => {",
+            "  'use strict';",
+            "  const deepFreeze = (value) => {",
+            "    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;",
+            "    Object.freeze(value);",
+            "    for (const key of Object.keys(value)) deepFreeze(value[key]);",
+            "    return value;",
+            "  };",
+            f"  const config = deepFreeze({encoded});",
+            f"  Object.defineProperty(globalThis, '{CONFIG_GLOBAL_NAME}', {{",
+            "    value: config,",
+            "    enumerable: false,",
+            "    configurable: false,",
+            "    writable: false,",
+            "  });",
+            "})();",
+            "",
+        ]
+    )
+
+
+def _protector_script() -> str:
+    return r"""
+(() => {
+  'use strict';
+
+  const config = globalThis.__THEPRIVATOR_IDENTITY_CONFIG__ || {};
+  const seededRandom = (seed) => {
+    const x = Math.sin(Number(seed) || 0) * 10000;
+    return x - Math.floor(x);
+  };
+  const maskFunction = (replacement, original) => {
+    try {
+      Object.defineProperty(replacement, 'toString', {
+        value: () => Function.prototype.toString.call(original),
+        configurable: true,
+      });
+    } catch (_) {}
+    return replacement;
+  };
+  const overrideGetter = (owner, property, value) => {
+    if (value === undefined || value === null || !owner) return;
+    const descriptor = Object.getOwnPropertyDescriptor(owner, property);
+    const original = descriptor && descriptor.get ? descriptor.get : function () { return value; };
+    try {
+      Object.defineProperty(owner, property, {
+        get: maskFunction(function () { return value; }, original),
+        configurable: true,
+        enumerable: descriptor ? descriptor.enumerable : true,
+      });
+    } catch (_) {}
+  };
+
+  const navigatorConfig = config.navigator || {};
+  overrideGetter(Navigator.prototype, 'platform', navigatorConfig.platform);
+  overrideGetter(Navigator.prototype, 'hardwareConcurrency', navigatorConfig.hardwareConcurrency);
+  overrideGetter(Navigator.prototype, 'deviceMemory', navigatorConfig.deviceMemory);
+  if (navigatorConfig.userAgentData) {
+    const uaData = Object.freeze({
+      brands: [],
+      mobile: Boolean(navigatorConfig.userAgentData.mobile),
+      platform: navigatorConfig.userAgentData.platform || '',
+      getHighEntropyValues: async (hints) => {
+        const result = { mobile: Boolean(navigatorConfig.userAgentData.mobile), platform: navigatorConfig.userAgentData.platform || '' };
+        for (const hint of hints || []) {
+          if (hint === 'platformVersion') result.platformVersion = navigatorConfig.userAgentData.platformVersion || '';
+          if (hint === 'architecture') result.architecture = navigatorConfig.userAgentData.architecture || '';
+          if (hint === 'bitness') result.bitness = navigatorConfig.userAgentData.bitness || '';
+          if (hint === 'model') result.model = navigatorConfig.userAgentData.model || '';
+        }
+        return result;
+      },
+      toJSON: () => ({ brands: [], mobile: Boolean(navigatorConfig.userAgentData.mobile), platform: navigatorConfig.userAgentData.platform || '' }),
+    });
+    overrideGetter(Navigator.prototype, 'userAgentData', uaData);
+  }
+
+  const localeConfig = config.locale || {};
+  if (Array.isArray(localeConfig.languages)) {
+    overrideGetter(Navigator.prototype, 'languages', Object.freeze([...localeConfig.languages]));
+    overrideGetter(Navigator.prototype, 'language', localeConfig.languages[0]);
+  }
+  if (localeConfig.locale || localeConfig.timezoneId) {
+    const originalResolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
+    Intl.DateTimeFormat.prototype.resolvedOptions = maskFunction(function (...args) {
+      const result = originalResolvedOptions.apply(this, args);
+      if (localeConfig.locale) result.locale = localeConfig.locale;
+      if (localeConfig.timezoneId) result.timeZone = localeConfig.timezoneId;
+      return result;
+    }, originalResolvedOptions);
+  }
+
+  const screenConfig = config.screen || {};
+  overrideGetter(Screen.prototype, 'width', screenConfig.width);
+  overrideGetter(Screen.prototype, 'height', screenConfig.height);
+  overrideGetter(Screen.prototype, 'availWidth', screenConfig.width);
+  overrideGetter(Screen.prototype, 'availHeight', screenConfig.height);
+  overrideGetter(Screen.prototype, 'colorDepth', screenConfig.colorDepth);
+  overrideGetter(Screen.prototype, 'pixelDepth', screenConfig.colorDepth);
+  overrideGetter(Window.prototype, 'innerWidth', screenConfig.viewportWidth);
+  overrideGetter(Window.prototype, 'innerHeight', screenConfig.viewportHeight);
+  overrideGetter(Window.prototype, 'devicePixelRatio', screenConfig.pixelRatio);
+
+  const canvasConfig = config.canvas || {};
+  if (canvasConfig.enabled && typeof HTMLCanvasElement !== 'undefined') {
+    const seed = canvasConfig.noiseSeed || 1;
+    const addNoise = (imageData, seedBase) => {
+      if (!imageData || !imageData.data) return imageData;
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const noise = Math.floor(seededRandom(seedBase + i) * 5) - 2;
+        data[i] = Math.max(0, Math.min(255, data[i] + noise));
+        data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + noise));
+        data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + noise));
+      }
+      return imageData;
+    };
+    const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = maskFunction(function (...args) {
+      return addNoise(originalGetImageData.apply(this, args), seed);
+    }, originalGetImageData);
+    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = maskFunction(function (...args) {
+      const context = this.getContext && this.getContext('2d');
+      if (context) {
+        try {
+          const data = context.getImageData(0, 0, this.width, this.height);
+          context.putImageData(addNoise(data, seed), 0, 0);
+        } catch (_) {}
+      }
+      return originalToDataURL.apply(this, args);
+    }, originalToDataURL);
+  }
+
+  const webglConfig = config.webgl || {};
+  const hookWebgl = (Constructor) => {
+    if (!webglConfig.enabled || !Constructor || !Constructor.prototype) return;
+    const originalGetParameter = Constructor.prototype.getParameter;
+    Constructor.prototype.getParameter = maskFunction(function (parameter) {
+      if ((parameter === 0x9245 || parameter === 0x1F00) && webglConfig.vendor) return webglConfig.vendor;
+      if ((parameter === 0x9246 || parameter === 0x1F01) && webglConfig.renderer) return webglConfig.renderer;
+      return originalGetParameter.call(this, parameter);
+    }, originalGetParameter);
+    const originalReadPixels = Constructor.prototype.readPixels;
+    Constructor.prototype.readPixels = maskFunction(function (...args) {
+      const result = originalReadPixels.apply(this, args);
+      const pixels = args[6];
+      if (pixels && pixels.length && webglConfig.noiseSeed !== undefined) {
+        for (let i = 0; i < pixels.length; i += 4) {
+          const noise = Math.floor(seededRandom(webglConfig.noiseSeed + i) * 5) - 2;
+          pixels[i] = Math.max(0, Math.min(255, pixels[i] + noise));
+        }
+      }
+      return result;
+    }, originalReadPixels);
+  };
+  hookWebgl(globalThis.WebGLRenderingContext);
+  hookWebgl(globalThis.WebGL2RenderingContext);
+
+  const audioConfig = config.audio || {};
+  if (audioConfig.enabled && typeof AnalyserNode !== 'undefined') {
+    const original = AnalyserNode.prototype.getFloatFrequencyData;
+    AnalyserNode.prototype.getFloatFrequencyData = maskFunction(function (array) {
+      original.call(this, array);
+      for (let i = 0; i < array.length; i += 1) array[i] += seededRandom((audioConfig.noiseSeed || 1) + i) * 0.01;
+      return array;
+    }, original);
+  }
+
+  const webrtcConfig = config.webrtc || {};
+  if (webrtcConfig.policy === 'block') {
+    const BlockedPeerConnection = function () { throw new DOMException('WebRTC unavailable', 'NotAllowedError'); };
+    globalThis.RTCPeerConnection = BlockedPeerConnection;
+    globalThis.webkitRTCPeerConnection = BlockedPeerConnection;
+  } else if (webrtcConfig.policy === 'disableNonProxiedUdp' && globalThis.RTCPeerConnection) {
+    const OriginalPeerConnection = globalThis.RTCPeerConnection;
+    globalThis.RTCPeerConnection = maskFunction(function (configuration, ...rest) {
+      const nextConfiguration = Object.assign({}, configuration || {}, { iceTransportPolicy: 'relay' });
+      return new OriginalPeerConnection(nextConfiguration, ...rest);
+    }, OriginalPeerConnection);
+  }
+})();
+""".lstrip()
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    _write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def _profile_key(profile_id: str) -> str:
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise _extension_error()
+    digest = hashlib.sha256(profile_id.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+    return f"profile-{digest}"
+
+
+def _json_copy(payload: Any) -> Any:
+    try:
+        return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise _extension_error() from exc
+
+
+def _ensure_keys(value: Mapping[str, Any], allowed: set[str]) -> None:
+    if set(value) - allowed:
+        raise _extension_error()
+
+
+def _require_object(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _extension_error()
+    return value
+
+
+def _require_string(value: Any, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise _extension_error()
+    if (not allow_empty and not value) or len(value) > 512 or _contains_control_characters(value):
+        raise _extension_error()
+    _assert_no_forbidden_text(value)
+    return value
+
+
+def _require_int(value: Any, *, minimum: int, maximum: int) -> int:
+    if type(value) is not int or value < minimum or value > maximum:
+        raise _extension_error()
+    return value
+
+
+def _require_number(value: Any, *, minimum: float, maximum: float) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum or value > maximum:
+        raise _extension_error()
+    json.dumps(value, allow_nan=False)
+    return value
+
+
+def _assert_no_forbidden_text(text: str) -> None:
+    if any(marker in text for marker in _FORBIDDEN_TEXT_MARKERS):
+        raise _extension_error()
+
+
+def _contains_control_characters(value: str) -> bool:
+    return any(ord(character) < 32 for character in value)
+
+
+def _remove_path(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+    except OSError:
+        return
+
+
+def _extension_error() -> SidecarError:
+    return SidecarError(
+        code=IDENTITY_EXTENSION_FAILED,
+        message=_SAFE_EXTENSION_MESSAGE,
+    )
+
+
+__all__ = [
+    "CONFIG_SCRIPT_NAME",
+    "GENERATED_EXTENSIONS_DIR",
+    "IdentityExtensionArtifact",
+    "MANIFEST_NAME",
+    "PROTECTOR_SCRIPT_NAME",
+    "generate_identity_extension",
+    "runtime_identity_extension_root",
+    "validate_identity_extension",
+]
