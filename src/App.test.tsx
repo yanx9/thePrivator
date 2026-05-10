@@ -31,6 +31,23 @@ function healthEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function defaultIdentity(overrides: Record<string, unknown> = {}) {
+  return {
+    identityVersion: 1,
+    label: "Real identity",
+    presetId: null,
+    browser: { mode: "real" },
+    navigator: { mode: "real" },
+    screen: { mode: "real" },
+    locale: { mode: "real" },
+    canvas: { mode: "real" },
+    audio: { mode: "real" },
+    webgl: { mode: "real" },
+    webrtc: { mode: "real", policy: "real" },
+    ...overrides,
+  };
+}
+
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
   const base = {
@@ -48,6 +65,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
       profileDir: `profile-store/profiles/${id}`,
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
+    identity: defaultIdentity(),
   };
 
   return {
@@ -59,7 +77,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 
 function profileResult(profiles: unknown[], overrides: Record<string, unknown> = {}) {
   return {
-    storeVersion: 1,
+    storeVersion: 2,
     profiles,
     count: profiles.length,
     ...overrides,

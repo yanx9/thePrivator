@@ -33,6 +33,22 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function defaultIdentity() {
+  return {
+    identityVersion: 1,
+    label: "Real identity",
+    presetId: null,
+    browser: { mode: "real" },
+    navigator: { mode: "real" },
+    screen: { mode: "real" },
+    locale: { mode: "real" },
+    canvas: { mode: "real" },
+    audio: { mode: "real" },
+    webgl: { mode: "real" },
+    webrtc: { mode: "real", policy: "real" },
+  };
+}
+
 function writeExecutable(path, mtime) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, "#!/bin/sh\nexit 0\n", "utf8");
@@ -289,7 +305,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "11111111-1111-4111-8111-111111111111";
     const appDataRoot = join(context.dataRoot, "Com.ThePrivator.Desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 1,
+      storeVersion: 2,
       profiles: [
         {
           id: profileId,
@@ -306,6 +322,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
+          identity: defaultIdentity(),
         },
       ],
     });
@@ -327,7 +344,7 @@ describe("verify-s06 guard helpers", () => {
     expect(JSON.stringify(proof)).not.toContain(root);
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 1,
+      storeVersion: 2,
       profiles: [
         {
           id: profileId,
@@ -336,6 +353,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
+          identity: defaultIdentity(),
           status: "running",
         },
       ],
@@ -354,7 +372,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "22222222-2222-4222-8222-222222222222";
     const appDataRoot = join(context.dataRoot, "theprivator-desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 1,
+      storeVersion: 2,
       profiles: [
         {
           id: profileId,
@@ -371,6 +389,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
+          identity: defaultIdentity(),
         },
       ],
     });
@@ -424,7 +443,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "33333333-3333-4333-8333-333333333333";
     const appDataRoot = join(context.dataRoot, "theprivator");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 1,
+      storeVersion: 2,
       profiles: [
         {
           id: profileId,
@@ -433,6 +452,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
+          identity: defaultIdentity(),
         },
       ],
     });

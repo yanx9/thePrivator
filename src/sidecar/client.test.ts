@@ -4,17 +4,21 @@ import {
   createProfile,
   deleteProfile,
   getChromiumStatus,
+  applyProfileIdentityPreset,
   getSidecarHealth,
   importLegacyProfiles,
   launchChromiumProfile,
+  listIdentityPresets,
   listProfiles,
   lookupDiagnosticDetail,
   scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
+  updateProfileIdentity,
+  validateIdentity,
 } from "./client";
-import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR } from "./types";
+import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR, type ProfileIdentity } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -41,6 +45,114 @@ function healthEnvelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function defaultIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
+  return {
+    identityVersion: 1,
+    label: "Real identity",
+    presetId: null,
+    browser: { mode: "real" },
+    navigator: { mode: "real" },
+    screen: { mode: "real" },
+    locale: { mode: "real" },
+    canvas: { mode: "real" },
+    audio: { mode: "real" },
+    webgl: { mode: "real" },
+    webrtc: { mode: "real", policy: "real" },
+    ...overrides,
+  };
+}
+
+function presetIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
+  return {
+    identityVersion: 1,
+    label: "Windows 10 Chrome 120",
+    presetId: "windows-10-chrome-120",
+    browser: {
+      mode: "masked",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      clientHints: {
+        platform: "Windows",
+        platformVersion: "10.0.0",
+        architecture: "x86",
+        mobile: false,
+      },
+    },
+    navigator: {
+      mode: "masked",
+      platform: "Win32",
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+      uaPlatform: "Windows",
+      uaPlatformVersion: "10.0.0",
+      uaArchitecture: "x86",
+      uaMobile: false,
+    },
+    screen: {
+      mode: "masked",
+      width: 1920,
+      height: 1080,
+      viewportWidth: 1920,
+      viewportHeight: 1032,
+      colorDepth: 24,
+      pixelRatio: 1,
+    },
+    locale: {
+      mode: "masked",
+      locale: "en-US",
+      languages: ["en-US", "en"],
+      timezoneId: "America/New_York",
+    },
+    canvas: { mode: "noise", noiseSeed: 120010 },
+    audio: { mode: "noise", noiseSeed: 120011 },
+    webgl: {
+      mode: "masked",
+      vendor: "Google Inc. (NVIDIA)",
+      renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 Direct3D11 vs_5_0 ps_5_0)",
+      noiseSeed: 120012,
+    },
+    webrtc: { mode: "masked", policy: "disableNonProxiedUdp" },
+    ...overrides,
+  };
+}
+
+function suspiciousIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
+  return presetIdentity({
+    presetId: null,
+    label: "Suspicious but saveable",
+    navigator: {
+      mode: "custom",
+      platform: "Win32",
+      hardwareConcurrency: 3,
+      deviceMemory: 8,
+      uaPlatform: "Windows",
+      uaPlatformVersion: "10.0.0",
+      uaArchitecture: "x86",
+      uaMobile: false,
+    },
+    ...overrides,
+  });
+}
+
+function identityWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "IDENTITY_UNUSUAL_CPU",
+    message: "Hardware concurrency is valid but uncommon for desktop Chromium.",
+    surface: "navigator",
+    path: "navigator.hardwareConcurrency",
+    ...overrides,
+  };
+}
+
+function identityEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-identity-1",
+    protocolVersion: "1.0.0",
+    durationMs: 3.25,
+    result,
+    ...overrides,
+  };
+}
+
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
   return {
@@ -58,6 +170,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
       profileDir: `profile-store/profiles/${id}`,
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
+    identity: defaultIdentity(),
     ...overrides,
   };
 }
@@ -65,7 +178,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 function profileResult(overrides: Record<string, unknown> = {}) {
   const profiles = overrides.profiles ?? [profileRecord()];
   return {
-    storeVersion: 1,
+    storeVersion: 2,
     profiles,
     count: Array.isArray(profiles) ? profiles.length : 1,
     ...overrides,
@@ -429,7 +542,7 @@ describe("sidecar client", () => {
       protocolVersion: "1.0.0",
       durationMs: 4.5,
       result: {
-        storeVersion: 1,
+        storeVersion: 2,
         profiles: [],
         count: 0,
       },
@@ -439,7 +552,7 @@ describe("sidecar client", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("profiles_list");
     expect(snapshot.requestId).toBe("bridge-profiles-1");
-    expect(snapshot.storeVersion).toBe(1);
+    expect(snapshot.storeVersion).toBe(2);
     expect(snapshot.profiles).toEqual([]);
     expect(snapshot.count).toBe(0);
   });
@@ -482,6 +595,41 @@ describe("sidecar client", () => {
     expect(updated.profile).toEqual(renamed);
     expect(deleted.profile).toBeUndefined();
     expect(deleted.profiles).toEqual([]);
+  });
+
+  it("wraps identity commands with fixed command params and parses structured warnings", async () => {
+    const preset = presetIdentity();
+    const profile = profileRecord({ identity: preset });
+    const suspicious = suspiciousIdentity();
+    const suspiciousProfile = profileRecord({ identity: suspicious, updatedAt: "2026-05-04T18:03:00.000Z" });
+    const warning = identityWarning();
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 1, presets: [preset], count: 1 }))
+      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 1, identity: suspicious, warnings: [warning] }))
+      .mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile], warnings: [] })))
+      .mockResolvedValueOnce(profileEnvelope(profileResult({ profile: suspiciousProfile, profiles: [suspiciousProfile], warnings: [warning] })));
+
+    const presets = await listIdentityPresets();
+    const validation = await validateIdentity(suspicious);
+    const applied = await applyProfileIdentityPreset(profile.id, "windows-10-chrome-120");
+    const updated = await updateProfileIdentity(profile.id, suspicious);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "identity_presets_list");
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "identity_validate", { identity: suspicious });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "profiles_identity_apply_preset", {
+      profileId: profile.id,
+      presetId: "windows-10-chrome-120",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(4, "profiles_identity_update", {
+      profileId: profile.id,
+      identity: suspicious,
+    });
+    expect(presets.presets).toEqual([preset]);
+    expect(validation.warnings).toEqual([warning]);
+    expect(applied.profile.identity.presetId).toBe("windows-10-chrome-120");
+    expect(applied.warnings).toEqual([]);
+    expect(updated.profile.identity).toEqual(suspicious);
+    expect(updated.warnings).toEqual([warning]);
   });
 
   it("scans legacy profiles through the fixed Tauri command and validates nested candidates", async () => {
@@ -725,8 +873,13 @@ describe("sidecar client", () => {
 
   it.each([
     ["malformed envelope", { protocolVersion: "1.0.0", durationMs: 4.5, result: profileResult() }],
+    ["stale v1 store version", profileEnvelope(profileResult({ storeVersion: 1 }))],
     ["wrong profiles item type", profileEnvelope(profileResult({ profiles: ["not-a-profile"] }))],
     ["missing defaults", profileEnvelope(profileResult({ profiles: [profileRecord({ defaults: undefined })] }))],
+    ["missing identity", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: undefined })] }))],
+    ["unknown identity surface mode", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: defaultIdentity({ browser: { mode: "private" } }) })] }))],
+    ["invalid language array", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: presetIdentity({ locale: { mode: "masked", locale: "en-US", languages: ["not a tag"], timezoneId: "America/New_York" } }) })] }))],
+    ["invalid noise seed", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: presetIdentity({ canvas: { mode: "noise", noiseSeed: 1000001 } }) })] }))],
     ["missing relative storage fields", profileEnvelope(profileResult({ profiles: [profileRecord({ storage: {} })] }))],
     ["absolute storage path", profileEnvelope(profileResult({ profiles: [profileRecord({ storage: { profileDir: "/tmp/profile", userDataDir: "/tmp/profile/user-data" } })] }))],
     ["non-number count", profileEnvelope(profileResult({ count: "one" }))],
@@ -740,6 +893,85 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
       detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    [
+      "malformed preset list warning-free contract",
+      identityEnvelope({ identityVersion: 1, presets: [presetIdentity({ presetId: null })], count: 1 }),
+      () => listIdentityPresets(),
+    ],
+    [
+      "warning missing code",
+      identityEnvelope({ identityVersion: 1, identity: suspiciousIdentity(), warnings: [identityWarning({ code: undefined })] }),
+      () => validateIdentity(suspiciousIdentity()),
+    ],
+    [
+      "warning missing surface",
+      profileEnvelope(profileResult({ profile: profileRecord(), profiles: [profileRecord()], warnings: [identityWarning({ surface: undefined })] })),
+      () => updateProfileIdentity("11111111-1111-1111-1111-111111111111", defaultIdentity()),
+    ],
+    [
+      "warning missing message",
+      profileEnvelope(profileResult({ profile: profileRecord(), profiles: [profileRecord()], warnings: [identityWarning({ message: undefined })] })),
+      () => updateProfileIdentity("11111111-1111-1111-1111-111111111111", defaultIdentity()),
+    ],
+    [
+      "apply preset response presetId mismatch",
+      profileEnvelope(profileResult({
+        profile: profileRecord({ identity: presetIdentity({ presetId: "ubuntu-linux-chrome-120" }) }),
+        profiles: [profileRecord({ identity: presetIdentity({ presetId: "ubuntu-linux-chrome-120" }) })],
+        warnings: [],
+      })),
+      () => applyProfileIdentityPreset("11111111-1111-1111-1111-111111111111", "windows-10-chrome-120"),
+    ],
+    [
+      "missing profile in identity mutation result",
+      profileEnvelope(profileResult({ profiles: [profileRecord()], warnings: [] })),
+      () => updateProfileIdentity("11111111-1111-1111-1111-111111111111", defaultIdentity()),
+    ],
+    [
+      "malformed identity command envelope",
+      { protocolVersion: "1.0.0", durationMs: 3.25, result: { identityVersion: 1, presets: [], count: 0 } },
+      () => listIdentityPresets(),
+    ],
+    [
+      "unknown protocol version",
+      identityEnvelope({ identityVersion: 1, presets: [], count: 0 }, { protocolVersion: "9.9.9" }),
+      () => listIdentityPresets(),
+    ],
+  ])("maps malformed identity payloads to protocol errors: %s", async (_caseName, envelope, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelope);
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["IDENTITY_INVALID", "Identity payload must be a JSON object.", () => validateIdentity(defaultIdentity())],
+    ["IDENTITY_PRESET_NOT_FOUND", "Identity preset was not found.", () => applyProfileIdentityPreset("profile-id", "missing-preset")],
+    ["IDENTITY_UNSUPPORTED_MODE", "Identity surface does not support that mode.", () => updateProfileIdentity("profile-id", defaultIdentity())],
+  ])("preserves typed recoverable identity errors: %s", async (code, message, callClient) => {
+    mockInvoke.mockRejectedValueOnce({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-identity-detail",
+    });
+
+    await expect(callClient()).rejects.toMatchObject({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-identity-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
     });
   });
 

@@ -128,11 +128,144 @@ export interface DiagnosticLookupResult {
   entries: DiagnosticEntry[];
 }
 
+export type FingerprintMode = "disabled";
+
+export type IdentitySurface = "browser" | "navigator" | "screen" | "locale" | "canvas" | "audio" | "webgl" | "webrtc";
+export type IdentityMaskingMode = "real" | "masked" | "custom";
+export type IdentityNoiseMode = "real" | "noise";
+export type WebRtcPolicy = "real" | "disableNonProxiedUdp" | "block";
+
+export interface IdentityRealSurface {
+  mode: "real";
+}
+
+export interface BrowserClientHints {
+  platform?: string;
+  platformVersion?: string;
+  architecture?: string;
+  bitness?: string;
+  model?: string;
+  mobile?: boolean;
+}
+
+export interface BrowserMaskedSurface {
+  mode: Exclude<IdentityMaskingMode, "real">;
+  userAgent: string;
+  clientHints?: BrowserClientHints;
+}
+
+export type BrowserIdentitySurface = IdentityRealSurface | BrowserMaskedSurface;
+
+export interface NavigatorMaskedSurface {
+  mode: Exclude<IdentityMaskingMode, "real">;
+  platform: string;
+  hardwareConcurrency: number;
+  deviceMemory: number;
+  uaPlatform: string;
+  uaPlatformVersion: string;
+  uaArchitecture: string;
+  uaMobile: boolean;
+}
+
+export type NavigatorIdentitySurface = IdentityRealSurface | NavigatorMaskedSurface;
+
+export interface ScreenMaskedSurface {
+  mode: Exclude<IdentityMaskingMode, "real">;
+  width: number;
+  height: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  colorDepth: number;
+  pixelRatio: number;
+}
+
+export type ScreenIdentitySurface = IdentityRealSurface | ScreenMaskedSurface;
+
+export interface LocaleMaskedSurface {
+  mode: Exclude<IdentityMaskingMode, "real">;
+  locale: string;
+  languages: string[];
+  timezoneId: string;
+}
+
+export type LocaleIdentitySurface = IdentityRealSurface | LocaleMaskedSurface;
+
+export interface NoiseIdentitySurface {
+  mode: "noise";
+  noiseSeed: number;
+}
+
+export type CanvasIdentitySurface = IdentityRealSurface | NoiseIdentitySurface;
+export type AudioIdentitySurface = IdentityRealSurface | NoiseIdentitySurface;
+
+export interface WebGlMaskedSurface {
+  mode: Exclude<IdentityMaskingMode, "real">;
+  vendor: string;
+  renderer: string;
+  noiseSeed?: number;
+}
+
+export type WebGlIdentitySurface = IdentityRealSurface | WebGlMaskedSurface;
+
+export interface WebRtcIdentitySurface {
+  mode: IdentityMaskingMode;
+  policy: WebRtcPolicy;
+}
+
+export interface ProfileIdentity {
+  identityVersion: 1;
+  label: string;
+  presetId: string | null;
+  browser: BrowserIdentitySurface;
+  navigator: NavigatorIdentitySurface;
+  screen: ScreenIdentitySurface;
+  locale: LocaleIdentitySurface;
+  canvas: CanvasIdentitySurface;
+  audio: AudioIdentitySurface;
+  webgl: WebGlIdentitySurface;
+  webrtc: WebRtcIdentitySurface;
+}
+
+export interface IdentityWarning {
+  code: string;
+  message: string;
+  surface: IdentitySurface;
+  path: string;
+}
+
+export interface IdentityPresetListResult {
+  identityVersion: 1;
+  presets: ProfileIdentity[];
+  count: number;
+}
+
+export interface IdentityPresetListSnapshot extends IdentityPresetListResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface IdentityValidationResult {
+  identityVersion: 1;
+  identity: ProfileIdentity;
+  warnings: IdentityWarning[];
+}
+
+export interface IdentityValidationSnapshot extends IdentityValidationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface ProfileDefaults {
   browser: "chromium";
   startUrl: "about:blank";
   proxyMode: "direct";
-  fingerprintMode: "disabled";
+  fingerprintMode: FingerprintMode;
 }
 
 export interface ProfileStorage {
@@ -147,17 +280,24 @@ export interface ProfileRecord {
   updatedAt: string;
   defaults: ProfileDefaults;
   storage: ProfileStorage;
+  identity: ProfileIdentity;
   metadata?: JsonObject;
 }
 
 export interface ProfileListResult {
-  storeVersion: 1;
+  storeVersion: 2;
   profiles: ProfileRecord[];
   count: number;
 }
 
 export interface ProfileMutationResult extends ProfileListResult {
   profile?: ProfileRecord;
+  warnings?: IdentityWarning[];
+}
+
+export interface ProfileIdentityMutationResult extends ProfileMutationResult {
+  profile: ProfileRecord;
+  warnings: IdentityWarning[];
 }
 
 export interface ProfileListSnapshot extends ProfileListResult {
@@ -169,6 +309,14 @@ export interface ProfileListSnapshot extends ProfileListResult {
 }
 
 export interface ProfileMutationSnapshot extends ProfileMutationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ProfileIdentityMutationSnapshot extends ProfileIdentityMutationResult {
   requestId: string;
   rawRequestId: JsonScalar;
   protocolVersion: string;

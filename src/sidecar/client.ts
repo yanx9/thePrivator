@@ -20,6 +20,18 @@ import type {
   JsonScalar,
   JsonObject,
   JsonValue,
+  BrowserClientHints,
+  IdentityMaskingMode,
+  IdentityNoiseMode,
+  IdentityPresetListResult,
+  IdentityPresetListSnapshot,
+  IdentitySurface,
+  IdentityValidationResult,
+  IdentityValidationSnapshot,
+  IdentityWarning,
+  ProfileIdentity,
+  ProfileIdentityMutationSnapshot,
+  WebRtcPolicy,
   LegacyImportCopyStatus,
   LegacyImportOutcome,
   LegacyImportOutcomeError,
@@ -109,6 +121,7 @@ export async function createProfile(name: string): Promise<ProfileMutationSnapsh
     return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
       requireProfile: true,
       requireProfileInList: true,
+      requireWarnings: false,
     });
   } catch (error) {
     throw normalizeSidecarError(error);
@@ -121,6 +134,7 @@ export async function updateProfile(id: string, name: string): Promise<ProfileMu
     return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
       requireProfile: true,
       requireProfileInList: true,
+      requireWarnings: false,
     });
   } catch (error) {
     throw normalizeSidecarError(error);
@@ -133,7 +147,57 @@ export async function deleteProfile(id: string): Promise<ProfileMutationSnapshot
     return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
       requireProfile: false,
       requireProfileInList: false,
+      requireWarnings: false,
     });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function listIdentityPresets(): Promise<IdentityPresetListSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("identity_presets_list");
+    return parseIdentityPresetListEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function validateIdentity(identity: ProfileIdentity): Promise<IdentityValidationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("identity_validate", { identity });
+    return parseIdentityValidationEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function applyProfileIdentityPreset(
+  profileId: string,
+  presetId: string,
+): Promise<ProfileIdentityMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_identity_apply_preset", { profileId, presetId });
+    const snapshot = parseProfileIdentityMutationEnvelope(envelope, new Date().toISOString());
+    if (snapshot.profile.identity.presetId !== presetId) {
+      throw makeProtocolError("The sidecar profile identity preset result did not match the requested presetId.");
+    }
+    return snapshot;
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function updateProfileIdentity(
+  profileId: string,
+  identity: ProfileIdentity,
+): Promise<ProfileIdentityMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_identity_update", { profileId, identity });
+    return parseProfileIdentityMutationEnvelope(envelope, new Date().toISOString());
   } catch (error) {
     throw normalizeSidecarError(error);
   }
@@ -369,10 +433,62 @@ function parseProfileListEnvelope(value: unknown, receivedAt: string): ProfileLi
 function parseProfileMutationEnvelope(
   value: unknown,
   receivedAt: string,
-  options: { requireProfile: boolean; requireProfileInList: boolean },
+  options: { requireProfile: boolean; requireProfileInList: boolean; requireWarnings: boolean },
 ): ProfileMutationSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseProfileMutationResult(envelope.result, options);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseProfileIdentityMutationEnvelope(value: unknown, receivedAt: string): ProfileIdentityMutationSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfileMutationResult(envelope.result, {
+    requireProfile: true,
+    requireProfileInList: true,
+    requireWarnings: true,
+  });
+
+  if (!result.profile || !result.warnings) {
+    throw makeProtocolError("The sidecar profile identity mutation result is missing profile or warnings.");
+  }
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+    profile: result.profile,
+    warnings: result.warnings,
+  };
+}
+
+function parseIdentityPresetListEnvelope(value: unknown, receivedAt: string): IdentityPresetListSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentityPresetListResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseIdentityValidationEnvelope(value: unknown, receivedAt: string): IdentityValidationSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentityValidationResult(envelope.result);
 
   return {
     requestId: formatRequestId(envelope.requestId),
@@ -537,18 +653,26 @@ function parseProfileListResult(value: unknown): ProfileListResult {
 
 function parseProfileMutationResult(
   value: unknown,
-  options: { requireProfile: boolean; requireProfileInList: boolean },
+  options: { requireProfile: boolean; requireProfileInList: boolean; requireWarnings: boolean },
 ): ProfileMutationResult {
   const record = requireRecord(value, "The sidecar profile mutation result must be an object.");
   const list = parseProfileListResult(record);
   const rawProfile = record.profile;
+  const warnings = record.warnings === undefined ? undefined : parseIdentityWarningArray(record.warnings, "warnings");
+
+  if (options.requireWarnings && warnings === undefined) {
+    throw makeProtocolError("The sidecar profile identity mutation result is missing warnings.");
+  }
 
   if (rawProfile === undefined) {
     if (options.requireProfile) {
       throw makeProtocolError("The sidecar profile mutation result is missing profile.");
     }
 
-    return list;
+    return compactOptionalFields({
+      ...list,
+      warnings,
+    });
   }
 
   const profile = parseProfileRecord(rawProfile);
@@ -556,9 +680,48 @@ function parseProfileMutationResult(
     throw makeProtocolError("The sidecar profile mutation result profile is not present in the refreshed list.");
   }
 
-  return {
+  return compactOptionalFields({
     ...list,
     profile,
+    warnings,
+  });
+}
+
+function parseIdentityPresetListResult(value: unknown): IdentityPresetListResult {
+  const record = requireRecord(value, "The sidecar identity preset list result must be an object.");
+  requireLiteralNumber(record.identityVersion, "identityVersion", 1);
+  const presets = parseIdentityArray(record.presets, "presets");
+  const count = requireNonNegativeInteger(record.count, "count");
+
+  if (count !== presets.length) {
+    throw makeProtocolError("The sidecar identity preset count does not match the presets array length.");
+  }
+
+  const presetIds = new Set<string>();
+  for (const [index, preset] of presets.entries()) {
+    if (preset.presetId === null) {
+      throw makeProtocolError(`The sidecar identity preset field presets[${index}].presetId must be present.`);
+    }
+    if (presetIds.has(preset.presetId)) {
+      throw makeProtocolError("The sidecar identity preset list contains duplicate presetId values.");
+    }
+    presetIds.add(preset.presetId);
+  }
+
+  return {
+    identityVersion: 1,
+    presets,
+    count,
+  };
+}
+
+function parseIdentityValidationResult(value: unknown): IdentityValidationResult {
+  const record = requireRecord(value, "The sidecar identity validation result must be an object.");
+  requireLiteralNumber(record.identityVersion, "identityVersion", 1);
+  return {
+    identityVersion: 1,
+    identity: parseProfileIdentity(record.identity, "identity"),
+    warnings: parseIdentityWarningArray(record.warnings, "warnings"),
   };
 }
 
@@ -832,6 +995,7 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
     updatedAt,
     defaults: parseProfileDefaults(record.defaults, `${field}.defaults`),
     storage: parseProfileStorage(record.storage, id, `${field}.storage`),
+    identity: parseProfileIdentity(record.identity, `${field}.identity`),
     ...(metadata === undefined ? {} : { metadata }),
   };
 }
@@ -870,12 +1034,340 @@ function parseProfileStorage(value: unknown, profileId: string, field: string): 
   };
 }
 
-function requireStoreVersion(value: unknown): 1 {
-  if (value !== 1) {
-    throw makeProtocolError("The sidecar profile result field storeVersion must be 1.");
+function parseIdentityArray(value: unknown, field: string): ProfileIdentity[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be an array.`);
   }
 
-  return 1;
+  return value.map((item, index) => parseProfileIdentity(item, `${field}[${index}]`));
+}
+
+function parseProfileIdentity(value: unknown, field: string): ProfileIdentity {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  requireExactKeys(record, [
+    "identityVersion",
+    "label",
+    "presetId",
+    "browser",
+    "navigator",
+    "screen",
+    "locale",
+    "canvas",
+    "audio",
+    "webgl",
+    "webrtc",
+  ], field);
+  requireLiteralNumber(record.identityVersion, `${field}.identityVersion`, 1);
+
+  return {
+    identityVersion: 1,
+    label: requireIdentityText(record.label, `${field}.label`, { maxLength: 128 }),
+    presetId: parseIdentityPresetId(record.presetId, `${field}.presetId`),
+    browser: parseBrowserIdentitySurface(record.browser, `${field}.browser`),
+    navigator: parseNavigatorIdentitySurface(record.navigator, `${field}.navigator`),
+    screen: parseScreenIdentitySurface(record.screen, `${field}.screen`),
+    locale: parseLocaleIdentitySurface(record.locale, `${field}.locale`),
+    canvas: parseNoiseIdentitySurface(record.canvas, `${field}.canvas`, "canvas"),
+    audio: parseNoiseIdentitySurface(record.audio, `${field}.audio`, "audio"),
+    webgl: parseWebGlIdentitySurface(record.webgl, `${field}.webgl`),
+    webrtc: parseWebRtcIdentitySurface(record.webrtc, `${field}.webrtc`),
+  };
+}
+
+function parseIdentityPresetId(value: unknown, field: string): string | null {
+  if (value === null) {
+    return null;
+  }
+  return requireIdentityText(value, field, { maxLength: 80 });
+}
+
+function parseBrowserIdentitySurface(value: unknown, field: string): ProfileIdentity["browser"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  requireAllowedKeys(record, ["mode", "userAgent", "clientHints"], ["mode", "userAgent"], field);
+  const clientHints = record.clientHints === undefined ? undefined : parseBrowserClientHints(record.clientHints, `${field}.clientHints`);
+  return compactOptionalFields({
+    mode,
+    userAgent: requireIdentityText(record.userAgent, `${field}.userAgent`, { maxLength: 512 }),
+    clientHints,
+  });
+}
+
+function parseBrowserClientHints(value: unknown, field: string): BrowserClientHints {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  requireAllowedKeys(record, ["platform", "platformVersion", "architecture", "bitness", "model", "mobile"], [], field);
+  const parsed: BrowserClientHints = {};
+
+  for (const key of ["platform", "platformVersion", "architecture", "bitness", "model"] as const) {
+    if (record[key] !== undefined) {
+      parsed[key] = requireIdentityText(record[key], `${field}.${key}`, {
+        maxLength: 80,
+        allowEmpty: key === "platformVersion" || key === "model",
+      });
+    }
+  }
+  if (record.mobile !== undefined) {
+    parsed.mobile = requireBoolean(record.mobile, `${field}.mobile`);
+  }
+
+  return parsed;
+}
+
+function parseNavigatorIdentitySurface(value: unknown, field: string): ProfileIdentity["navigator"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  const required = ["mode", "platform", "hardwareConcurrency", "deviceMemory", "uaPlatform", "uaPlatformVersion", "uaArchitecture", "uaMobile"];
+  requireAllowedKeys(record, required, required, field);
+  return {
+    mode,
+    platform: requireIdentityText(record.platform, `${field}.platform`, { maxLength: 80 }),
+    hardwareConcurrency: requireIdentityInteger(record.hardwareConcurrency, `${field}.hardwareConcurrency`, 1, 128),
+    deviceMemory: requireIdentityNumber(record.deviceMemory, `${field}.deviceMemory`, 0.25, 128),
+    uaPlatform: requireIdentityText(record.uaPlatform, `${field}.uaPlatform`, { maxLength: 80 }),
+    uaPlatformVersion: requireIdentityText(record.uaPlatformVersion, `${field}.uaPlatformVersion`, { maxLength: 80, allowEmpty: true }),
+    uaArchitecture: requireIdentityText(record.uaArchitecture, `${field}.uaArchitecture`, { maxLength: 80 }),
+    uaMobile: requireBoolean(record.uaMobile, `${field}.uaMobile`),
+  };
+}
+
+function parseScreenIdentitySurface(value: unknown, field: string): ProfileIdentity["screen"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  const required = ["mode", "width", "height", "viewportWidth", "viewportHeight", "colorDepth", "pixelRatio"];
+  requireAllowedKeys(record, required, required, field);
+  return {
+    mode,
+    width: requireIdentityInteger(record.width, `${field}.width`, 1, 10000),
+    height: requireIdentityInteger(record.height, `${field}.height`, 1, 10000),
+    viewportWidth: requireIdentityInteger(record.viewportWidth, `${field}.viewportWidth`, 1, 10000),
+    viewportHeight: requireIdentityInteger(record.viewportHeight, `${field}.viewportHeight`, 1, 10000),
+    colorDepth: requireIdentityInteger(record.colorDepth, `${field}.colorDepth`, 1, 64),
+    pixelRatio: requireIdentityNumber(record.pixelRatio, `${field}.pixelRatio`, 0.25, 8),
+  };
+}
+
+function parseLocaleIdentitySurface(value: unknown, field: string): ProfileIdentity["locale"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  const required = ["mode", "locale", "languages", "timezoneId"];
+  requireAllowedKeys(record, required, required, field);
+  return {
+    mode,
+    locale: requireLanguageTag(record.locale, `${field}.locale`),
+    languages: parseLanguageArray(record.languages, `${field}.languages`),
+    timezoneId: requireTimezoneId(record.timezoneId, `${field}.timezoneId`),
+  };
+}
+
+function parseNoiseIdentitySurface(value: unknown, field: string, surface: "canvas" | "audio"): ProfileIdentity["canvas"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityNoiseMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  requireAllowedKeys(record, ["mode", "noiseSeed"], ["mode", "noiseSeed"], field);
+  return {
+    mode,
+    noiseSeed: requireIdentityInteger(record.noiseSeed, `${field}.noiseSeed`, 0, 1000000),
+  };
+}
+
+function parseWebGlIdentitySurface(value: unknown, field: string): ProfileIdentity["webgl"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  requireAllowedKeys(record, ["mode", "vendor", "renderer", "noiseSeed"], ["mode", "vendor", "renderer"], field);
+  const noiseSeed = record.noiseSeed === undefined ? undefined : requireIdentityInteger(record.noiseSeed, `${field}.noiseSeed`, 0, 1000000);
+  return compactOptionalFields({
+    mode,
+    vendor: requireIdentityText(record.vendor, `${field}.vendor`, { maxLength: 512 }),
+    renderer: requireIdentityText(record.renderer, `${field}.renderer`, { maxLength: 512 }),
+    noiseSeed,
+  });
+}
+
+function parseWebRtcIdentitySurface(value: unknown, field: string): ProfileIdentity["webrtc"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  requireAllowedKeys(record, ["mode", "policy"], ["mode", "policy"], field);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  const policy = requireWebRtcPolicy(record.policy, `${field}.policy`);
+  if (mode === "real" && policy !== "real") {
+    throw makeProtocolError(`The sidecar identity field ${field}.policy must be real when mode is real.`);
+  }
+  return { mode, policy };
+}
+
+function parseIdentityWarningArray(value: unknown, field: string): IdentityWarning[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar identity warning field ${field} must be an array.`);
+  }
+
+  return value.map((item, index) => parseIdentityWarning(item, `${field}[${index}]`));
+}
+
+function parseIdentityWarning(value: unknown, field: string): IdentityWarning {
+  const record = requireRecord(value, `The sidecar identity warning field ${field} must be an object.`);
+  requireExactKeys(record, ["code", "message", "surface", "path"], field);
+  const surface = requireIdentitySurfaceName(record.surface, `${field}.surface`);
+  const path = requireIdentityWarningPath(record.path, `${field}.path`, surface);
+  return {
+    code: requireDiagnosticErrorCode(record.code, `${field}.code`),
+    message: requireSafeDiagnosticString(record.message, `${field}.message`),
+    surface,
+    path,
+  };
+}
+
+function requireExactKeys(record: Record<string, unknown>, keys: string[], field: string): void {
+  requireAllowedKeys(record, keys, keys, field);
+}
+
+function requireAllowedKeys(record: Record<string, unknown>, allowed: string[], required: string[], field: string): void {
+  const allowedSet = new Set(allowed);
+  const requiredSet = new Set(required);
+  for (const key of Object.keys(record)) {
+    if (!allowedSet.has(key)) {
+      throw makeProtocolError(`The sidecar identity field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of requiredSet) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar identity field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function requireIdentityText(value: unknown, field: string, options: { maxLength: number; allowEmpty?: boolean }): string {
+  const text = requireString(value, field);
+  if (!options.allowEmpty && !text) {
+    throw makeProtocolError(`The sidecar identity field ${field} must not be empty.`);
+  }
+  if (text.length > options.maxLength || containsControlCharacters(text)) {
+    throw makeProtocolError(`The sidecar identity field ${field} is outside supported bounds.`);
+  }
+  return text;
+}
+
+function requireIdentityInteger(value: unknown, field: string, minValue: number, maxValue: number): number {
+  const number = requireNumber(value, field);
+  if (!Number.isInteger(number) || number < minValue || number > maxValue) {
+    throw makeProtocolError(`The sidecar identity field ${field} is outside supported bounds.`);
+  }
+  return number;
+}
+
+function requireIdentityNumber(value: unknown, field: string, minValue: number, maxValue: number): number {
+  const number = requireNumber(value, field);
+  if (number < minValue || number > maxValue) {
+    throw makeProtocolError(`The sidecar identity field ${field} is outside supported bounds.`);
+  }
+  return number;
+}
+
+function requireIdentityMaskingMode(value: unknown, field: string): IdentityMaskingMode {
+  if (value === "real" || value === "masked" || value === "custom") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported mode.`);
+}
+
+function requireIdentityNoiseMode(value: unknown, field: string): IdentityNoiseMode {
+  if (value === "real" || value === "noise") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported mode.`);
+}
+
+function requireWebRtcPolicy(value: unknown, field: string): WebRtcPolicy {
+  if (value === "real" || value === "disableNonProxiedUdp" || value === "block") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported WebRTC policy.`);
+}
+
+function requireIdentitySurfaceName(value: unknown, field: string): IdentitySurface {
+  if (
+    value === "browser" ||
+    value === "navigator" ||
+    value === "screen" ||
+    value === "locale" ||
+    value === "canvas" ||
+    value === "audio" ||
+    value === "webgl" ||
+    value === "webrtc"
+  ) {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity warning field ${field} must be a known surface.`);
+}
+
+function requireIdentityWarningPath(value: unknown, field: string, surface: IdentitySurface): string {
+  const path = requireSafeDiagnosticString(value, field);
+  if (!new RegExp(`^${surface}(?:\\.[A-Za-z][A-Za-z0-9]*(?:\\[\\])?)*$`).test(path)) {
+    throw makeProtocolError(`The sidecar identity warning field ${field} must be a safe identity path.`);
+  }
+  return path;
+}
+
+function requireLanguageTag(value: unknown, field: string): string {
+  const language = requireIdentityText(value, field, { maxLength: 20 });
+  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(language)) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a valid language tag.`);
+  }
+  return language;
+}
+
+function parseLanguageArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded language array.`);
+  }
+  return value.map((item, index) => requireLanguageTag(item, `${field}[${index}]`));
+}
+
+function requireTimezoneId(value: unknown, field: string): string {
+  const timezone = requireIdentityText(value, field, { maxLength: 80 });
+  if (!/^(?:UTC|[A-Za-z_]+(?:\/[A-Za-z0-9_+.-]+)+)$/.test(timezone)) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a valid timezone id.`);
+  }
+  return timezone;
+}
+
+function containsControlCharacters(value: string): boolean {
+  return Array.from(value).some((character) => character.charCodeAt(0) < 32);
+}
+
+function requireStoreVersion(value: unknown): 2 {
+  if (value !== 2) {
+    throw makeProtocolError("The sidecar profile result field storeVersion must be 2.");
+  }
+
+  return 2;
 }
 
 function requireNonBlankString(value: unknown, field: string): string {
@@ -1245,6 +1737,7 @@ function sameProfileRecord(left: ProfileRecord, right: ProfileRecord): boolean {
     left.defaults.startUrl === right.defaults.startUrl &&
     left.defaults.proxyMode === right.defaults.proxyMode &&
     left.defaults.fingerprintMode === right.defaults.fingerprintMode &&
+    JSON.stringify(left.identity) === JSON.stringify(right.identity) &&
     JSON.stringify(left.metadata ?? null) === JSON.stringify(right.metadata ?? null)
   );
 }
