@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
 from theprivator_sidecar.legacy_import import import_legacy_profiles, scan_legacy_profiles
 from theprivator_sidecar.profiles import ProfileStore
 from theprivator_sidecar.protocol import (
@@ -129,7 +130,6 @@ def test_scan_success_returns_stable_opaque_candidates_and_safe_metadata_without
         "legacyFolder": "profile-one",
         "legacyName": "Research",
         "chromiumVersion": "116.0.0",
-        "remoteControlPort": 9222,
         "hasUserData": True,
     }
     assert ProfileStore(app_root).list() == before_store
@@ -144,6 +144,7 @@ def test_scan_success_returns_stable_opaque_candidates_and_safe_metadata_without
         "alice-should-not-leak",
         "secret-should-not-leak",
         "proxy.example.invalid",
+        "9222",
         tmp_path / "legacy-secret-path",
         "data that must not be echoed",
     )
@@ -363,9 +364,9 @@ def test_import_success_creates_profile_through_store_copies_user_data_and_prese
         "legacyFolder": "profile-one",
         "legacyName": "Legacy Research",
         "chromiumVersion": "116.0.0",
-        "remoteControlPort": 9222,
         "hasUserData": True,
     }
+    assert profile["identity"] == DEFAULT_REAL_IDENTITY
     assert not Path(profile["storage"]["profileDir"]).is_absolute()
     assert not Path(profile["storage"]["userDataDir"]).is_absolute()
     copied_file = app_root / profile["storage"]["userDataDir"] / "Default" / "Preferences"
@@ -375,6 +376,7 @@ def test_import_success_creates_profile_through_store_copies_user_data_and_prese
     store_payload = (app_root / "profile-store" / "profiles.json").read_text(encoding="utf-8")
     assert str(legacy_root) not in store_payload
     assert str(app_root) not in store_payload
+    assert "9222" not in store_payload
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
@@ -384,6 +386,7 @@ def test_import_success_creates_profile_through_store_copies_user_data_and_prese
         app_root,
         "alice-should-not-leak",
         "secret-should-not-leak",
+        "9222",
         tmp_path / "legacy-secret-path",
         "copied-data-not-rendered",
     )

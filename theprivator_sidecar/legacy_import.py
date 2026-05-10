@@ -350,10 +350,6 @@ def _safe_metadata(
     if chromium_version is not None:
         metadata["chromiumVersion"] = chromium_version
 
-    remote_control_port = _optional_port(config.get("rc_port"))
-    if remote_control_port is not None:
-        metadata["remoteControlPort"] = remote_control_port
-
     return metadata
 
 
@@ -569,19 +565,6 @@ def _is_safe_metadata_string(value: str) -> bool:
         or "://" in value
     )
 
-
-def _optional_port(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        port = value
-    elif isinstance(value, str) and value.isdigit():
-        port = int(value)
-    else:
-        return None
-    if 0 < port <= 65535:
-        return port
-    return None
 
 
 __all__ = [

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from theprivator import __version__ as app_version
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -234,7 +235,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     create_diagnostic = parse_ndjson(create_proc.stderr)[0]
     assert create_proc.returncode == 0
     assert create_response["ok"] is True
-    assert create_response["result"]["storeVersion"] == 1
+    assert create_response["result"]["storeVersion"] == 2
     assert create_response["result"]["count"] == 1
     profile = create_response["result"]["profile"]
     assert profile["name"] == "Research"
@@ -248,6 +249,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
         "profileDir": f"profile-store/profiles/{profile['id']}",
         "userDataDir": f"profile-store/profiles/{profile['id']}/user-data",
     }
+    assert profile["identity"] == DEFAULT_REAL_IDENTITY
     assert create_diagnostic["event"] == "sidecar.request"
     assert create_diagnostic["method"] == "profiles.create"
     assert create_diagnostic["status"] == "ok"
@@ -293,7 +295,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     )
     delete_response = parse_ndjson(delete_proc.stdout)[0]
     assert delete_response["ok"] is True
-    assert delete_response["result"] == {"storeVersion": 1, "profiles": [], "count": 0}
+    assert delete_response["result"] == {"storeVersion": 2, "profiles": [], "count": 0}
 
 
 def test_profiles_diagnostics_are_redacted_even_when_stdout_contains_profile_data(tmp_path):

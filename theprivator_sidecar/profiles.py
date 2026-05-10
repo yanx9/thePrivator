@@ -14,9 +14,10 @@ import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Union
 
+from .identity import DEFAULT_REAL_IDENTITY, curated_preset, normalize_identity, warnings_for_identity
 from .protocol import (
     INVALID_REQUEST,
     PROFILE_DELETE_FAILED,
@@ -30,7 +31,7 @@ from .protocol import (
     SidecarError,
 )
 
-STORE_VERSION = 1
+STORE_VERSION = 2
 STORE_DIR = "profile-store"
 PROFILES_DIR = "profiles"
 PROFILES_FILE = "profiles.json"
@@ -91,6 +92,7 @@ class ProfileRecord:
     updatedAt: str
     defaults: ProfileDefaults
     storage: ProfileStorage
+    identity: JsonObject
     metadata: Optional[JsonObject] = None
 
     @classmethod
@@ -104,12 +106,27 @@ class ProfileRecord:
             updatedAt=now,
             defaults=ProfileDefaults(),
             storage=storage_for_profile(profile_id),
+            identity=default_identity(),
             metadata=normalize_profile_metadata(metadata),
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ProfileRecord":
+    def from_dict(cls, data: Mapping[str, Any], *, store_version: int = STORE_VERSION) -> "ProfileRecord":
         if not isinstance(data, Mapping):
+            raise_corrupt_store()
+
+        allowed_fields = {
+            "id",
+            "name",
+            "createdAt",
+            "updatedAt",
+            "defaults",
+            "storage",
+            "metadata",
+        }
+        if store_version == STORE_VERSION:
+            allowed_fields.add("identity")
+        if set(data) - allowed_fields:
             raise_corrupt_store()
 
         profile_id = data.get("id")
@@ -118,7 +135,14 @@ class ProfileRecord:
         updated_at = data.get("updatedAt")
         defaults = data.get("defaults")
         storage = data.get("storage")
-        metadata = normalize_profile_metadata(data.get("metadata")) if "metadata" in data else None
+        metadata = (
+            normalize_profile_metadata(
+                data.get("metadata"),
+                scrub_unsafe_legacy_fields=(store_version == 1),
+            )
+            if "metadata" in data
+            else None
+        )
 
         if not isinstance(profile_id, str) or not is_uuid(profile_id):
             raise_corrupt_store()
@@ -139,6 +163,13 @@ class ProfileRecord:
         if PurePosixPath(expected_storage["userDataDir"]).is_absolute():
             raise_corrupt_store()
 
+        if store_version == 1:
+            identity = default_identity()
+        elif store_version == STORE_VERSION:
+            identity = normalize_profile_identity(data.get("identity"))
+        else:
+            raise_corrupt_store()
+
         return cls(
             id=profile_id,
             name=name,
@@ -146,6 +177,7 @@ class ProfileRecord:
             updatedAt=updated_at,
             defaults=ProfileDefaults(),
             storage=storage_for_profile(profile_id),
+            identity=identity,
             metadata=metadata,
         )
 
@@ -157,6 +189,19 @@ class ProfileRecord:
             updatedAt=utc_now_iso(),
             defaults=self.defaults,
             storage=self.storage,
+            identity=self.identity,
+            metadata=self.metadata,
+        )
+
+    def with_identity(self, identity: Mapping[str, Any]) -> "ProfileRecord":
+        return ProfileRecord(
+            id=self.id,
+            name=self.name,
+            createdAt=self.createdAt,
+            updatedAt=utc_now_iso(),
+            defaults=self.defaults,
+            storage=self.storage,
+            identity=normalize_profile_identity(identity),
             metadata=self.metadata,
         )
 
@@ -168,6 +213,7 @@ class ProfileRecord:
             "updatedAt": self.updatedAt,
             "defaults": asdict(self.defaults),
             "storage": asdict(self.storage),
+            "identity": normalize_profile_identity(self.identity),
         }
         if self.metadata is not None:
             payload["metadata"] = normalize_profile_metadata(self.metadata)
@@ -241,6 +287,37 @@ class ProfileStore:
         self._write_profiles(updated_profiles)
         return self._collection_response(updated_profiles, profile=renamed)
 
+    def update_identity(self, profile_id: str, identity: Mapping[str, Any]) -> JsonObject:
+        """Replace one profile identity and return validation warnings plus refreshed list."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Profile id is required.",
+            )
+
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        updated = target.with_identity(identity)
+        warnings = warnings_for_identity(updated.identity)
+        updated_profiles = sort_profiles(
+            [updated if profile.id == target.id else profile for profile in profiles]
+        )
+        self._write_profiles(updated_profiles)
+        return self._collection_response(
+            updated_profiles,
+            profile=updated,
+            warnings=warnings,
+        )
+
+    def apply_identity_preset(self, profile_id: str, preset_id: str) -> JsonObject:
+        """Apply a curated identity preset to one profile and return warnings."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Profile id is required.",
+            )
+        return self.update_identity(profile_id, curated_preset(preset_id))
+
     def delete(self, profile_id: str) -> JsonObject:
         """Delete only the profile record; browser user-data stays on disk."""
         if not isinstance(profile_id, str) or not profile_id.strip():
@@ -284,9 +361,12 @@ class ProfileStore:
                 message="Profile store is unavailable.",
             ) from exc
 
-        profiles = parse_store_payload(payload)
+        profiles, needs_migration = parse_store_payload_for_read(payload)
         ensure_no_duplicate_names(profiles)
-        return sort_profiles(profiles)
+        sorted_profiles = sort_profiles(profiles)
+        if needs_migration:
+            self._write_profiles(sorted_profiles)
+        return sorted_profiles
 
     def _write_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
         try:
@@ -383,6 +463,7 @@ class ProfileStore:
         self,
         profiles: Sequence[ProfileRecord],
         profile: Optional[ProfileRecord] = None,
+        warnings: Optional[list[JsonObject]] = None,
     ) -> JsonObject:
         sorted_profiles = sort_profiles(profiles)
         response: JsonObject = {
@@ -392,20 +473,45 @@ class ProfileStore:
         }
         if profile is not None:
             response["profile"] = profile.to_dict()
+        if warnings is not None:
+            response["warnings"] = warnings
         return response
 
 
 def parse_store_payload(payload: Any) -> List[ProfileRecord]:
     """Parse and validate the on-disk store JSON schema."""
+    profiles, _needs_migration = parse_store_payload_for_read(payload)
+    return profiles
+
+
+def parse_store_payload_for_read(payload: Any) -> tuple[List[ProfileRecord], bool]:
+    """Parse v1/v2 store payloads and report whether v1 should be rewritten."""
     if not isinstance(payload, Mapping):
         raise_corrupt_store()
-    if payload.get("storeVersion") != STORE_VERSION:
+
+    store_version = payload.get("storeVersion")
+    if store_version not in {1, STORE_VERSION}:
         raise_corrupt_store()
 
     raw_profiles = payload.get("profiles")
     if not isinstance(raw_profiles, list):
         raise_corrupt_store()
-    return [ProfileRecord.from_dict(raw_profile) for raw_profile in raw_profiles]
+
+    profiles = [
+        ProfileRecord.from_dict(raw_profile, store_version=store_version)
+        for raw_profile in raw_profiles
+    ]
+    return profiles, store_version == 1
+
+
+def default_identity() -> JsonObject:
+    """Return the normalized default real identity for a new or migrated profile."""
+    return normalize_profile_identity(DEFAULT_REAL_IDENTITY)
+
+
+def normalize_profile_identity(identity: Any) -> JsonObject:
+    """Normalize profile identity before persistence or response serialization."""
+    return normalize_identity(identity)
 
 
 def storage_for_profile(profile_id: str) -> ProfileStorage:
@@ -429,42 +535,113 @@ def ensure_no_duplicate_names(profiles: Sequence[ProfileRecord]) -> None:
         seen.add(folded)
 
 
-def normalize_profile_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[JsonObject]:
+_SKIP_METADATA_VALUE = object()
+_UNSAFE_METADATA_KEYS = {
+    "absolutepath",
+    "command",
+    "debugport",
+    "pid",
+    "process",
+    "proxyurl",
+    "proxyuser",
+    "proxyusername",
+    "proxypass",
+    "proxypassword",
+    "rcport",
+    "remotecontrolport",
+    "remotedebuggingport",
+    "status",
+}
+
+
+def normalize_profile_metadata(
+    metadata: Optional[Mapping[str, Any]],
+    *,
+    scrub_unsafe_legacy_fields: bool = False,
+) -> Optional[JsonObject]:
     """Return a JSON-safe copy of optional profile metadata.
 
     Legacy import metadata is deliberately constrained to a JSON object so old
     profile records can omit it and imported records cannot smuggle Python
-    objects, paths, or non-finite numbers into ``profiles.json``.
+    objects, paths, proxy-like values, debug ports, or non-finite numbers into
+    ``profiles.json``. During v1 migration only, formerly persisted sensitive
+    optional fields are scrubbed so otherwise valid M001 profiles can be safely
+    rewritten as v2 records.
     """
     if metadata is None:
         return None
     if not isinstance(metadata, Mapping):
         raise_corrupt_store()
-    return {key: _json_safe_metadata_value(value) for key, value in metadata.items() if _is_string_key(key)}
+    normalized: JsonObject = {}
+    for key, value in metadata.items():
+        if not _is_string_key(key, scrub_unsafe_legacy_fields=scrub_unsafe_legacy_fields):
+            continue
+        safe_value = _json_safe_metadata_value(value, scrub_unsafe_legacy_fields=scrub_unsafe_legacy_fields)
+        if safe_value is _SKIP_METADATA_VALUE:
+            continue
+        normalized[key] = safe_value
+    return normalized
 
 
-def _is_string_key(key: Any) -> bool:
+def _is_string_key(key: Any, *, scrub_unsafe_legacy_fields: bool = False) -> bool:
     if not isinstance(key, str) or not key:
+        raise_corrupt_store()
+    if _is_unsafe_metadata_key(key):
+        if scrub_unsafe_legacy_fields:
+            return False
         raise_corrupt_store()
     return True
 
 
-def _json_safe_metadata_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
+def _is_unsafe_metadata_key(key: str) -> bool:
+    folded = key.casefold()
+    return folded in _UNSAFE_METADATA_KEYS or "proxy" in folded or "debugport" in folded
+
+
+def _json_safe_metadata_value(value: Any, *, scrub_unsafe_legacy_fields: bool = False) -> Any:
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, str):
+        if _is_safe_metadata_string(value):
+            return value
+        if scrub_unsafe_legacy_fields:
+            return _SKIP_METADATA_VALUE
+        raise_corrupt_store()
     if isinstance(value, float):
         if math.isfinite(value):
             return value
         raise_corrupt_store()
     if isinstance(value, list):
-        return [_json_safe_metadata_value(item) for item in value]
+        normalized_items = []
+        for item in value:
+            safe_item = _json_safe_metadata_value(item, scrub_unsafe_legacy_fields=scrub_unsafe_legacy_fields)
+            if safe_item is not _SKIP_METADATA_VALUE:
+                normalized_items.append(safe_item)
+        return normalized_items
     if isinstance(value, Mapping):
-        return {
-            key: _json_safe_metadata_value(nested_value)
-            for key, nested_value in value.items()
-            if _is_string_key(key)
-        }
+        normalized: JsonObject = {}
+        for key, nested_value in value.items():
+            if not _is_string_key(key, scrub_unsafe_legacy_fields=scrub_unsafe_legacy_fields):
+                continue
+            safe_value = _json_safe_metadata_value(nested_value, scrub_unsafe_legacy_fields=scrub_unsafe_legacy_fields)
+            if safe_value is not _SKIP_METADATA_VALUE:
+                normalized[key] = safe_value
+        return normalized
     raise_corrupt_store()
+
+
+def _is_safe_metadata_string(value: str) -> bool:
+    if _contains_control_characters(value):
+        return False
+    return not (
+        PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+        or "://" in value
+    )
+
+
+def _contains_control_characters(value: str) -> bool:
+    return any(ord(character) < 32 for character in value)
 
 
 def normalize_profile_name(name: str) -> str:
