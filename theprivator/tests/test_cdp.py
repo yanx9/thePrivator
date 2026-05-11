@@ -13,9 +13,12 @@ from theprivator_sidecar.cdp import (
     CdpClient,
     CdpEndpoint,
     apply_identity_cdp_overrides,
+    close_page_target,
+    create_page_target_endpoint,
     discover_devtools_endpoint,
     discover_page_target_endpoint,
     read_devtools_active_port,
+    select_page_target_endpoint,
 )
 from theprivator_sidecar.protocol import IDENTITY_CDP_FAILED, SidecarError
 
@@ -247,7 +250,11 @@ def test_page_target_discovery_uses_target_list_and_validates_loopback_page_webs
         return FakeResponse(
             [
                 {"type": "service_worker", "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/ignored"},
-                {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/page-id"},
+                {
+                    "id": "initial-target",
+                    "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/page-id",
+                },
             ]
         )
 
@@ -260,7 +267,120 @@ def test_page_target_discovery_uses_target_list_and_validates_loopback_page_webs
     )
 
     assert page.web_socket_debugger_url == "ws://127.0.0.1:45678/devtools/page/page-id"
+    assert page.target_id == "initial-target"
     assert calls == [("http://127.0.0.1:45678/json/list", 0.025)]
+
+
+def test_select_page_target_endpoint_uses_validated_target_id_without_leaking_urls():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+    calls: list[tuple[str, float]] = []
+
+    def fake_get(url: str, *, timeout: float) -> FakeResponse:
+        calls.append((url, timeout))
+        return FakeResponse(
+            [
+                {
+                    "id": "initial-target",
+                    "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/initial",
+                },
+                {
+                    "id": "created-target",
+                    "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/created",
+                },
+            ]
+        )
+
+    page = select_page_target_endpoint(
+        endpoint,
+        "created-target",
+        http_get=fake_get,
+        timeout_seconds=0.1,
+        poll_interval_seconds=0.001,
+        http_timeout_seconds=0.025,
+    )
+
+    assert page.web_socket_debugger_url == "ws://127.0.0.1:45678/devtools/page/created"
+    assert page.target_id == "created-target"
+    assert calls == [("http://127.0.0.1:45678/json/list", 0.025)]
+
+
+@pytest.mark.parametrize("target_id", ["", "../secret", "target id", "x" * 129])
+def test_select_page_target_endpoint_rejects_bad_target_ids(target_id):
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    with pytest.raises(SidecarError) as exc_info:
+        select_page_target_endpoint(endpoint, target_id)
+
+    forbidden = (target_id,) if target_id else ()
+    assert_sidecar_error(exc_info, forbidden=forbidden)
+
+
+def test_create_page_target_endpoint_uses_browser_cdp_and_discovers_created_page():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+    socket = FakeSocket([json.dumps({"id": 1, "result": {"targetId": "created-target"}})])
+
+    def fake_get(url: str, *, timeout: float) -> FakeResponse:
+        return FakeResponse(
+            [
+                {
+                    "id": "created-target",
+                    "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/created",
+                }
+            ]
+        )
+
+    page = create_page_target_endpoint(
+        endpoint,
+        client_factory=lambda url, **kwargs: CdpClient(url, connect=lambda _url, _timeout: socket, **kwargs),
+        http_get=fake_get,
+        timeout_seconds=0.25,
+        poll_interval_seconds=0.001,
+        http_timeout_seconds=0.025,
+    )
+
+    assert page.web_socket_debugger_url == "ws://127.0.0.1:45678/devtools/page/created"
+    assert page.target_id == "created-target"
+    assert socket.sent == [
+        {"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}
+    ]
+    assert socket.closed is True
+
+
+def test_close_page_target_sends_validated_close_command_and_closes_socket():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+    socket = FakeSocket([json.dumps({"id": 1, "result": {"success": True}})])
+
+    result = close_page_target(
+        endpoint,
+        "created-target",
+        client_factory=lambda url, **kwargs: CdpClient(url, connect=lambda _url, _timeout: socket, **kwargs),
+        timeout_seconds=0.25,
+    )
+
+    assert result == {"closed": True}
+    assert socket.sent == [
+        {"id": 1, "method": "Target.closeTarget", "params": {"targetId": "created-target"}}
+    ]
+    assert socket.closed is True
 
 
 @pytest.mark.parametrize(

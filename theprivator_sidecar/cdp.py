@@ -37,6 +37,7 @@ _SAFE_HTTP_HOST = "127.0.0.1"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _MAX_ACTIVE_PORT_BYTES = 512
 _MAX_TARGET_PATH_LENGTH = 256
+_MAX_TARGET_ID_LENGTH = 128
 
 
 class _SocketLike(Protocol):
@@ -91,6 +92,7 @@ class CdpPageEndpoint:
     """Internal page target details used for page-scoped Emulation/Runtime work."""
 
     web_socket_debugger_url: str
+    target_id: Optional[str] = None
 
     def to_safe_dict(self) -> JsonObject:
         """Return only non-sensitive summary fields for local assertions."""
@@ -184,6 +186,116 @@ def discover_page_target_endpoint(
     http_get: HttpGet = requests.get,
 ) -> CdpPageEndpoint:
     """Discover the first loopback page target for page-scoped CDP commands."""
+    return _discover_page_target_endpoint(
+        endpoint,
+        target_id=None,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        http_timeout_seconds=http_timeout_seconds,
+        http_get=http_get,
+    )
+
+
+def select_page_target_endpoint(
+    endpoint: CdpEndpoint,
+    target_id: str,
+    *,
+    timeout_seconds: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+    http_get: HttpGet = requests.get,
+) -> CdpPageEndpoint:
+    """Discover a loopback page target by validated CDP target id."""
+    _validate_target_id(target_id)
+    return _discover_page_target_endpoint(
+        endpoint,
+        target_id=target_id,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        http_timeout_seconds=http_timeout_seconds,
+        http_get=http_get,
+    )
+
+
+def create_page_target_endpoint(
+    endpoint: CdpEndpoint,
+    *,
+    target_url: str = "about:blank",
+    client_factory: Optional[Callable[..., Any]] = None,
+    timeout_seconds: float = DEFAULT_WS_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+    http_get: HttpGet = requests.get,
+) -> CdpPageEndpoint:
+    """Create a new page target and return its validated page endpoint."""
+    if not isinstance(endpoint, CdpEndpoint):
+        raise _cdp_error()
+    if target_url != "about:blank" and not target_url.startswith("http://127.0.0.1:"):
+        raise _cdp_error()
+    factory = client_factory or CdpClient
+    try:
+        with factory(endpoint.web_socket_debugger_url, timeout_seconds=timeout_seconds) as client:
+            result = client.command(
+                "Target.createTarget",
+                {"url": target_url},
+                timeout_seconds=timeout_seconds,
+            )
+    except SidecarError:
+        raise
+    except Exception as exc:
+        raise _cdp_error() from exc
+    target_id = result.get("targetId") if isinstance(result, Mapping) else None
+    if not isinstance(target_id, str):
+        raise _cdp_error()
+    _validate_target_id(target_id)
+    return select_page_target_endpoint(
+        endpoint,
+        target_id,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        http_timeout_seconds=http_timeout_seconds,
+        http_get=http_get,
+    )
+
+
+def close_page_target(
+    endpoint: CdpEndpoint,
+    target_id: str,
+    *,
+    client_factory: Optional[Callable[..., Any]] = None,
+    timeout_seconds: float = DEFAULT_WS_TIMEOUT_SECONDS,
+) -> JsonObject:
+    """Close a validated page target via the browser CDP endpoint."""
+    if not isinstance(endpoint, CdpEndpoint):
+        raise _cdp_error()
+    _validate_target_id(target_id)
+    factory = client_factory or CdpClient
+    try:
+        with factory(endpoint.web_socket_debugger_url, timeout_seconds=timeout_seconds) as client:
+            result = client.command(
+                "Target.closeTarget",
+                {"targetId": target_id},
+                timeout_seconds=timeout_seconds,
+            )
+    except SidecarError:
+        raise
+    except Exception as exc:
+        raise _cdp_error() from exc
+    success = result.get("success") if isinstance(result, Mapping) else None
+    if success is not True:
+        raise _cdp_error()
+    return {"closed": True}
+
+
+def _discover_page_target_endpoint(
+    endpoint: CdpEndpoint,
+    *,
+    target_id: Optional[str],
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    http_timeout_seconds: float,
+    http_get: HttpGet,
+) -> CdpPageEndpoint:
     if not isinstance(endpoint, CdpEndpoint):
         raise _cdp_error()
     deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -196,11 +308,16 @@ def discover_page_target_endpoint(
             for target in payload:
                 if not isinstance(target, Mapping) or target.get("type") != "page":
                     continue
+                candidate_id = target.get("id")
+                if target_id is not None and candidate_id != target_id:
+                    continue
                 web_socket_url = target.get("webSocketDebuggerUrl")
                 if not isinstance(web_socket_url, str) or not web_socket_url:
                     continue
                 _validate_loopback_page_ws_url(web_socket_url, expected_port=endpoint.port)
-                return CdpPageEndpoint(web_socket_debugger_url=web_socket_url)
+                if isinstance(candidate_id, str):
+                    _validate_target_id(candidate_id)
+                return CdpPageEndpoint(web_socket_debugger_url=web_socket_url, target_id=candidate_id)
             raise ValueError("page target was not found")
         except SidecarError:
             raise
@@ -502,6 +619,16 @@ def _validate_page_target_path(path: str) -> None:
     _validate_target_path(path, expected_prefix="/devtools/page/")
 
 
+def _validate_target_id(target_id: str) -> None:
+    if not isinstance(target_id, str) or not target_id:
+        raise _cdp_error()
+    if len(target_id) > _MAX_TARGET_ID_LENGTH:
+        raise _cdp_error()
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    if any(character not in allowed for character in target_id):
+        raise _cdp_error()
+
+
 def _validate_target_path(path: str, *, expected_prefix: str) -> None:
     if not isinstance(path, str) or not path:
         raise _cdp_error()
@@ -614,6 +741,8 @@ __all__ = [
     "DEVTOOLS_ACTIVE_PORT_FILE",
     "DevToolsActivePort",
     "apply_identity_cdp_overrides",
+    "close_page_target",
+    "create_page_target_endpoint",
     "discover_devtools_endpoint",
     "discover_page_target_endpoint",
     "page_navigate",
@@ -623,4 +752,5 @@ __all__ = [
     "set_locale_override",
     "set_timezone_override",
     "set_user_agent_override",
+    "select_page_target_endpoint",
 ]
