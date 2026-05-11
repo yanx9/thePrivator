@@ -226,6 +226,7 @@ label {
 .profile-feedback,
 .legacy-import-panel,
 .identity-summary-panel,
+.identity-audit-summary-panel,
 .identity-config-panel,
 .profile-card,
 .empty-state {
@@ -952,6 +953,7 @@ p {
 }
 
 .identity-summary-panel,
+.identity-audit-summary-panel,
 .identity-config-panel {
   display: grid;
   gap: 14px;
@@ -966,8 +968,15 @@ p {
   border-color: rgba(154, 178, 111, 0.34);
 }
 
+.identity-audit-summary-panel {
+  border-color: rgba(240, 198, 109, 0.3);
+}
+
 .identity-summary-panel__header,
+.identity-audit-summary-panel__header,
 .identity-config-panel__header,
+.identity-audit-panel__header,
+.identity-audit-page-card__header,
 .identity-panel-subhead {
   display: flex;
   gap: 14px;
@@ -976,22 +985,162 @@ p {
 }
 
 .identity-summary-panel h4,
-.identity-config-panel h4 {
+.identity-audit-summary-panel h4,
+.identity-config-panel h4,
+.identity-audit-panel h4,
+.identity-audit-page-card h5 {
   margin-bottom: 0;
 }
 
 .identity-summary-panel p,
+.identity-audit-summary-panel p,
 .identity-config-panel p,
+.identity-audit-panel p,
+.identity-audit-page-card p,
 .identity-muted-copy,
+.identity-audit-muted,
 .identity-mode-option small,
 .identity-warning-card p,
-.identity-error-feedback p {
+.identity-error-feedback p,
+.identity-audit-error p,
+.identity-audit-success p {
   color: var(--muted);
   line-height: 1.55;
 }
 
 .identity-config-panel {
   border-color: rgba(240, 198, 109, 0.32);
+}
+
+.identity-audit-panel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid rgba(240, 198, 109, 0.26);
+  border-radius: 20px;
+  background:
+    linear-gradient(145deg, rgba(240, 198, 109, 0.075), rgba(154, 178, 111, 0.045)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.identity-audit-observability,
+.identity-audit-status,
+.identity-audit-copy,
+.identity-audit-error,
+.identity-audit-success,
+.identity-audit-page-card {
+  padding: 14px;
+  border: 1px solid rgba(242, 234, 219, 0.12);
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.identity-audit-status {
+  border-color: rgba(240, 198, 109, 0.42);
+  color: #ffe6a6;
+  background: var(--warning-soft);
+}
+
+.identity-audit-copy {
+  border-color: rgba(154, 178, 111, 0.28);
+  background:
+    linear-gradient(180deg, rgba(154, 178, 111, 0.12), rgba(154, 178, 111, 0.045)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.identity-audit-copy p,
+.identity-audit-page-card p,
+.identity-audit-success p,
+.identity-audit-error p,
+.identity-audit-muted {
+  margin: 8px 0 0;
+}
+
+.identity-audit-error {
+  border-color: rgba(230, 120, 95, 0.46);
+  background:
+    linear-gradient(180deg, rgba(230, 120, 95, 0.14), rgba(230, 120, 95, 0.055)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.identity-audit-success {
+  border-color: rgba(154, 178, 111, 0.44);
+  background:
+    linear-gradient(180deg, rgba(154, 178, 111, 0.16), rgba(154, 178, 111, 0.06)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.identity-audit-error > strong {
+  color: #ffe0d7;
+}
+
+.identity-audit-success > strong,
+.identity-audit-copy > strong {
+  color: #def4b2;
+}
+
+.identity-audit-page-list,
+.identity-audit-expected-list {
+  display: grid;
+  gap: 12px;
+}
+
+.identity-audit-page-card {
+  min-width: 0;
+  border-radius: 22px;
+  background:
+    linear-gradient(145deg, rgba(242, 234, 219, 0.045), transparent 64%),
+    rgba(0, 0, 0, 0.13);
+}
+
+.identity-audit-page-card__surface-count {
+  border: 1px solid rgba(240, 198, 109, 0.3);
+  border-radius: 999px;
+  padding: 0.25rem 0.62rem;
+  color: #ffe6a6;
+  background: rgba(240, 198, 109, 0.09);
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.identity-audit-url {
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+  overflow-wrap: anywhere;
+}
+
+.identity-audit-user-action {
+  border-left: 3px solid rgba(240, 198, 109, 0.6);
+  padding-left: 10px;
+  color: #ffe6a6;
+}
+
+.identity-audit-expected-list {
+  margin-top: 12px;
+}
+
+.identity-audit-expected-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(242, 234, 219, 0.11);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.13);
+}
+
+.identity-audit-expected-row span {
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.identity-audit-page-card__actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
 }
 
 .identity-config-observability,
@@ -1483,7 +1632,8 @@ p {
   .empty-state,
   .profile-feedback,
   .legacy-candidate-row,
-  .legacy-outcome-card {
+  .legacy-outcome-card,
+  .identity-audit-page-card {
     transition-duration: 180ms;
     transition-property: transform, border-color, box-shadow;
     transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
@@ -1491,7 +1641,8 @@ p {
 
   .profile-card:hover,
   .legacy-candidate-row:hover,
-  .legacy-outcome-card:hover {
+  .legacy-outcome-card:hover,
+  .identity-audit-page-card:hover {
     transform: translateY(-2px);
     border-color: var(--line-strong);
     box-shadow:
@@ -1548,7 +1699,10 @@ p {
   .legacy-scan-controls,
   .legacy-import-panel__header,
   .identity-summary-panel__header,
+  .identity-audit-summary-panel__header,
   .identity-config-panel__header,
+  .identity-audit-panel__header,
+  .identity-audit-page-card__header,
   .identity-panel-subhead,
   .legacy-selection-bar,
   .legacy-import-actions,
@@ -1568,7 +1722,9 @@ p {
   .legacy-scan-controls button,
   .legacy-import-actions button,
   .identity-preset-apply__controls button,
+  .identity-audit-page-card__actions button,
   .identity-summary-panel__header button,
+  .identity-audit-summary-panel__header button,
   .identity-config-panel__header button,
   .runtime-panel__header button,
   .system-actions button,
@@ -1580,6 +1736,7 @@ p {
   .profile-metadata,
   .defaults-grid,
   .runtime-proof-grid,
+  .identity-audit-page-card__actions,
   .identity-preset-apply__controls,
   .identity-mode-option,
   .legacy-chip-list {

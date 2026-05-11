@@ -192,6 +192,144 @@ function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = 
   };
 }
 
+function auditExpectedRow(surface = "browser", overrides: Record<string, unknown> = {}) {
+  return {
+    surface,
+    label: surface === "clientHints" ? "Client Hints" : surface === "webgl" ? "WebGL" : "Browser",
+    expected: surface === "webgl" ? "Real host WebGL vendor and renderer values." : "Real host browser values.",
+    guidance: "Compare the value manually against the public checker report.",
+    ...overrides,
+  };
+}
+
+function auditPage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "browserleaks-webgl",
+    label: "BrowserLeaks WebGL",
+    category: "browserleaks",
+    url: "https://browserleaks.com/webgl",
+    surfaces: ["webgl"],
+    comparisonNote: "Compare visible WebGL vendor and renderer values manually.",
+    requiresUserAction: false,
+    expectedRows: [auditExpectedRow("webgl")],
+    ...overrides,
+  };
+}
+
+function auditCatalogPages() {
+  return [
+    auditPage({
+      id: "browserleaks-client-hints",
+      label: "BrowserLeaks Client Hints",
+      url: "https://browserleaks.com/client-hints",
+      surfaces: ["browser", "clientHints"],
+      comparisonNote: "Compare User-Agent and Client Hints shown by BrowserLeaks.",
+      expectedRows: [auditExpectedRow("browser", { label: "Browser / User-Agent" }), auditExpectedRow("clientHints")],
+    }),
+    auditPage({
+      id: "browserleaks-javascript",
+      label: "BrowserLeaks JavaScript",
+      url: "https://browserleaks.com/javascript",
+      surfaces: ["browser", "navigator", "screen", "locale"],
+      comparisonNote: "Compare navigator, screen, and locale fields manually.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("navigator", { label: "Navigator" }), auditExpectedRow("screen", { label: "Screen" }), auditExpectedRow("locale", { label: "Locale" })],
+    }),
+    auditPage({
+      id: "browserleaks-canvas",
+      label: "BrowserLeaks Canvas",
+      url: "https://browserleaks.com/canvas",
+      surfaces: ["canvas"],
+      comparisonNote: "Use repeated visits to compare stable canvas behavior.",
+      expectedRows: [auditExpectedRow("canvas", { label: "Canvas", expected: "Stable per-profile altered signature from configured noise." })],
+    }),
+    auditPage(),
+    auditPage({
+      id: "browserleaks-webrtc",
+      label: "BrowserLeaks WebRTC",
+      url: "https://browserleaks.com/webrtc",
+      surfaces: ["webrtc"],
+      comparisonNote: "Compare candidate exposure manually.",
+      expectedRows: [auditExpectedRow("webrtc", { label: "WebRTC", expected: "Real host WebRTC behavior." })],
+    }),
+    auditPage({
+      id: "pixelscan-fingerprint-check",
+      label: "Pixelscan Fingerprint Check",
+      category: "consistency",
+      url: "https://pixelscan.net/fingerprint-check",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "Use Pixelscan as one consistency signal, not as an authoritative score.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio", { label: "Audio" }), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "browserscan-browser-checker",
+      label: "BrowserScan Browser Checker",
+      category: "consistency",
+      url: "https://www.browserscan.net/browser-checker",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "webrtc"],
+      comparisonNote: "Compare BrowserScan fields manually and ignore app-side score claims.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "amiunique-fingerprint",
+      label: "AmIUnique Fingerprint",
+      category: "privacy",
+      url: "https://amiunique.org/fingerprint",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "Compare collected fields manually when the public page exposes them.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio", { label: "Audio" }), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "cover-your-tracks",
+      label: "EFF Cover Your Tracks",
+      category: "privacy",
+      url: "https://coveryourtracks.eff.org/",
+      surfaces: ["browser", "clientHints", "navigator", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "Start the public test manually, then compare the fields it chooses to expose.",
+      requiresUserAction: true,
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio", { label: "Audio" }), auditExpectedRow("webrtc")],
+    }),
+  ];
+}
+
+function auditPlanResult(overrides: Record<string, unknown> = {}) {
+  return {
+    auditVersion: 1,
+    copy: {
+      advisory: "This audit is advisory and does not promise invisibility or checker success.",
+      localProof: "Use local proof as the deterministic ThePrivator reference.",
+      publicCheckerInstability: "Public checker pages can change labels, scoring, and exposed fields without notice.",
+    },
+    pages: auditCatalogPages(),
+    ...overrides,
+  };
+}
+
+function auditEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-audit-1",
+    protocolVersion: "1.0.0",
+    durationMs: 7.5,
+    result,
+    ...overrides,
+  };
+}
+
+function auditOpenResult(overrides: Record<string, unknown> = {}) {
+  const pageId = typeof overrides.pageId === "string" ? overrides.pageId : "browserleaks-webgl";
+  const page = auditCatalogPages().find((candidate) => candidate.id === pageId) ?? auditPage();
+  return {
+    auditVersion: 1,
+    profileId: "11111111-1111-1111-1111-111111111111",
+    pageId,
+    status: "opened",
+    openedAt: "2026-05-04T18:12:00.000Z",
+    launched: false,
+    runningCount: 1,
+    page,
+    ...overrides,
+  };
+}
+
 function legacyIssue(overrides: Record<string, unknown> = {}) {
   return {
     code: "LEGACY_CONFIG_MISSING",
@@ -1870,6 +2008,207 @@ describe("ThePrivator profile library UI", () => {
     expect(commandCalls("diagnostics_lookup")).toHaveLength(3);
   });
 
+  it("lazy-loads the guided identity audit plan and renders advisory page guidance", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockInvoke.mockResolvedValueOnce(auditEnvelope(auditPlanResult()));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    expect(commandCalls("identity_audit_plan")).toHaveLength(0);
+
+    fireEvent.click(within(card).getByRole("button", { name: /open audit guide/i }));
+
+    const panel = await screen.findByLabelText(/audit guide for research/i);
+    await waitFor(() => expect(panel).toHaveTextContent(/BrowserLeaks Client Hints/i));
+    expect(mockInvoke).toHaveBeenCalledWith("identity_audit_plan", { profileId: profile.id });
+    expect(panel).toHaveTextContent(/Stopped profile: Open in profile asks the sidecar to launch an audit-capable Chromium session/i);
+    expect(panel).toHaveTextContent(/Compare User-Agent and Client Hints/i);
+    expect(panel).toHaveTextContent(/Browser \/ User-Agent/i);
+    expect(panel).toHaveTextContent(/Public checker pages can change labels/i);
+    expect(panel).toHaveTextContent(/After the page opens, start the public test manually/i);
+    expect(panel).toHaveTextContent(/Checker, page, or network issues are external instability/i);
+  });
+
+  it("opens curated audit pages through pageId-only typed calls and refreshes launched status", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 6161 });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(auditEnvelope(auditPlanResult()))
+      .mockResolvedValueOnce(auditEnvelope(auditOpenResult({ profileId: profile.id, pageId: "browserleaks-webgl", launched: true, runningCount: 1 })))
+      .mockResolvedValueOnce(chromiumEnvelope(chromiumStatusResult({ profiles: [running] })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /open audit guide/i }));
+    const panel = await screen.findByLabelText(/audit guide for research/i);
+    const webglCard = await within(panel).findByRole("listitem", { name: /BrowserLeaks WebGL/i });
+
+    fireEvent.click(within(webglCard).getByRole("button", { name: /open in profile/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/BrowserLeaks WebGL opened in the configured profile/i));
+    expect(mockInvoke).toHaveBeenCalledWith("identity_audit_open", { profileId: profile.id, pageId: "browserleaks-webgl" });
+    expect(mockInvoke).not.toHaveBeenCalledWith("identity_audit_open", expect.objectContaining({ url: expect.any(String) }));
+    expect(commandCalls("chromium_status")).toHaveLength(2);
+    expect(panel).toHaveTextContent(/Launched by audit-open/i);
+    expect(panel).toHaveTextContent(/does not read public page content or checker scores/i);
+  });
+
+  it("renders typed audit-open errors with diagnostic detailRef lookup and retry", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const detailRef = "sidecar-audit-open-detail";
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(auditEnvelope(auditPlanResult()))
+      .mockRejectedValueOnce(profileError("IDENTITY_AUDIT_CDP_UNAVAILABLE", "Audit open requires an audit-capable Chromium session.", detailRef))
+      .mockResolvedValueOnce(
+        diagnosticLookupResult(detailRef, {
+          entries: [
+            diagnosticEntry(detailRef, {
+              errorCode: "IDENTITY_AUDIT_CDP_UNAVAILABLE",
+              method: "identity.audit.open",
+            }),
+          ],
+        }),
+      );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /open audit guide/i }));
+    const panel = await screen.findByLabelText(/audit guide for research/i);
+    const webglCard = await within(panel).findByRole("listitem", { name: /BrowserLeaks WebGL/i });
+    fireEvent.click(within(webglCard).getByRole("button", { name: /open in profile/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_AUDIT_CDP_UNAVAILABLE/i));
+    expect(panel).toHaveTextContent(detailRef);
+    expect(panel).toHaveTextContent(/app-side audit failure/i);
+    expect(within(panel).getByRole("button", { name: /retry open in profile/i })).toBeEnabled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: /lookup diagnostics for sidecar-audit-open-detail/i }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    await waitFor(() => expect(lookupPanel).toHaveTextContent(/identity\.audit\.open/i));
+    expect(mockInvoke).toHaveBeenLastCalledWith("diagnostics_lookup", { detailRef });
+  });
+
+  it("ignores stale audit plan responses when switching profile panels", async () => {
+    const firstProfile = profileRecord({ name: "Alpha" });
+    const secondProfile = profileRecord({
+      id: "22222222-2222-2222-2222-222222222222",
+      name: "Beta",
+      storage: {
+        profileDir: "profile-store/profiles/22222222-2222-2222-2222-222222222222",
+        userDataDir: "profile-store/profiles/22222222-2222-2222-2222-222222222222/user-data",
+      },
+    });
+    const stalePlan = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string, args?: { profileId?: string }) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([firstProfile, secondProfile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "identity_audit_plan" && args?.profileId === firstProfile.id) {
+        return stalePlan.promise;
+      }
+      if (command === "identity_audit_plan" && args?.profileId === secondProfile.id) {
+        return Promise.resolve(
+          auditEnvelope(
+            auditPlanResult({
+              copy: {
+                advisory: "Fresh beta advisory copy for manual comparison only.",
+                localProof: "Fresh beta local proof copy.",
+                publicCheckerInstability: "Fresh beta public checker instability copy.",
+              },
+            }),
+          ),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const alphaCard = await screen.findByRole("listitem", { name: /alpha/i });
+    const betaCard = await screen.findByRole("listitem", { name: /beta/i });
+    fireEvent.click(within(alphaCard).getByRole("button", { name: /open audit guide/i }));
+    expect(await screen.findByLabelText(/audit guide for alpha/i)).toHaveTextContent(/loading guided audit plan/i);
+
+    fireEvent.click(within(betaCard).getByRole("button", { name: /open audit guide/i }));
+    const betaPanel = await screen.findByLabelText(/audit guide for beta/i);
+    await waitFor(() => expect(betaPanel).toHaveTextContent(/Fresh beta advisory copy/i));
+
+    await act(async () => {
+      stalePlan.resolve(
+        auditEnvelope(
+          auditPlanResult({
+            copy: {
+              advisory: "Stale alpha advisory copy should not render.",
+              localProof: "Stale alpha local proof copy.",
+              publicCheckerInstability: "Stale alpha public checker copy.",
+            },
+          }),
+        ),
+      );
+      await stalePlan.promise;
+    });
+
+    expect(screen.queryByLabelText(/audit guide for alpha/i)).not.toBeInTheDocument();
+    expect(betaPanel).toHaveTextContent(/Fresh beta advisory copy/i);
+    expect(betaPanel).not.toHaveTextContent(/Stale alpha advisory copy/i);
+    expect(commandCalls("identity_audit_plan")).toHaveLength(2);
+  });
+
+  it("disables audit page actions during Chromium lifecycle mutations", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const pendingLaunch = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string, args?: { profileId?: string }) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "identity_audit_plan") {
+        return Promise.resolve(auditEnvelope(auditPlanResult()));
+      }
+      if (command === "chromium_launch" && args?.profileId === profile.id) {
+        return pendingLaunch.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /open audit guide/i }));
+    const panel = await screen.findByLabelText(/audit guide for research/i);
+    const webglCard = await within(panel).findByRole("listitem", { name: /BrowserLeaks WebGL/i });
+    expect(within(webglCard).getByRole("button", { name: /open in profile/i })).toBeEnabled();
+
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+
+    await waitFor(() => expect(within(webglCard).getByRole("button", { name: /open in profile/i })).toBeDisabled());
+    expect(webglCard).toHaveTextContent(/Chromium is launching or stopping/i);
+    expect(commandCalls("identity_audit_open")).toHaveLength(0);
+
+    await act(async () => {
+      pendingLaunch.resolve(chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id }), runningCount: 1 }));
+      await pendingLaunch.promise;
+    });
+  });
+
   it("does not add direct browser or Tauri filesystem bypasses for legacy import", () => {
     const source = appSource();
 
@@ -1879,10 +2218,13 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("validateIdentity");
     expect(source).toContain("applyProfileIdentityPreset");
     expect(source).toContain("updateProfileIdentity");
-    expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs)/);
+    expect(source).toContain("getIdentityAuditPlan");
+    expect(source).toContain("openIdentityAuditPage");
+    expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs|shell)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
-    expect(source).not.toMatch(/type=\"file\"|type='file'/);
+    expect(source).not.toMatch(/type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/);
+    expect(source).not.toMatch(/guaranteed undetectability|universal green|universal pass/i);
   });
 
   it("keeps the S01 diagnostic recovery pattern in the compact system panel", async () => {

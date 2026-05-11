@@ -19,12 +19,14 @@ import {
   createProfile,
   deleteProfile,
   getChromiumStatus,
+  getIdentityAuditPlan,
   getSidecarHealth,
   importLegacyProfiles,
   launchChromiumProfile,
   listIdentityPresets,
   listProfiles,
   lookupDiagnosticDetail,
+  openIdentityAuditPage,
   scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
@@ -46,6 +48,9 @@ import type {
   LegacyScanSnapshot,
   ProfileIdentity,
   IdentitySurface,
+  IdentityAuditOpenSnapshot,
+  IdentityAuditPage,
+  IdentityAuditPlanSnapshot,
   IdentityWarning,
   ProfileListSnapshot,
   ProfileMutationSnapshot,
@@ -110,6 +115,42 @@ type IdentityConfigSuccess = {
   label: string;
   warningCount: number;
   occurredAt: string;
+};
+
+type IdentityAuditPhase =
+  | "idle"
+  | "loading-plan"
+  | "ready"
+  | "opening"
+  | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+type IdentityAuditAction = "load-plan" | "open-page";
+
+type IdentityAuditCurrentAction = {
+  action: IdentityAuditAction;
+  pageId: string | null;
+} | null;
+
+type IdentityAuditError = {
+  profileId: string;
+  action: IdentityAuditAction;
+  pageId: string | null;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+
+type IdentityAuditOpenSuccess = Pick<IdentityAuditOpenSnapshot, "profileId" | "pageId" | "openedAt" | "launched" | "runningCount" | "requestId"> & {
+  pageLabel: string;
+  occurredAt: string;
+};
+
+type IdentityAuditPanelState = {
+  isOpen: boolean;
+  phase: IdentityAuditPhase;
+  currentAction: IdentityAuditCurrentAction;
+  plan: IdentityAuditPlanSnapshot | null;
+  error: IdentityAuditError | null;
+  openSuccess: IdentityAuditOpenSuccess | null;
 };
 
 type IdentityConfigPanelState = {
@@ -251,6 +292,20 @@ const IDENTITY_CONFIG_ACTION_LABELS: Record<IdentityConfigAction, string> = {
   save: "Save identity override",
 };
 
+const IDENTITY_AUDIT_PHASE_LABELS: Record<IdentityAuditPhase, string> = {
+  idle: "Audit panel closed",
+  "loading-plan": "Loading guided audit plan",
+  ready: "Guided audit ready",
+  opening: "Opening curated checker page",
+  "recoverable-error": "Recoverable audit error",
+  "bridge-error": "Audit bridge error",
+};
+
+const IDENTITY_AUDIT_ACTION_LABELS: Record<IdentityAuditAction, string> = {
+  "load-plan": "Load audit plan",
+  "open-page": "Open curated checker page",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -299,12 +354,19 @@ export function App() {
   const [identityCurrentAction, setIdentityCurrentAction] = useState<IdentityConfigAction | null>(null);
   const [identityConfigError, setIdentityConfigError] = useState<IdentityConfigError | null>(null);
   const [identityConfigSuccess, setIdentityConfigSuccess] = useState<IdentityConfigSuccess | null>(null);
+  const [identityAuditPanelProfileId, setIdentityAuditPanelProfileId] = useState<string | null>(null);
+  const [identityAuditPhase, setIdentityAuditPhase] = useState<IdentityAuditPhase>("idle");
+  const [identityAuditCurrentAction, setIdentityAuditCurrentAction] = useState<IdentityAuditCurrentAction>(null);
+  const [identityAuditPlan, setIdentityAuditPlan] = useState<IdentityAuditPlanSnapshot | null>(null);
+  const [identityAuditError, setIdentityAuditError] = useState<IdentityAuditError | null>(null);
+  const [identityAuditOpenSuccess, setIdentityAuditOpenSuccess] = useState<IdentityAuditOpenSuccess | null>(null);
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
   const chromiumStatusInFlightRef = useRef(false);
   const diagnosticLookupRequestIdRef = useRef(0);
   const identityConfigRequestIdRef = useRef(0);
+  const identityAuditRequestIdRef = useRef(0);
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
 
@@ -886,6 +948,114 @@ export function App() {
     setIdentityConfigSuccess(null);
   }, []);
 
+  const closeIdentityAuditPanel = useCallback(() => {
+    identityAuditRequestIdRef.current += 1;
+    setIdentityAuditPanelProfileId(null);
+    setIdentityAuditPhase("idle");
+    setIdentityAuditCurrentAction(null);
+    setIdentityAuditPlan(null);
+    setIdentityAuditError(null);
+    setIdentityAuditOpenSuccess(null);
+  }, []);
+
+  const loadIdentityAuditPlan = useCallback((profile: ProfileRecord) => {
+    const requestId = identityAuditRequestIdRef.current + 1;
+    identityAuditRequestIdRef.current = requestId;
+
+    setIdentityAuditPanelProfileId(profile.id);
+    setIdentityAuditPhase("loading-plan");
+    setIdentityAuditCurrentAction({ action: "load-plan", pageId: null });
+    setIdentityAuditPlan(null);
+    setIdentityAuditError(null);
+    setIdentityAuditOpenSuccess(null);
+
+    void getIdentityAuditPlan(profile.id)
+      .then((snapshot) => {
+        if (identityAuditRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setIdentityAuditPlan(snapshot);
+        setIdentityAuditPhase("ready");
+        setIdentityAuditCurrentAction(null);
+        setIdentityAuditError(null);
+      })
+      .catch((error) => {
+        if (identityAuditRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const clientError = error as SidecarClientError;
+        setIdentityAuditPlan(null);
+        setIdentityAuditPhase(clientError.phase);
+        setIdentityAuditCurrentAction(null);
+        setIdentityAuditError({
+          profileId: profile.id,
+          action: "load-plan",
+          pageId: null,
+          error: clientError,
+          occurredAt: new Date().toISOString(),
+        });
+      });
+  }, []);
+
+  const openIdentityAuditCatalogPage = useCallback(
+    async (profile: ProfileRecord, page: IdentityAuditPage) => {
+      if (identityAuditPanelProfileId !== profile.id || !identityAuditPlan || identityAuditCurrentAction) {
+        return;
+      }
+
+      const requestId = identityAuditRequestIdRef.current + 1;
+      identityAuditRequestIdRef.current = requestId;
+      setIdentityAuditPhase("opening");
+      setIdentityAuditCurrentAction({ action: "open-page", pageId: page.id });
+      setIdentityAuditError(null);
+      setIdentityAuditOpenSuccess(null);
+
+      try {
+        const snapshot = await openIdentityAuditPage(profile.id, page.id);
+        if (identityAuditRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setIdentityAuditOpenSuccess({
+          profileId: snapshot.profileId,
+          pageId: snapshot.pageId,
+          pageLabel: snapshot.page.label,
+          openedAt: snapshot.openedAt,
+          launched: snapshot.launched,
+          runningCount: snapshot.runningCount,
+          requestId: snapshot.requestId,
+          occurredAt: new Date().toISOString(),
+        });
+        setIdentityAuditPhase("ready");
+        setIdentityAuditCurrentAction(null);
+        setIdentityAuditError(null);
+
+        if (snapshot.launched) {
+          void refreshChromiumStatus("launch");
+        }
+      } catch (error) {
+        if (identityAuditRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const clientError = error as SidecarClientError;
+        setIdentityAuditPhase(clientError.phase);
+        setIdentityAuditCurrentAction(null);
+        setIdentityAuditOpenSuccess(null);
+        setIdentityAuditError({
+          profileId: profile.id,
+          action: "open-page",
+          pageId: page.id,
+          error: clientError,
+          occurredAt: new Date().toISOString(),
+        });
+      }
+    },
+    [identityAuditCurrentAction, identityAuditPanelProfileId, identityAuditPlan, refreshChromiumStatus],
+  );
+
   const openIdentityConfig = useCallback(
     (profile: ProfileRecord) => {
       const requestId = identityConfigRequestIdRef.current + 1;
@@ -1334,6 +1504,14 @@ export function App() {
                     error: identityConfigError?.profileId === profile.id ? identityConfigError : null,
                     applySuccess: identityConfigSuccess?.profileId === profile.id ? identityConfigSuccess : null,
                   }}
+                  identityAuditState={{
+                    isOpen: identityAuditPanelProfileId === profile.id,
+                    phase: identityAuditPanelProfileId === profile.id ? identityAuditPhase : "idle",
+                    currentAction: identityAuditPanelProfileId === profile.id ? identityAuditCurrentAction : null,
+                    plan: identityAuditPanelProfileId === profile.id ? identityAuditPlan : null,
+                    error: identityAuditError?.profileId === profile.id ? identityAuditError : null,
+                    openSuccess: identityAuditOpenSuccess?.profileId === profile.id ? identityAuditOpenSuccess : null,
+                  }}
                   isLifecycleActionBusy={chromiumMutation !== null}
                   isProfileBusy={isProfileBusy}
                   lifecycleError={chromiumErrorsByProfile[profile.id] ?? chromiumStatusError}
@@ -1348,6 +1526,10 @@ export function App() {
                   onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
                   onIdentityApplyPreset={handleApplyIdentityPreset}
+                  onIdentityAuditClose={closeIdentityAuditPanel}
+                  onIdentityAuditOpen={loadIdentityAuditPlan}
+                  onIdentityAuditOpenPage={openIdentityAuditCatalogPage}
+                  onIdentityAuditRetryPlan={loadIdentityAuditPlan}
                   onIdentityCheck={handleCheckIdentity}
                   onIdentityClose={closeIdentityConfig}
                   onIdentityConfigure={openIdentityConfig}
@@ -1978,6 +2160,7 @@ function ProfileCard({
   diagnosticLookupState,
   editing,
   identityConfigState,
+  identityAuditState,
   isLifecycleActionBusy,
   isProfileBusy,
   lifecycleError,
@@ -1989,6 +2172,10 @@ function ProfileCard({
   onDiagnosticLookup,
   onEditNameChange,
   onIdentityApplyPreset,
+  onIdentityAuditClose,
+  onIdentityAuditOpen,
+  onIdentityAuditOpenPage,
+  onIdentityAuditRetryPlan,
   onIdentityCheck,
   onIdentityClose,
   onIdentityConfigure,
@@ -2011,6 +2198,7 @@ function ProfileCard({
   diagnosticLookupState: DiagnosticLookupState;
   editing: EditingState | null;
   identityConfigState: IdentityConfigPanelState;
+  identityAuditState: IdentityAuditPanelState;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
   lifecycleError: ChromiumLifecycleError | null;
@@ -2022,6 +2210,10 @@ function ProfileCard({
   onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
   onIdentityApplyPreset: (profile: ProfileRecord, presetId: string) => void;
+  onIdentityAuditClose: () => void;
+  onIdentityAuditOpen: (profile: ProfileRecord) => void;
+  onIdentityAuditOpenPage: (profile: ProfileRecord, page: IdentityAuditPage) => void;
+  onIdentityAuditRetryPlan: (profile: ProfileRecord) => void;
   onIdentityCheck: (profile: ProfileRecord) => void;
   onIdentityClose: () => void;
   onIdentityConfigure: (profile: ProfileRecord) => void;
@@ -2116,6 +2308,20 @@ function ProfileCard({
           onSurfaceModeChange={onIdentitySurfaceModeChange}
         />
       ) : null}
+
+      <ProfileIdentityAuditSummary
+        diagnosticLookupState={diagnosticLookupState}
+        identityAuditState={identityAuditState}
+        isLifecycleActionBusy={isLifecycleActionBusy}
+        isProfileBusy={isProfileBusy}
+        profile={profile}
+        runningState={runningState}
+        onClose={onIdentityAuditClose}
+        onDiagnosticLookup={onDiagnosticLookup}
+        onOpen={onIdentityAuditOpen}
+        onOpenPage={onIdentityAuditOpenPage}
+        onRetryPlan={onIdentityAuditRetryPlan}
+      />
 
       <section className="runtime-panel" aria-label={`${profile.name} Chromium lifecycle`} aria-live="polite">
         <div className="runtime-panel__header">
@@ -2270,6 +2476,323 @@ function ProfileIdentitySummary({
         <Metric label="Label" value={profile.identity.label} />
         <Metric label="Preset" value={profile.identity.presetId ? `Preset ${profile.identity.presetId}` : "No preset"} />
         <Metric label="Surface modes" value={compactModes} />
+      </dl>
+    </section>
+  );
+}
+
+function ProfileIdentityAuditSummary({
+  diagnosticLookupState,
+  identityAuditState,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runningState,
+  onClose,
+  onDiagnosticLookup,
+  onOpen,
+  onOpenPage,
+  onRetryPlan,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  identityAuditState: IdentityAuditPanelState;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runningState: ChromiumRunningProfileState | null;
+  onClose: () => void;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onOpen: (profile: ProfileRecord) => void;
+  onOpenPage: (profile: ProfileRecord, page: IdentityAuditPage) => void;
+  onRetryPlan: (profile: ProfileRecord) => void;
+}) {
+  const panelId = `identity-audit-panel-${profile.id}`;
+  const openDisabled = !identityAuditState.isOpen && (isProfileBusy || isLifecycleActionBusy);
+
+  return (
+    <section className="identity-audit-summary-panel" aria-label={`${profile.name} guided identity audit`}>
+      <div className="identity-audit-summary-panel__header">
+        <div>
+          <p className="signal-label">Guided identity audit</p>
+          <h4>Manual public checker comparison</h4>
+        </div>
+        <button
+          type="button"
+          className="button--secondary"
+          aria-controls={panelId}
+          aria-expanded={identityAuditState.isOpen}
+          disabled={openDisabled}
+          onClick={() => (identityAuditState.isOpen ? onClose() : onOpen(profile))}
+        >
+          {identityAuditState.isOpen ? "Close audit guide" : "Open audit guide"}
+        </button>
+      </div>
+      <p>
+        Load a profile-scoped checklist of curated public checker pages, then compare their visible values manually. Local
+        ThePrivator proof remains the app contract; checker labels, network behavior, and scores can change independently.
+      </p>
+      {openDisabled ? (
+        <p className="identity-audit-muted" role="status" aria-live="polite">
+          Audit actions pause during profile mutations or Chromium lifecycle launch/stop operations.
+        </p>
+      ) : null}
+      {identityAuditState.isOpen ? (
+        <IdentityAuditPanel
+          diagnosticLookupState={diagnosticLookupState}
+          id={panelId}
+          isLifecycleActionBusy={isLifecycleActionBusy}
+          isProfileBusy={isProfileBusy}
+          profile={profile}
+          runningState={runningState}
+          state={identityAuditState}
+          onDiagnosticLookup={onDiagnosticLookup}
+          onOpenPage={onOpenPage}
+          onRetryPlan={onRetryPlan}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function IdentityAuditPanel({
+  diagnosticLookupState,
+  id,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runningState,
+  state,
+  onDiagnosticLookup,
+  onOpenPage,
+  onRetryPlan,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  id: string;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runningState: ChromiumRunningProfileState | null;
+  state: IdentityAuditPanelState;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onOpenPage: (profile: ProfileRecord, page: IdentityAuditPage) => void;
+  onRetryPlan: (profile: ProfileRecord) => void;
+}) {
+  const isPlanLoading = state.phase === "loading-plan";
+  const isOpeningPage = state.currentAction?.action === "open-page";
+  const plan = state.plan;
+  const actionDisabledReason = isProfileBusy
+    ? "Profile list mutation is in progress; audit actions are paused."
+    : isLifecycleActionBusy
+      ? "Chromium is launching or stopping; wait for lifecycle state to settle before audit actions."
+      : isPlanLoading
+        ? "Audit plan is still loading."
+        : !plan
+          ? "Load the audit plan before opening checker pages."
+          : isOpeningPage
+            ? "An audit page is already opening for this profile."
+            : null;
+  const currentAction = state.currentAction
+    ? `${IDENTITY_AUDIT_ACTION_LABELS[state.currentAction.action]}${state.currentAction.pageId ? ` · ${state.currentAction.pageId}` : ""}`
+    : "No active audit action";
+  const runtimeCopy = runningState
+    ? "Already running profile: Open in profile asks the sidecar to open a new tab in this configured profile."
+    : "Stopped profile: Open in profile asks the sidecar to launch an audit-capable Chromium session before opening the page.";
+  const errorPage = state.error?.pageId && plan ? plan.pages.find((page) => page.id === state.error?.pageId) ?? null : null;
+
+  return (
+    <section id={id} className="identity-audit-panel" role="region" aria-label={`Audit guide for ${profile.name}`} aria-live="polite">
+      <div className="identity-audit-panel__header">
+        <div>
+          <p className="signal-label">Advisory audit flow</p>
+          <h4>{plan ? `${plan.pages.length} curated checker pages` : "Audit plan loading"}</h4>
+          <p>{runtimeCopy}</p>
+        </div>
+        <span className="mini-phase" aria-label={`Identity audit phase: ${state.phase}`}>
+          {state.phase}
+        </span>
+      </div>
+
+      <dl className="metric-list metric-list--inline identity-audit-observability" aria-label={`${profile.name} audit observability`}>
+        <Metric label="Audit phase" value={`${state.phase} · ${IDENTITY_AUDIT_PHASE_LABELS[state.phase]}`} />
+        <Metric label="Current action" value={currentAction} />
+        <Metric label="Plan pages" value={plan?.pages.length ?? 0} />
+        <Metric label="Last opened page" value={state.openSuccess?.pageLabel} />
+        <Metric label="Opened request" value={state.openSuccess?.requestId} />
+        <Metric label="Launch metadata" value={state.openSuccess ? `${state.openSuccess.launched ? "launched" : "already running"} · ${state.openSuccess.runningCount} running` : null} />
+        <Metric label="Audit detailRef" value={state.error?.error.detailRef} />
+      </dl>
+
+      {isPlanLoading ? (
+        <div className="identity-audit-status" role="status" aria-live="polite" aria-atomic="true">
+          Loading the fixed audit catalog and expected identity guidance through the typed sidecar client…
+        </div>
+      ) : null}
+
+      {plan ? (
+        <section className="identity-audit-copy" aria-label="Audit guidance boundaries">
+          <strong>Compare manually; do not treat one public checker as authoritative.</strong>
+          <p>{plan.copy.advisory}</p>
+          <p>{plan.copy.localProof}</p>
+          <p>{plan.copy.publicCheckerInstability}</p>
+          <p>Checker, page, or network issues are external instability unless the app shows a typed audit error below.</p>
+        </section>
+      ) : null}
+
+      {state.error ? (
+        <IdentityAuditErrorFeedback
+          diagnosticLookupState={diagnosticLookupState}
+          error={state.error}
+          page={errorPage}
+          profile={profile}
+          onDiagnosticLookup={onDiagnosticLookup}
+          onOpenPage={onOpenPage}
+          onRetryPlan={onRetryPlan}
+        />
+      ) : null}
+
+      {state.openSuccess ? <IdentityAuditSuccessFeedback state={state.openSuccess} /> : null}
+
+      {plan ? (
+        <div className="identity-audit-page-list" role="list" aria-label={`${profile.name} curated audit pages`}>
+          {plan.pages.map((page) => {
+            const isOpeningThisPage = state.currentAction?.action === "open-page" && state.currentAction.pageId === page.id;
+            return (
+              <IdentityAuditPageCard
+                key={page.id}
+                disabledReason={actionDisabledReason}
+                isOpening={isOpeningThisPage}
+                page={page}
+                profile={profile}
+                onOpenPage={onOpenPage}
+              />
+            );
+          })}
+        </div>
+      ) : state.error?.action === "load-plan" ? (
+        <button type="button" className="button--secondary" onClick={() => onRetryPlan(profile)} disabled={isProfileBusy || isLifecycleActionBusy}>
+          Retry audit plan
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function IdentityAuditPageCard({
+  disabledReason,
+  isOpening,
+  page,
+  profile,
+  onOpenPage,
+}: {
+  disabledReason: string | null;
+  isOpening: boolean;
+  page: IdentityAuditPage;
+  profile: ProfileRecord;
+  onOpenPage: (profile: ProfileRecord, page: IdentityAuditPage) => void;
+}) {
+  const titleId = `identity-audit-page-${profile.id}-${page.id}`;
+  const hintId = `${titleId}-hint`;
+
+  return (
+    <article className="identity-audit-page-card" role="listitem" aria-labelledby={titleId}>
+      <div className="identity-audit-page-card__header">
+        <div>
+          <p className="signal-label">{formatIdentityAuditCategory(page.category)}</p>
+          <h5 id={titleId}>{page.label}</h5>
+        </div>
+        <span className="identity-audit-page-card__surface-count">{page.surfaces.length} surfaces</span>
+      </div>
+      <p className="identity-audit-url">{page.url}</p>
+      <p>{page.comparisonNote}</p>
+      {page.requiresUserAction ? (
+        <p className="identity-audit-user-action">After the page opens, start the public test manually before comparing values.</p>
+      ) : null}
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Page ID" value={page.id} />
+        <Metric label="Category" value={formatIdentityAuditCategory(page.category)} />
+        <Metric label="Surfaces" value={formatIdentityAuditSurfaces(page.surfaces)} />
+      </dl>
+      <div className="identity-audit-expected-list" role="list" aria-label={`Expected values for ${page.label}`}>
+        {page.expectedRows.map((row) => (
+          <article key={`${page.id}-${row.surface}-${row.label}`} className="identity-audit-expected-row" role="listitem">
+            <strong>{row.label}</strong>
+            <p>{row.expected}</p>
+            <span>{row.guidance}</span>
+          </article>
+        ))}
+      </div>
+      <div className="identity-audit-page-card__actions">
+        <button type="button" disabled={Boolean(disabledReason)} aria-describedby={hintId} onClick={() => onOpenPage(profile, page)}>
+          {isOpening ? "Opening…" : "Open in profile"}
+        </button>
+        <p id={hintId} className="identity-audit-muted" role="status" aria-live="polite">
+          {disabledReason ?? "The app sends only the fixed pageId to the typed audit-open wrapper; compare the public page manually."}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+function IdentityAuditErrorFeedback({
+  diagnosticLookupState,
+  error,
+  page,
+  profile,
+  onDiagnosticLookup,
+  onOpenPage,
+  onRetryPlan,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  error: IdentityAuditError;
+  page: IdentityAuditPage | null;
+  profile: ProfileRecord;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onOpenPage: (profile: ProfileRecord, page: IdentityAuditPage) => void;
+  onRetryPlan: (profile: ProfileRecord) => void;
+}) {
+  return (
+    <section className="identity-audit-error" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>{IDENTITY_AUDIT_ACTION_LABELS[error.action]} failed safely.</strong>
+      <p>{error.error.message}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={error.error.code} />
+        <Metric label="Source" value={error.error.source} />
+        <Metric label="Recoverable" value={error.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={error.error.detailRef} />
+        <Metric label="Page ID" value={error.pageId} />
+        <Metric label="Occurred" value={formatProfileTimestamp(error.occurredAt)} />
+      </dl>
+      <p className="identity-audit-muted">This is an app-side audit failure. Public checker rendering or scoring remains external to this diagnostic.</p>
+      <DiagnosticReference detailRef={error.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+      {error.action === "load-plan" ? (
+        <button type="button" className="button--secondary" onClick={() => onRetryPlan(profile)}>
+          Retry audit plan
+        </button>
+      ) : page ? (
+        <button type="button" className="button--secondary" onClick={() => onOpenPage(profile, page)}>
+          Retry open in profile
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function IdentityAuditSuccessFeedback({ state }: { state: IdentityAuditOpenSuccess }) {
+  return (
+    <section className="identity-audit-success" role="status" aria-live="polite" aria-atomic="true">
+      <strong>{state.pageLabel} opened in the configured profile.</strong>
+      <p>
+        {state.launched
+          ? "The sidecar launched an audit-capable Chromium session before opening the curated page."
+          : "The sidecar opened the curated page in the already running profile."} The app does not read public page content or checker scores.
+      </p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Page ID" value={state.pageId} />
+        <Metric label="Opened" value={formatProfileTimestamp(state.openedAt)} />
+        <Metric label="Launch" value={state.launched ? "Launched by audit-open" : "Already running"} />
+        <Metric label="Running count" value={state.runningCount} />
+        <Metric label="Request" value={state.requestId} />
+        <Metric label="Recorded" value={formatProfileTimestamp(state.occurredAt)} />
       </dl>
     </section>
   );
@@ -3124,6 +3647,24 @@ function formatProfileTimestamp(value: string | null | undefined): string {
 
 function formatBrowser(value: ProfileRecord["defaults"]["browser"]): string {
   return value === "chromium" ? "Chromium" : value;
+}
+
+function formatIdentityAuditCategory(value: IdentityAuditPage["category"]): string {
+  if (value === "browserleaks") {
+    return "BrowserLeaks";
+  }
+  if (value === "consistency") {
+    return "Consistency checker";
+  }
+  if (value === "privacy") {
+    return "Privacy checker";
+  }
+
+  return value;
+}
+
+function formatIdentityAuditSurfaces(surfaces: IdentityAuditPage["surfaces"]): string {
+  return surfaces.join(" · ");
 }
 
 function getLatestStoppedState(states: ChromiumStoppedProfileState[]): ChromiumStoppedProfileState | null {
