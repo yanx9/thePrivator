@@ -11,6 +11,7 @@ from . import chromium, identity_audit, legacy_import
 from .diagnostics import append_events
 from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
 from .profiles import ProfileStore, require_string_param
+from .proxy import PROXY_VERSION, public_proxy_summary
 from .protocol import (
     DIAGNOSTIC_FAILURE,
     INTERNAL_ERROR,
@@ -132,6 +133,9 @@ def _with_store_root_persistence(
     diagnostics: list[JsonObject],
 ) -> list[JsonObject]:
     """Persist store-root diagnostics without changing response authority."""
+    if request.method == "proxy.validate":
+        return diagnostics
+
     result = append_events(
         request.params.get("storeRoot"),
         diagnostics,
@@ -160,6 +164,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
 
     if request.method.startswith("identity."):
         return dispatch_identity_request(request)
+
+    if request.method.startswith("proxy."):
+        return dispatch_proxy_request(request)
 
     if request.method.startswith("profiles."):
         return dispatch_profile_request(request)
@@ -243,6 +250,32 @@ def dispatch_identity_request(request: SidecarRequest) -> JsonObject:
         ) from error
 
 
+def dispatch_proxy_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch pure proxy validation commands without profile-store persistence."""
+    try:
+        if request.method == "proxy.validate":
+            return {
+                "proxyVersion": PROXY_VERSION,
+                "proxy": public_proxy_summary(request.params.get("proxy")),
+                "warnings": [],
+            }
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
+
+
+
 def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
     """Dispatch profile CRUD commands through the sidecar-owned store."""
     try:
@@ -252,6 +285,14 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
             "Profile storeRoot is required.",
         )
         store = ProfileStore(store_root)
+
+        if request.method == "profiles.proxy.update":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            return store.update_proxy(profile_id, request.params.get("proxy"))
 
         if request.method == "profiles.list":
             return store.list()

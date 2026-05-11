@@ -13,6 +13,9 @@ from theprivator import __version__ as app_version
 from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SENTINEL_USERNAME = "proxy-user-sentinel-e2e33f73"
+SENTINEL_PASSWORD = "proxy-password-sentinel-74d86415"
+SENTINEL_VALUES = (SENTINEL_USERNAME, SENTINEL_PASSWORD)
 
 
 def run_sidecar(input_text, env=None):
@@ -35,6 +38,15 @@ def request_line(payload):
 
 def parse_ndjson(stream):
     return [json.loads(line) for line in stream.splitlines()]
+
+
+def read_store_payload(store_root):
+    return json.loads(Path(store_root, "profile-store", "profiles.json").read_text(encoding="utf-8"))
+
+
+def assert_no_proxy_secret_values(text):
+    for sentinel in SENTINEL_VALUES:
+        assert sentinel not in text
 
 
 def assert_error_envelope(response, code, request_id=None):
@@ -116,6 +128,8 @@ def assert_redacted_stderr(*procs, store_root, profile_name=None):
     assert "params" not in stderr
     assert "debugPort" not in stderr
     assert "9222" not in stderr
+    assert "proxy-user-sentinel" not in stderr
+    assert "proxy-password-sentinel" not in stderr
     assert "Traceback" not in stderr
 
 
@@ -259,6 +273,255 @@ def test_multiple_ndjson_requests_each_produce_one_response_and_echo_ids_exactly
     assert diagnostics[1]["requestId"] == 42
 
 
+def test_proxy_validate_is_pure_redacted_and_does_not_persist_when_store_root_is_supplied(tmp_path):
+    store_root = str(tmp_path / "proxy-validate-store-should-not-be-created")
+    direct_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-validate-direct",
+                "method": "proxy.validate",
+                "params": {"proxy": {"proxyVersion": 1, "mode": "direct"}},
+            }
+        )
+    )
+    fixed_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-validate-fixed",
+                "method": "proxy.validate",
+                "params": {
+                    "storeRoot": store_root,
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "https",
+                        "host": " proxy.example.invalid ",
+                        "port": 443,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+    direct_response = parse_ndjson(direct_proc.stdout)[0]
+    fixed_response = parse_ndjson(fixed_proc.stdout)[0]
+    assert direct_response["ok"] is True
+    assert direct_response["result"] == {
+        "proxyVersion": 1,
+        "proxy": {
+            "proxyVersion": 1,
+            "mode": "direct",
+            "credentialState": "none",
+            "summary": "Direct connection",
+        },
+        "warnings": [],
+    }
+    assert fixed_response["ok"] is True
+    assert fixed_response["result"] == {
+        "proxyVersion": 1,
+        "proxy": {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "https",
+            "host": "proxy.example.invalid",
+            "port": 443,
+            "credentialState": "configured",
+            "summary": "https://proxy.example.invalid:443",
+        },
+        "warnings": [],
+    }
+    assert parse_ndjson(direct_proc.stderr)[0]["method"] == "proxy.validate"
+    assert parse_ndjson(fixed_proc.stderr)[0]["method"] == "proxy.validate"
+    assert_no_proxy_secret_values(direct_proc.stdout + direct_proc.stderr + fixed_proc.stdout + fixed_proc.stderr)
+    assert not Path(store_root, "profile-store", "profiles.json").exists()
+    assert not Path(store_root, "profile-store", "diagnostics", "events.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("proxy", "expected_code"),
+    [
+        (None, "PROXY_INVALID"),
+        ("not-an-object", "PROXY_INVALID"),
+        ({"proxyVersion": 1, "mode": "system"}, "PROXY_PAC_UNSUPPORTED"),
+        ({"proxyVersion": 1, "mode": "direct", "unknown": True}, "PROXY_INVALID"),
+        ({"proxyVersion": 1, "mode": "direct", "debugPort": 9222}, "PROXY_INVALID"),
+        (
+            {
+                "proxyVersion": 1,
+                "mode": "fixedServer",
+                "protocol": "http",
+                "host": "proxy.example.invalid",
+                "port": 8080,
+                "credentials": {"username": SENTINEL_USERNAME, "password": ""},
+            },
+            "PROXY_INVALID",
+        ),
+    ],
+)
+def test_proxy_validate_rejects_malformed_inputs_without_echoing_proxy_drafts(proxy, expected_code):
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-validate-invalid",
+                "method": "proxy.validate",
+                "params": {} if proxy is None else {"proxy": proxy},
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, expected_code, "proxy-validate-invalid")
+    assert diagnostic["method"] == "proxy.validate"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == expected_code
+    assert diagnostic["detailRef"] == error["detailRef"]
+    combined = proc.stdout + proc.stderr
+    assert_no_proxy_secret_values(combined)
+    assert "9222" not in combined
+    assert "debugPort" not in combined
+    assert "unknown" not in combined
+    assert "Traceback" not in combined
+
+
+def test_profiles_proxy_update_persists_validated_proxy_and_returns_safe_profile_collection(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Proxy Profile"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+
+    direct_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-update-direct",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {"proxyVersion": 1, "mode": "direct"},
+                },
+            }
+        )
+    )
+    fixed_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-update-fixed",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "http",
+                        "host": "proxy.example.invalid",
+                        "port": 8080,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+    direct_response = parse_ndjson(direct_proc.stdout)[0]
+    fixed_response = parse_ndjson(fixed_proc.stdout)[0]
+    assert direct_response["ok"] is True
+    assert direct_response["result"]["profile"]["proxy"]["mode"] == "direct"
+    assert fixed_response["ok"] is True
+    result = fixed_response["result"]
+    assert result["storeVersion"] == 3
+    assert result["count"] == 1
+    assert result["profiles"] == [result["profile"]]
+    public_proxy = result["profile"]["proxy"]
+    assert public_proxy == {
+        "proxyVersion": 1,
+        "mode": "fixedServer",
+        "protocol": "http",
+        "host": "proxy.example.invalid",
+        "port": 8080,
+        "credentialState": "configured",
+        "summary": "http://proxy.example.invalid:8080",
+    }
+    assert "credentials" not in public_proxy
+    assert_no_proxy_secret_values(direct_proc.stdout + direct_proc.stderr + fixed_proc.stdout + fixed_proc.stderr)
+
+    stored_profile = read_store_payload(store_root)["profiles"][0]
+    assert stored_profile["defaults"]["proxyMode"] == "fixedServer"
+    assert stored_profile["proxy"]["credentials"] == {
+        "username": SENTINEL_USERNAME,
+        "password": SENTINEL_PASSWORD,
+    }
+    assert_redacted_stderr(create_proc, direct_proc, fixed_proc, store_root=store_root, profile_name="Proxy Profile")
+
+
+def test_profiles_proxy_update_invalid_input_preserves_store_and_persists_redacted_diagnostic(tmp_path):
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-invalid-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Invalid Proxy Profile"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    original_payload = Path(store_root, "profile-store", "profiles.json").read_text(encoding="utf-8")
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-update-invalid",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "http",
+                        "host": "proxy.example.invalid",
+                        "port": 8080,
+                        "credentials": {"username": SENTINEL_USERNAME, "password": ""},
+                    },
+                },
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "PROXY_INVALID", "proxy-update-invalid")
+    assert diagnostic["method"] == "profiles.proxy.update"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "PROXY_INVALID"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    assert Path(store_root, "profile-store", "profiles.json").read_text(encoding="utf-8") == original_payload
+    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
+    assert lookup["found"] is True
+    assert lookup["entries"][0]["method"] == "profiles.proxy.update"
+    assert lookup["entries"][0]["errorCode"] == "PROXY_INVALID"
+    assert lookup["entries"][0]["detailRef"] == error["detailRef"]
+    assert_no_proxy_secret_values(proc.stdout + proc.stderr + json.dumps(lookup, sort_keys=True))
+
+
 def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocations(tmp_path):
     store_root = str(tmp_path / "app-data")
 
@@ -275,7 +538,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     create_diagnostic = parse_ndjson(create_proc.stderr)[0]
     assert create_proc.returncode == 0
     assert create_response["ok"] is True
-    assert create_response["result"]["storeVersion"] == 2
+    assert create_response["result"]["storeVersion"] == 3
     assert create_response["result"]["count"] == 1
     profile = create_response["result"]["profile"]
     assert profile["name"] == "Research"
@@ -335,7 +598,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     )
     delete_response = parse_ndjson(delete_proc.stdout)[0]
     assert delete_response["ok"] is True
-    assert delete_response["result"] == {"storeVersion": 2, "profiles": [], "count": 0}
+    assert delete_response["result"] == {"storeVersion": 3, "profiles": [], "count": 0}
 
 
 def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_diagnostics(tmp_path):
@@ -353,7 +616,7 @@ def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_d
     )
     create_response = parse_ndjson(create_proc.stdout)[0]
     assert create_response["ok"] is True
-    assert create_response["result"]["storeVersion"] == 2
+    assert create_response["result"]["storeVersion"] == 3
     profile = create_response["result"]["profile"]
     assert profile["identity"] == DEFAULT_REAL_IDENTITY
 
@@ -817,6 +1080,26 @@ def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_
             "params": {"storeRoot": "root", "identity": DEFAULT_REAL_IDENTITY},
         },
         {
+            "id": "proxy-update-missing-store",
+            "method": "profiles.proxy.update",
+            "params": {"profileId": "profile-id", "proxy": {"proxyVersion": 1, "mode": "direct"}},
+        },
+        {
+            "id": "proxy-update-bad-store",
+            "method": "profiles.proxy.update",
+            "params": {"storeRoot": 42, "profileId": "profile-id", "proxy": {"proxyVersion": 1, "mode": "direct"}},
+        },
+        {
+            "id": "proxy-update-missing-profile",
+            "method": "profiles.proxy.update",
+            "params": {"storeRoot": "root", "proxy": {"proxyVersion": 1, "mode": "direct"}},
+        },
+        {
+            "id": "proxy-update-blank-profile",
+            "method": "profiles.proxy.update",
+            "params": {"storeRoot": "root", "profileId": "   ", "proxy": {"proxyVersion": 1, "mode": "direct"}},
+        },
+        {
             "id": "audit-plan-missing-store",
             "method": "identity.audit.plan",
             "params": {"profileId": "profile-id"},
@@ -851,6 +1134,75 @@ def test_profiles_malformed_params_return_invalid_request(payload):
     assert diagnostic["detailRef"] == error["detailRef"]
     assert "Traceback" not in proc.stdout
     assert "Traceback" not in proc.stderr
+
+
+def test_fixed_proxy_chromium_launch_fails_before_direct_runtime_fallback_with_diagnostic(tmp_path):
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    store_root = str(tmp_path / "fixed-proxy-launch-app-data-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "fixed-launch-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Fixed Proxy Launch"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "fixed-launch-proxy-update",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "http",
+                        "host": "proxy.example.invalid",
+                        "port": 8080,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+    assert parse_ndjson(update_proc.stdout)[0]["ok"] is True
+
+    launch_proc = run_sidecar(
+        request_line(
+            {
+                "id": "fixed-proxy-chromium-launch",
+                "method": "chromium.launch",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        ),
+        env={"THEPRIVATOR_CHROMIUM_PATH": str(tmp_path / "missing-chromium-should-not-matter")},
+    )
+
+    response = parse_ndjson(launch_proc.stdout)[0]
+    diagnostic = parse_ndjson(launch_proc.stderr)[0]
+    error = assert_error_envelope(response, "PROXY_LAUNCH_UNSUPPORTED", "fixed-proxy-chromium-launch")
+    assert diagnostic["method"] == "chromium.launch"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "PROXY_LAUNCH_UNSUPPORTED"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
+    assert lookup["found"] is True
+    assert lookup["entries"][0]["method"] == "chromium.launch"
+    assert lookup["entries"][0]["errorCode"] == "PROXY_LAUNCH_UNSUPPORTED"
+    assert lookup["entries"][0]["detailRef"] == error["detailRef"]
+    assert not Path(store_root, "profile-store", "runtime").exists()
+    combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr
+    assert_no_proxy_secret_values(combined + json.dumps(lookup, sort_keys=True))
+    assert "CHROMIUM_EXECUTABLE_NOT_FOUND" not in combined
+    assert "missing-chromium-should-not-matter" not in combined
 
 
 def test_chromium_launch_status_stop_sidecar_contract_redacts_runtime_details(tmp_path):

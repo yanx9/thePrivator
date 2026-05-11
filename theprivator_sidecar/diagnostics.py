@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping, Optional, Union
 
 from .profiles import STORE_DIR
+from .proxy import PROXY_SECRET_FIELD_MARKERS
 from .protocol import JsonObject, RequestId
 
 DIAGNOSTIC_SCHEMA_VERSION = 1
@@ -34,6 +35,20 @@ _METHOD_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)
 _ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{1,95}$")
 _LEGACY_ID_PATTERN = re.compile(r"^legacy-[A-Za-z0-9_.:-]{1,96}$")
 
+_PROXY_FORBIDDEN_STRING_MARKERS = tuple(
+    sorted(
+        {
+            *(marker.casefold() for marker in PROXY_SECRET_FIELD_MARKERS if marker != "auth"),
+            "proxy-authorization",
+            "proxy_authorization",
+            "proxy-pass",
+            "proxy-password",
+            "proxy-user",
+            "proxy-username",
+        }
+    )
+)
+
 _FORBIDDEN_STRING_MARKERS = (
     "traceback",
     "stdout",
@@ -45,6 +60,7 @@ _FORBIDDEN_STRING_MARKERS = (
     "password=",
     "secret=",
     "--user-data-dir",
+    *_PROXY_FORBIDDEN_STRING_MARKERS,
 )
 
 

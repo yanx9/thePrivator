@@ -18,6 +18,13 @@ FORBIDDEN_LOG_SUBSTRINGS = (
     "Traceback",
     "proxy_user",
     "proxy_pass",
+    "proxy-user",
+    "proxy-pass",
+    "proxy-password",
+    "proxy-authorization",
+    "username",
+    "password",
+    "credentials",
     "--user-data-dir",
     "THEPRIVATOR_CHROMIUM_PATH=",
 )
@@ -150,6 +157,47 @@ def test_direct_no_store_root_calls_stay_stderr_only_and_ignore_log_path_params(
     assert not sneaky_log.exists()
     assert "secret-token-should-not-leak" not in proc.stderr
     assert str(sneaky_log) not in proc.stderr
+
+
+def test_diagnostic_normalization_rejects_proxy_secret_markers_in_error_fields(tmp_path):
+    from theprivator_sidecar.diagnostics import append_events, lookup_by_detail_ref, normalize_event
+
+    base_event = {
+        "event": "sidecar.request",
+        "requestId": "proxy-diagnostic",
+        "method": "profiles.proxy.update",
+        "status": "error",
+        "durationMs": 1,
+        "errorCode": "PROXY_INVALID",
+        "detailRef": "sidecar-safe-proxy-detail",
+    }
+
+    assert normalize_event(base_event) is not None
+    assert normalize_event({**base_event, "errorCode": "PROXY_PASSWORD"}) is None
+    assert normalize_event({**base_event, "detailRef": "sidecar-proxy-password"}) is None
+    assert normalize_event({**base_event, "detailRef": "sidecar-proxy-authorization"}) is None
+
+    store_root = tmp_path / "app-data"
+    result = append_events(
+        store_root,
+        [
+            {**base_event, "detailRef": "sidecar-proxy-username"},
+            base_event,
+        ],
+    )
+
+    assert result["ok"] is True
+    assert result["written"] == 1
+    lookup = lookup_by_detail_ref(store_root, "sidecar-safe-proxy-detail")
+    assert lookup["found"] is True
+    assert len(lookup["entries"]) == 1
+    assert lookup["entries"][0]["method"] == "profiles.proxy.update"
+    assert lookup_by_detail_ref(store_root, "sidecar-proxy-username") == {
+        "found": False,
+        "logPath": "profile-store/diagnostics/events.jsonl",
+        "entries": [],
+    }
+    assert_redacted_log_text(store_root, "proxy-username")
 
 
 def test_chromium_missing_executable_error_is_persisted_with_matching_detail_ref(tmp_path):

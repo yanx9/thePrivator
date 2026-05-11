@@ -20,6 +20,7 @@ from theprivator_sidecar.protocol import (
     IDENTITY_EXTENSION_FAILED,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
+    PROXY_LAUNCH_UNSUPPORTED,
     SidecarError,
 )
 
@@ -107,6 +108,46 @@ def assert_no_runtime_truth(profile: Mapping[str, Any]) -> None:
         "termination",
     }
     assert forbidden.isdisjoint(profile.keys())
+
+
+def test_fixed_proxy_launch_fails_before_executable_discovery_or_spawn(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(
+        profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "http",
+            "host": "proxy.example.invalid",
+            "port": 8080,
+            "credentials": {
+                "username": "proxy-user-sentinel-e2e33f73",
+                "password": "proxy-password-sentinel-74d86415",
+            },
+        },
+    )
+
+    def fail_discover_executable():
+        raise AssertionError("fixed-proxy launch must fail before executable discovery")
+
+    def fail_spawn(*args, **kwargs):
+        raise AssertionError("fixed-proxy launch must fail before spawning Chromium")
+
+    monkeypatch.setattr(chromium, "discover_executable", fail_discover_executable)
+    monkeypatch.setattr(chromium, "_spawn_chromium", fail_spawn)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, PROXY_LAUNCH_UNSUPPORTED)
+    encoded_error = json.dumps(error.to_dict(), sort_keys=True)
+    assert "proxy-user-sentinel" not in encoded_error
+    assert "proxy-password-sentinel" not in encoded_error
+    assert chromium.RuntimeRegistry(tmp_path).read() == {}
+    assert not (tmp_path / "profile-store" / "runtime").exists()
+    stored_profile = read_profiles_payload(tmp_path)["profiles"][0]
+    assert stored_profile["proxy"]["mode"] == "fixedServer"
+    assert_no_runtime_truth(stored_profile)
 
 
 def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_store_clean(

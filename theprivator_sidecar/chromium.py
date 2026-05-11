@@ -32,6 +32,7 @@ from .identity_runtime import (
     build_identity_runtime_plan,
 )
 from .profiles import STORE_DIR, ProfileRecord, ProfileStore, utc_now_iso
+from .proxy import DIRECT_PROXY_MODE
 from .protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
@@ -41,6 +42,7 @@ from .protocol import (
     IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
+    PROXY_LAUNCH_UNSUPPORTED,
     SidecarError,
 )
 
@@ -220,6 +222,7 @@ def status(store_root: Union[str, Path]) -> JsonObject:
 def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Launch Chromium for a stored profile and record only transient runtime state."""
     profile = _load_profile(store_root, profile_id)
+    _ensure_proxy_launch_supported(profile)
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
     records = registry.read()
@@ -574,6 +577,7 @@ def _launch_and_open_identity_audit_page(
     active: Mapping[str, RuntimeRecord],
     registry: RuntimeRegistry,
 ) -> JsonObject:
+    _ensure_proxy_launch_supported(profile)
     executable = discover_executable()
     user_data_path = resolve_user_data_path(store_root, profile)
     try:
@@ -798,6 +802,17 @@ def _load_profile(store_root: Union[str, Path], profile_id: str) -> ProfileRecor
             message="Chromium profileId is required.",
         )
     return ProfileStore(store_root).get(profile_id)
+
+
+
+def _ensure_proxy_launch_supported(profile: ProfileRecord) -> None:
+    proxy = profile.proxy if isinstance(profile.proxy, Mapping) else {}
+    if proxy.get("mode") == DIRECT_PROXY_MODE:
+        return
+    raise SidecarError(
+        code=PROXY_LAUNCH_UNSUPPORTED,
+        message="Saved proxy configurations cannot launch Chromium until runtime proxy support is implemented.",
+    )
 
 
 
