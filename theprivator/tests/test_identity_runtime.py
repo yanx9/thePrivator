@@ -104,6 +104,20 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
             "platformVersion": "",
             "architecture": "x86",
             "mobile": False,
+            "model": "",
+            "bitness": "64",
+            "brands": [
+                {"brand": "Chromium", "version": "120"},
+                {"brand": "Google Chrome", "version": "120"},
+                {"brand": "Not=A?Brand", "version": "99"},
+            ],
+            "fullVersionList": [
+                {"brand": "Chromium", "version": "120.0.0.0"},
+                {"brand": "Google Chrome", "version": "120.0.0.0"},
+                {"brand": "Not=A?Brand", "version": "99.0.0.0"},
+            ],
+            "fullVersion": "120.0.0.0",
+            "wow64": False,
         },
     }
     assert plan.cdp_overrides["locale"] == {"locale": "en-US"}
@@ -116,7 +130,13 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
         "screenWidth": 1920,
         "screenHeight": 1080,
     }
-    assert plan.launch_flags == ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
+    assert plan.launch_flags == [
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--lang=en-US",
+        "--window-size=1920,1032",
+        "--force-device-scale-factor=1.0",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ]
     assert "label" not in plan.to_dict()
     assert_json_safe(plan.to_dict())
 

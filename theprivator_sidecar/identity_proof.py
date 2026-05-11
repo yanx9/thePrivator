@@ -14,9 +14,17 @@ import json
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Union
 
-from .cdp import CdpClient, CdpEndpoint, page_navigate, runtime_evaluate
+from .cdp import (
+    CdpClient,
+    CdpEndpoint,
+    discover_devtools_endpoint,
+    discover_page_target_endpoint,
+    page_navigate,
+    runtime_evaluate,
+)
 from .protocol import IDENTITY_PROOF_FAILED, JsonObject, SidecarError
 
 PROOF_SCHEMA_VERSION = 1
@@ -233,10 +241,10 @@ def collect_identity_proof(
     client_factory: ClientFactory = CdpClient,
     timeout_seconds: float = 5.0,
 ) -> JsonObject:
-    """Navigate a target to the local proof page and collect observed surfaces."""
+    """Navigate a page target to the local proof page and collect observed surfaces."""
     try:
-        web_socket_url = _endpoint_url(endpoint_or_url)
         with IdentityProofServer() as server:
+            web_socket_url = _page_endpoint_url(endpoint_or_url)
             with client_factory(web_socket_url, timeout_seconds=timeout_seconds) as client:
                 client.command("Page.enable", {}, timeout_seconds=timeout_seconds)
                 page_navigate(client, server.url, timeout_seconds=timeout_seconds)
@@ -248,6 +256,32 @@ def collect_identity_proof(
                     timeout_seconds=timeout_seconds,
                 )
         return validate_identity_observation(observed)
+    except SidecarError as exc:
+        if exc.code == IDENTITY_PROOF_FAILED:
+            raise
+        raise _proof_error() from exc
+    except Exception as exc:
+        raise _proof_error() from exc
+
+
+def collect_identity_proof_for_user_data_dir(
+    user_data_dir: Union[str, Path],
+    *,
+    discovery_timeout_seconds: float = 10.0,
+    proof_timeout_seconds: float = 5.0,
+    client_factory: ClientFactory = CdpClient,
+) -> JsonObject:
+    """Discover a launched profile's page target and collect a redacted proof."""
+    try:
+        endpoint = discover_devtools_endpoint(
+            user_data_dir,
+            timeout_seconds=discovery_timeout_seconds,
+        )
+        return collect_identity_proof(
+            endpoint,
+            client_factory=client_factory,
+            timeout_seconds=proof_timeout_seconds,
+        )
     except SidecarError as exc:
         if exc.code == IDENTITY_PROOF_FAILED:
             raise
@@ -398,9 +432,9 @@ def _require_optional_number(value: Any) -> None:
         raise _proof_error() from exc
 
 
-def _endpoint_url(endpoint_or_url: Union[CdpEndpoint, str]) -> str:
+def _page_endpoint_url(endpoint_or_url: Union[CdpEndpoint, str]) -> str:
     if isinstance(endpoint_or_url, CdpEndpoint):
-        return endpoint_or_url.web_socket_debugger_url
+        return discover_page_target_endpoint(endpoint_or_url).web_socket_debugger_url
     if isinstance(endpoint_or_url, str):
         return endpoint_or_url
     raise _proof_error()
@@ -440,5 +474,6 @@ __all__ = [
     "PROOF_PAGE_HTML",
     "PROOF_SCHEMA_VERSION",
     "collect_identity_proof",
+    "collect_identity_proof_for_user_data_dir",
     "validate_identity_observation",
 ]

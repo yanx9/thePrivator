@@ -80,6 +80,12 @@ _REMOTE_DEBUGGING_ARG = "--remote-debugging-port=0"
 _LOAD_EXTENSION_PREFIX = "--load-extension="
 _DISABLE_EXTENSIONS_EXCEPT_PREFIX = "--disable-extensions-except="
 _ALLOWED_IDENTITY_LAUNCH_FLAGS = {WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG}
+_ALLOWED_IDENTITY_VALUE_ARG_PREFIXES = (
+    "--user-agent=",
+    "--lang=",
+    "--window-size=",
+    "--force-device-scale-factor=",
+)
 IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
 
@@ -375,6 +381,9 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
         if arg == _REMOTE_DEBUGGING_ARG or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
             safe_args.append(arg)
             continue
+        if _is_allowed_identity_value_arg(arg):
+            safe_args.append(arg)
+            continue
         if arg.startswith(_LOAD_EXTENSION_PREFIX) or arg.startswith(_DISABLE_EXTENSIONS_EXCEPT_PREFIX):
             _validate_extension_arg_path(arg.split("=", 1)[1])
             safe_args.append(arg)
@@ -384,6 +393,30 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
             message="Chromium launch arguments could not be prepared.",
         )
     return safe_args
+
+
+def _is_allowed_identity_value_arg(arg: str) -> bool:
+    if "\x00" in arg or any(ord(character) < 32 for character in arg):
+        return False
+    for prefix in _ALLOWED_IDENTITY_VALUE_ARG_PREFIXES:
+        if not arg.startswith(prefix):
+            continue
+        value = arg[len(prefix):]
+        if not value or len(value) > 512:
+            return False
+        if prefix == "--window-size=":
+            parts = value.split(",")
+            if len(parts) != 2 or not all(part.isdecimal() for part in parts):
+                return False
+            return all(1 <= int(part) <= 10_000 for part in parts)
+        if prefix == "--force-device-scale-factor=":
+            try:
+                number = float(value)
+            except ValueError:
+                return False
+            return 0.25 <= number <= 8.0
+        return True
+    return False
 
 
 def _validate_extension_arg_path(value: str) -> None:

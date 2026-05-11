@@ -6,9 +6,11 @@ from typing import Any
 import pytest
 import requests
 
+from theprivator_sidecar.cdp import CdpEndpoint, CdpPageEndpoint
 from theprivator_sidecar.identity_proof import (
     IdentityProofServer,
     collect_identity_proof,
+    collect_identity_proof_for_user_data_dir,
     validate_identity_observation,
 )
 from theprivator_sidecar.protocol import IDENTITY_CDP_FAILED, IDENTITY_PROOF_FAILED, SidecarError
@@ -156,6 +158,74 @@ def test_validate_observation_reports_absent_user_agent_data_as_unsupported():
     validated = validate_identity_observation(observation)
 
     assert validated["browser"]["userAgentData"] == {"supported": False}
+
+
+def test_collect_identity_proof_discovers_page_target_from_browser_endpoint(monkeypatch):
+    created: list[FakeProofClient] = []
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    def fake_discover_page_target_endpoint(received_endpoint, **kwargs: Any) -> CdpPageEndpoint:
+        assert received_endpoint == endpoint
+        return CdpPageEndpoint("ws://127.0.0.1:45678/devtools/page/page-id")
+
+    def client_factory(url: str, **kwargs: Any) -> FakeProofClient:
+        assert url == "ws://127.0.0.1:45678/devtools/page/page-id"
+        client = FakeProofClient(url)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "theprivator_sidecar.identity_proof.discover_page_target_endpoint",
+        fake_discover_page_target_endpoint,
+    )
+
+    proof = collect_identity_proof(endpoint, client_factory=client_factory, timeout_seconds=1)
+
+    assert proof == valid_observation()
+    assert len(created) == 1
+    assert created[0].closed is True
+
+
+def test_collect_identity_proof_for_user_data_dir_wraps_discovery_and_collects(monkeypatch, tmp_path):
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs: Any) -> CdpEndpoint:
+        assert user_data_dir == tmp_path
+        return endpoint
+
+    def fake_discover_page_target_endpoint(received_endpoint, **kwargs: Any) -> CdpPageEndpoint:
+        assert received_endpoint == endpoint
+        return CdpPageEndpoint("ws://127.0.0.1:45678/devtools/page/page-id")
+
+    def client_factory(url: str, **kwargs: Any) -> FakeProofClient:
+        assert url == "ws://127.0.0.1:45678/devtools/page/page-id"
+        return FakeProofClient(url)
+
+    monkeypatch.setattr(
+        "theprivator_sidecar.identity_proof.discover_devtools_endpoint",
+        fake_discover_devtools_endpoint,
+    )
+    monkeypatch.setattr(
+        "theprivator_sidecar.identity_proof.discover_page_target_endpoint",
+        fake_discover_page_target_endpoint,
+    )
+
+    proof = collect_identity_proof_for_user_data_dir(
+        tmp_path,
+        client_factory=client_factory,
+        discovery_timeout_seconds=1,
+        proof_timeout_seconds=1,
+    )
+
+    assert proof == valid_observation()
 
 
 @pytest.mark.parametrize("missing_key", ["browser", "navigator", "locale", "viewport", "canvas", "webgl", "audio", "webrtc"])

@@ -77,9 +77,24 @@ class CdpEndpoint:
     def version_url(self) -> str:
         return f"http://{_SAFE_HTTP_HOST}:{self.port}/json/version"
 
+    @property
+    def target_list_url(self) -> str:
+        return f"http://{_SAFE_HTTP_HOST}:{self.port}/json/list"
+
     def to_safe_dict(self) -> JsonObject:
         """Return only non-sensitive summary fields for local assertions."""
         return {"source": "DevToolsActivePort", "debugger": "loopback", "target": "browser"}
+
+
+@dataclass(frozen=True)
+class CdpPageEndpoint:
+    """Internal page target details used for page-scoped Emulation/Runtime work."""
+
+    web_socket_debugger_url: str
+
+    def to_safe_dict(self) -> JsonObject:
+        """Return only non-sensitive summary fields for local assertions."""
+        return {"source": "DevToolsTargetList", "debugger": "loopback", "target": "page"}
 
 
 def read_devtools_active_port(
@@ -160,6 +175,50 @@ def discover_devtools_endpoint(
         time.sleep(_bounded_poll_interval(poll_interval_seconds, deadline))
 
 
+def discover_page_target_endpoint(
+    endpoint: CdpEndpoint,
+    *,
+    timeout_seconds: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+    http_get: HttpGet = requests.get,
+) -> CdpPageEndpoint:
+    """Discover the first loopback page target for page-scoped CDP commands."""
+    if not isinstance(endpoint, CdpEndpoint):
+        raise _cdp_error()
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        try:
+            response = http_get(endpoint.target_list_url, timeout=max(0.001, http_timeout_seconds))
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("target list payload must be an array")
+            for target in payload:
+                if not isinstance(target, Mapping) or target.get("type") != "page":
+                    continue
+                web_socket_url = target.get("webSocketDebuggerUrl")
+                if not isinstance(web_socket_url, str) or not web_socket_url:
+                    continue
+                _validate_loopback_page_ws_url(web_socket_url, expected_port=endpoint.port)
+                return CdpPageEndpoint(web_socket_debugger_url=web_socket_url)
+            raise ValueError("page target was not found")
+        except SidecarError:
+            raise
+        except requests.Timeout as exc:
+            if time.monotonic() >= deadline:
+                raise _cdp_error() from exc
+        except requests.RequestException as exc:
+            if time.monotonic() >= deadline:
+                raise _cdp_error() from exc
+        except Exception as exc:
+            if time.monotonic() >= deadline:
+                raise _cdp_error() from exc
+
+        if time.monotonic() >= deadline:
+            raise _cdp_error()
+        time.sleep(_bounded_poll_interval(poll_interval_seconds, deadline))
+
+
 class CdpClient:
     """Tiny JSON-RPC wrapper over ``websocket-client`` for allowlisted helpers."""
 
@@ -187,7 +246,7 @@ class CdpClient:
         if self._socket is not None:
             return
         try:
-            _validate_loopback_browser_ws_url(self.web_socket_debugger_url)
+            _validate_loopback_cdp_ws_url(self.web_socket_debugger_url)
             socket = self._connect(self.web_socket_debugger_url, self.timeout_seconds)
             socket.settimeout(self.timeout_seconds)
             self._socket = socket
@@ -270,13 +329,13 @@ class CdpClient:
 
 
 def apply_identity_cdp_overrides(
-    endpoint_or_url: Union[CdpEndpoint, str],
+    endpoint_or_url: Union[CdpEndpoint, CdpPageEndpoint, str],
     overrides: Mapping[str, Any],
     *,
     connect: Optional[ConnectFactory] = None,
     timeout_seconds: float = DEFAULT_APPLY_TIMEOUT_SECONDS,
 ) -> JsonObject:
-    """Apply the allowlisted identity CDP overrides to an existing target."""
+    """Apply the allowlisted identity CDP overrides to an existing page target."""
     if not isinstance(overrides, Mapping):
         raise _cdp_error()
     if not overrides:
@@ -284,7 +343,7 @@ def apply_identity_cdp_overrides(
 
     applied: list[str] = []
     with CdpClient(
-        _endpoint_url(endpoint_or_url),
+        _page_endpoint_url(endpoint_or_url),
         connect=connect,
         timeout_seconds=timeout_seconds,
     ) as client:
@@ -418,7 +477,7 @@ def runtime_evaluate(
 def _default_websocket_connect(url: str, timeout: Optional[float]) -> _SocketLike:
     if websocket is None:
         raise _cdp_error()
-    return websocket.create_connection(url, timeout=timeout)
+    return websocket.create_connection(url, timeout=timeout, suppress_origin=True)
 
 
 def _parse_active_port_content(content: str) -> DevToolsActivePort:
@@ -436,11 +495,19 @@ def _parse_active_port_content(content: str) -> DevToolsActivePort:
 
 
 def _validate_browser_target_path(path: str) -> None:
+    _validate_target_path(path, expected_prefix="/devtools/browser/")
+
+
+def _validate_page_target_path(path: str) -> None:
+    _validate_target_path(path, expected_prefix="/devtools/page/")
+
+
+def _validate_target_path(path: str, *, expected_prefix: str) -> None:
     if not isinstance(path, str) or not path:
         raise _cdp_error()
     if len(path) > _MAX_TARGET_PATH_LENGTH:
         raise _cdp_error()
-    if not path.startswith("/devtools/browser/"):
+    if not path.startswith(expected_prefix):
         raise _cdp_error()
     if any(ord(character) < 33 for character in path):
         raise _cdp_error()
@@ -449,6 +516,19 @@ def _validate_browser_target_path(path: str) -> None:
 
 
 def _validate_loopback_browser_ws_url(url: str, *, expected_port: Optional[int] = None) -> None:
+    _validate_loopback_cdp_ws_url(url, expected_port=expected_port, target="browser")
+
+
+def _validate_loopback_page_ws_url(url: str, *, expected_port: Optional[int] = None) -> None:
+    _validate_loopback_cdp_ws_url(url, expected_port=expected_port, target="page")
+
+
+def _validate_loopback_cdp_ws_url(
+    url: str,
+    *,
+    expected_port: Optional[int] = None,
+    target: Optional[str] = None,
+) -> None:
     if not isinstance(url, str) or not url:
         raise _cdp_error()
     try:
@@ -465,15 +545,32 @@ def _validate_loopback_browser_ws_url(url: str, *, expected_port: Optional[int] 
         raise _cdp_error()
     if expected_port is not None and port != expected_port:
         raise _cdp_error()
-    _validate_browser_target_path(parsed.path)
+    if target == "browser":
+        _validate_browser_target_path(parsed.path)
+        return
+    if target == "page":
+        _validate_page_target_path(parsed.path)
+        return
+    if parsed.path.startswith("/devtools/browser/"):
+        _validate_browser_target_path(parsed.path)
+        return
+    _validate_page_target_path(parsed.path)
 
 
-def _endpoint_url(endpoint_or_url: Union[CdpEndpoint, str]) -> str:
+def _endpoint_url(endpoint_or_url: Union[CdpEndpoint, CdpPageEndpoint, str]) -> str:
     if isinstance(endpoint_or_url, CdpEndpoint):
+        return endpoint_or_url.web_socket_debugger_url
+    if isinstance(endpoint_or_url, CdpPageEndpoint):
         return endpoint_or_url.web_socket_debugger_url
     if isinstance(endpoint_or_url, str):
         return endpoint_or_url
     raise _cdp_error()
+
+
+def _page_endpoint_url(endpoint_or_url: Union[CdpEndpoint, CdpPageEndpoint, str]) -> str:
+    if isinstance(endpoint_or_url, CdpEndpoint):
+        return discover_page_target_endpoint(endpoint_or_url).web_socket_debugger_url
+    return _endpoint_url(endpoint_or_url)
 
 
 def _require_object(value: Any) -> Mapping[str, Any]:
@@ -508,6 +605,7 @@ def _cdp_error() -> SidecarError:
 __all__ = [
     "CdpClient",
     "CdpEndpoint",
+    "CdpPageEndpoint",
     "DEFAULT_APPLY_TIMEOUT_SECONDS",
     "DEFAULT_DISCOVERY_TIMEOUT_SECONDS",
     "DEFAULT_HTTP_TIMEOUT_SECONDS",
@@ -517,6 +615,7 @@ __all__ = [
     "DevToolsActivePort",
     "apply_identity_cdp_overrides",
     "discover_devtools_endpoint",
+    "discover_page_target_endpoint",
     "page_navigate",
     "read_devtools_active_port",
     "runtime_evaluate",

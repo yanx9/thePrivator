@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import re
 from typing import Any, Mapping, Optional
 
 from .identity import IDENTITY_VERSION, normalize_identity
@@ -163,19 +164,76 @@ def _build_cdp_overrides(identity: Mapping[str, Any]) -> JsonObject:
 
 
 def _build_launch_flags(identity: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+
+    browser = identity["browser"]
+    if browser.get("mode") != "real":
+        flags.append(f"--user-agent={browser['userAgent']}")
+
+    locale = identity["locale"]
+    if locale.get("mode") != "real":
+        flags.append(f"--lang={locale['locale']}")
+
+    screen = identity["screen"]
+    if screen.get("mode") != "real":
+        flags.append(f"--window-size={screen['viewportWidth']},{screen['viewportHeight']}")
+        flags.append(f"--force-device-scale-factor={screen['pixelRatio']}")
+
     policy = identity["webrtc"].get("policy")
     if policy in {"disableNonProxiedUdp", "block"}:
-        return [WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG]
-    return []
+        flags.append(WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG)
+    return flags
 
 
 def _browser_user_agent_metadata(browser: Mapping[str, Any], navigator: Mapping[str, Any]) -> JsonObject:
     raw_hints = browser.get("clientHints")
     if isinstance(raw_hints, Mapping) and raw_hints:
-        return _ordered_metadata(raw_hints)
+        return _complete_cdp_user_agent_metadata(_ordered_metadata(raw_hints), browser.get("userAgent"))
     if navigator.get("mode") == "real":
         return {}
-    return _navigator_user_agent_metadata(navigator)
+    return _complete_cdp_user_agent_metadata(_navigator_user_agent_metadata(navigator), browser.get("userAgent"))
+
+
+def _complete_cdp_user_agent_metadata(raw: Mapping[str, Any], user_agent: Any) -> JsonObject:
+    """Return Chrome's required CDP UA metadata shape from bounded identity hints."""
+    version = _chrome_version(user_agent)
+    major = version.split(".", 1)[0]
+    architecture = str(raw.get("architecture", ""))
+    metadata: JsonObject = {
+        "platform": raw.get("platform", ""),
+        "platformVersion": raw.get("platformVersion", ""),
+        "architecture": architecture,
+        "mobile": raw.get("mobile", False),
+        "model": raw.get("model", ""),
+        "bitness": raw.get("bitness", _default_bitness(architecture)),
+        "brands": _brand_versions(major),
+        "fullVersionList": _brand_versions(major, full_version=version),
+        "fullVersion": version,
+        "wow64": False,
+    }
+    return metadata
+
+
+def _brand_versions(major: str, *, full_version: Optional[str] = None) -> list[JsonObject]:
+    chromium_version = full_version or major
+    greased_version = "99.0.0.0" if full_version else "99"
+    return [
+        {"brand": "Chromium", "version": chromium_version},
+        {"brand": "Google Chrome", "version": chromium_version},
+        {"brand": "Not=A?Brand", "version": greased_version},
+    ]
+
+
+def _chrome_version(user_agent: Any) -> str:
+    if isinstance(user_agent, str):
+        match = re.search(r"Chrome/(\d+\.\d+\.\d+\.\d+)", user_agent)
+        if match:
+            return match.group(1)
+    return "0.0.0.0"
+
+
+def _default_bitness(architecture: str) -> str:
+    return "64" if architecture in {"x86", "arm"} else ""
 
 
 def _navigator_user_agent_metadata(navigator: Mapping[str, Any]) -> JsonObject:

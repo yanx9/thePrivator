@@ -11,8 +11,10 @@ import requests
 
 from theprivator_sidecar.cdp import (
     CdpClient,
+    CdpEndpoint,
     apply_identity_cdp_overrides,
     discover_devtools_endpoint,
+    discover_page_target_endpoint,
     read_devtools_active_port,
 )
 from theprivator_sidecar.protocol import IDENTITY_CDP_FAILED, SidecarError
@@ -229,6 +231,81 @@ def test_cdp_client_sends_incrementing_json_rpc_ids_and_closes_on_success():
     assert [sent["id"] for sent in socket.sent] == [1, 2]
     assert [sent["method"] for sent in socket.sent] == ["Runtime.evaluate", "Page.navigate"]
     assert socket.timeouts == [0.25, 0.25, 0.25]
+    assert socket.closed is True
+
+
+def test_page_target_discovery_uses_target_list_and_validates_loopback_page_websocket():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+    calls: list[tuple[str, float]] = []
+
+    def fake_get(url: str, *, timeout: float) -> FakeResponse:
+        calls.append((url, timeout))
+        return FakeResponse(
+            [
+                {"type": "service_worker", "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/ignored"},
+                {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/page-id"},
+            ]
+        )
+
+    page = discover_page_target_endpoint(
+        endpoint,
+        http_get=fake_get,
+        timeout_seconds=0.1,
+        poll_interval_seconds=0.001,
+        http_timeout_seconds=0.025,
+    )
+
+    assert page.web_socket_debugger_url == "ws://127.0.0.1:45678/devtools/page/page-id"
+    assert calls == [("http://127.0.0.1:45678/json/list", 0.025)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"not": "an array"},
+        [],
+        [{"type": "page"}],
+        [{"type": "page", "webSocketDebuggerUrl": "ws://192.168.0.10:45678/devtools/page/page-id"}],
+        [{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/browser/browser-id"}],
+    ],
+)
+def test_page_target_discovery_rejects_malformed_target_lists(payload):
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    def fake_get(url: str, *, timeout: float) -> FakeResponse:
+        return FakeResponse(payload)
+
+    with pytest.raises(SidecarError) as exc_info:
+        discover_page_target_endpoint(
+            endpoint,
+            http_get=fake_get,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0.001,
+            http_timeout_seconds=0.001,
+        )
+
+    assert_sidecar_error(exc_info, forbidden=("192.168.0.10",))
+
+
+def test_cdp_client_accepts_page_target_websocket_urls():
+    socket = FakeSocket([json.dumps({"id": 1, "result": {}})])
+
+    with CdpClient(
+        "ws://127.0.0.1:45678/devtools/page/page-id",
+        connect=lambda url, timeout: socket,
+        timeout_seconds=0.25,
+    ) as client:
+        result = client.command("Page.enable", {})
+
+    assert result == {}
     assert socket.closed is True
 
 
