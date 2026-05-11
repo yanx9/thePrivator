@@ -523,6 +523,287 @@ describe("ThePrivator profile library UI", () => {
     expect(commandCalls("identity_validate")).toHaveLength(2);
   });
 
+  it("applies a curated preset through the typed client and renders non-blocking warnings", async () => {
+    const savedIdentity = defaultIdentity({ label: "Research laptop", presetId: null });
+    const appliedIdentity = identityPreset("Balanced desktop", "balanced-desktop", {
+      browser: { mode: "masked", userAgent: "Mozilla/5.0 Balanced" },
+      canvas: { mode: "noise", noiseSeed: 313 },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    const updatedProfile = profileRecord({
+      id: profile.id,
+      name: "Research",
+      updatedAt: "2026-05-04T18:12:00.000Z",
+      identity: appliedIdentity,
+    });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockResolvedValueOnce(
+        profileEnvelope(profileResult([updatedProfile], {
+          profile: updatedProfile,
+          warnings: [identityWarning({ code: "IDENTITY_REGION_MISMATCH", message: "Browser region and locale differ.", surface: "browser", path: "browser.userAgent" })],
+        })),
+      );
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /apply preset/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset applied with 1 warning/i));
+    expect(panel).toHaveTextContent(/Warnings are non-blocking/i);
+    expect(panel).toHaveTextContent(/Preset apply warnings/i);
+    expect(panel).toHaveTextContent(/IDENTITY_REGION_MISMATCH/i);
+    expect(panel).toHaveTextContent(/Browser region and locale differ/i);
+    expect(card).toHaveTextContent(/Balanced desktop/i);
+    expect(card).toHaveTextContent(/Preset balanced-desktop/i);
+    expect(card).toHaveTextContent(/Canvas noise/i);
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_apply_preset", {
+      profileId: profile.id,
+      presetId: "balanced-desktop",
+    });
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(1);
+  });
+
+  it("renders zero-warning preset apply success without promising fingerprint protection", async () => {
+    const savedIdentity = defaultIdentity({ label: "Research laptop", presetId: null });
+    const appliedIdentity = identityPreset("Strict privacy", "strict-privacy", {
+      navigator: { mode: "masked", platform: "Linux x86_64", hardwareConcurrency: 8, deviceMemory: 8, uaPlatform: "Linux", uaPlatformVersion: "", uaArchitecture: "x86", uaMobile: false },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    const updatedProfile = profileRecord({ id: profile.id, name: "Research", identity: appliedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([updatedProfile], { profile: updatedProfile, warnings: [] })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "strict-privacy" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /apply preset/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset applied with 0 sidecar warnings/i));
+    expect(panel).toHaveTextContent(/does not promise full fingerprint protection/i);
+    expect(panel).not.toHaveTextContent(/Preset apply warnings/i);
+    expect(card).toHaveTextContent(/Strict privacy/i);
+  });
+
+  it("keeps the previous identity visible when preset apply returns a typed sidecar error", async () => {
+    const savedIdentity = defaultIdentity({ label: "Original identity", presetId: null });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockRejectedValueOnce(profileError("IDENTITY_PRESET_NOT_FOUND", "Curated preset was not found.", "sidecar-apply-detail"));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /apply preset/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_PRESET_NOT_FOUND/i));
+    expect(panel).toHaveTextContent(/Curated preset was not found/i);
+    expect(panel).toHaveTextContent(/sidecar/i);
+    expect(panel).toHaveTextContent(/Recoverableyes/i);
+    expect(panel).toHaveTextContent(/sidecar-apply-detail/i);
+    expect(within(panel).getByRole("button", { name: /lookup diagnostics for sidecar-apply-detail/i })).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: /apply preset/i })).toBeEnabled();
+    expect(card).toHaveTextContent(/Original identity/i);
+    expect(card).toHaveTextContent(/No preset/i);
+    expect(card).not.toHaveTextContent(/Balanced desktop · Preset balanced-desktop/i);
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(1);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
+  it("renders client parser preset mismatch failures without applying partial data", async () => {
+    const savedIdentity = defaultIdentity({ label: "Original identity", presetId: null });
+    const mismatchedIdentity = identityPreset("Travel laptop", "travel-laptop");
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    const mismatchedProfile = profileRecord({ id: profile.id, name: "Research", identity: mismatchedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([mismatchedProfile], { profile: mismatchedProfile, warnings: [] })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /apply preset/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/SIDECAR_PROTOCOL_ERROR/i));
+    expect(panel).toHaveTextContent(/protocol/i);
+    expect(panel).toHaveTextContent(/did not match the requested presetId/i);
+    expect(card).toHaveTextContent(/Original identity/i);
+    expect(card).toHaveTextContent(/No preset/i);
+    expect(card).not.toHaveTextContent(/Travel laptop · Preset travel-laptop/i);
+  });
+
+  it("does not apply when no preset or only a stale preset id is selected", async () => {
+    const noPresetProfile = profileRecord({ name: "No Preset", identity: defaultIdentity({ label: "No preset identity", presetId: null }) });
+    const staleProfile = profileRecord({
+      id: "22222222-2222-2222-2222-222222222222",
+      name: "Stale Preset",
+      identity: defaultIdentity({ label: "Stale identity", presetId: "retired-preset" }),
+    });
+    mockStartup([noPresetProfile, staleProfile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(noPresetProfile.identity, [])))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(staleProfile.identity, [])));
+
+    render(<App />);
+
+    const noPresetCard = await screen.findByRole("listitem", { name: /no preset/i });
+    fireEvent.click(within(noPresetCard).getByRole("button", { name: /configure identity for no preset/i }));
+    const noPresetPanel = await within(noPresetCard).findByRole("region", { name: /configure identity for no preset/i });
+    await waitFor(() => expect(noPresetPanel).toHaveTextContent(/Choose a curated preset before applying/i));
+    expect(within(noPresetPanel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    fireEvent.click(within(noPresetPanel).getByRole("button", { name: /close identity configuration/i }));
+
+    const staleCard = screen.getByRole("listitem", { name: /stale preset/i });
+    fireEvent.click(within(staleCard).getByRole("button", { name: /configure identity for stale preset/i }));
+    const stalePanel = await within(staleCard).findByRole("region", { name: /configure identity for stale preset/i });
+    await waitFor(() => expect(stalePanel).toHaveTextContent(/retired-preset is not in the loaded curated preset list/i));
+    expect(within(stalePanel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(0);
+  });
+
+  it("disables preset apply with explanatory copy while Chromium is running or launching", async () => {
+    const profile = profileRecord({ name: "Research", identity: defaultIdentity({ label: "Runtime identity", presetId: null }) });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 8787 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(profile.identity, [])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    expect(within(panel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/disabled while Chromium is running/i);
+    expect(panel).toHaveTextContent(/changes affect the next launch only/i);
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(0);
+  });
+
+  it("disables preset apply while Chromium launch is pending", async () => {
+    const profile = profileRecord({ name: "Research", identity: defaultIdentity({ label: "Pending identity", presetId: null }) });
+    const pendingLaunch = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "chromium_launch") {
+        return pendingLaunch.promise;
+      }
+      if (command === "identity_presets_list") {
+        return Promise.resolve(identityEnvelope(identityPresetResult()));
+      }
+      if (command === "identity_validate") {
+        return Promise.resolve(identityEnvelope(identityValidationResult(profile.identity, [])));
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/Launching/i));
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    expect(within(panel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/disabled while Chromium is launching/i);
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(0);
+
+    await act(async () => {
+      pendingLaunch.resolve(chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id }), runningCount: 1 }));
+    });
+  });
+
+  it("disables preset apply while Chromium stop is pending", async () => {
+    const profile = profileRecord({ name: "Research", identity: defaultIdentity({ label: "Stopping identity", presetId: null }) });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 9797 });
+    const pendingStop = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult({ profiles: [running] })));
+      }
+      if (command === "chromium_stop") {
+        return pendingStop.promise;
+      }
+      if (command === "identity_presets_list") {
+        return Promise.resolve(identityEnvelope(identityPresetResult()));
+      }
+      if (command === "identity_validate") {
+        return Promise.resolve(identityEnvelope(identityValidationResult(profile.identity, [])));
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /stop chromium/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/Stopping/i));
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
+    expect(within(panel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/disabled while Chromium is stopping/i);
+    expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(0);
+
+    await act(async () => {
+      pendingStop.resolve(chromiumEnvelope({ ...chromiumStoppedProfile({ profileId: profile.id }), runningCount: 0 }));
+    });
+  });
+
   it("renders startup profile load failures as actionable recovery without claiming an empty store", async () => {
     mockInvoke
       .mockResolvedValueOnce(healthEnvelope())
@@ -1279,6 +1560,7 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("importLegacyProfiles");
     expect(source).toContain("listIdentityPresets");
     expect(source).toContain("validateIdentity");
+    expect(source).toContain("applyProfileIdentityPreset");
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);

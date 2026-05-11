@@ -6,6 +6,7 @@ import {
   seedInitialIdentityDraft,
 } from "./identityControls";
 import {
+  applyProfileIdentityPreset,
   createProfile,
   deleteProfile,
   getChromiumStatus,
@@ -91,14 +92,24 @@ type IdentityConfigError = {
   occurredAt: string;
 };
 
+type IdentityConfigSuccess = {
+  profileId: string;
+  action: Extract<IdentityConfigAction, "apply-preset">;
+  presetId: string;
+  warningCount: number;
+  occurredAt: string;
+};
+
 type IdentityConfigPanelState = {
   isOpen: boolean;
   phase: IdentityConfigPhase;
   draft: ProfileIdentity | null;
   presets: ProfileIdentity[] | null;
+  selectedPresetId: string;
   savedWarnings: IdentityWarning[];
   currentAction: IdentityConfigAction | null;
   error: IdentityConfigError | null;
+  applySuccess: IdentityConfigSuccess | null;
 };
 
 type LegacySelectionState = Record<string, boolean>;
@@ -270,9 +281,11 @@ export function App() {
   const [identityDraft, setIdentityDraft] = useState<ProfileIdentity | null>(null);
   const [identityConfigPhase, setIdentityConfigPhase] = useState<IdentityConfigPhase>("idle");
   const [identityPresetCache, setIdentityPresetCache] = useState<ProfileIdentity[] | null>(null);
+  const [selectedIdentityPresetId, setSelectedIdentityPresetId] = useState("");
   const [savedIdentityWarnings, setSavedIdentityWarnings] = useState<IdentityWarning[]>([]);
   const [identityCurrentAction, setIdentityCurrentAction] = useState<IdentityConfigAction | null>(null);
   const [identityConfigError, setIdentityConfigError] = useState<IdentityConfigError | null>(null);
+  const [identityConfigSuccess, setIdentityConfigSuccess] = useState<IdentityConfigSuccess | null>(null);
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -837,6 +850,7 @@ export function App() {
   }, [diagnosticLookupState.detailRef, runDiagnosticLookup]);
 
   const recordIdentityConfigError = useCallback((profileId: string, action: IdentityConfigAction, error: SidecarClientError) => {
+    setIdentityConfigSuccess(null);
     setIdentityConfigError({
       profileId,
       action,
@@ -852,9 +866,11 @@ export function App() {
     setIdentityPanelProfileId(null);
     setIdentityDraft(null);
     setIdentityConfigPhase("idle");
+    setSelectedIdentityPresetId("");
     setSavedIdentityWarnings([]);
     setIdentityCurrentAction(null);
     setIdentityConfigError(null);
+    setIdentityConfigSuccess(null);
   }, []);
 
   const openIdentityConfig = useCallback(
@@ -866,8 +882,10 @@ export function App() {
 
       setIdentityPanelProfileId(profile.id);
       setIdentityDraft(draft);
+      setSelectedIdentityPresetId(draft.presetId ?? "");
       setSavedIdentityWarnings([]);
       setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
       setIdentityConfigPhase(hasPresetCache ? "validating" : "loading-presets");
       setIdentityCurrentAction(hasPresetCache ? "validate-saved" : "load-presets");
 
@@ -912,6 +930,74 @@ export function App() {
         });
     },
     [identityPresetCache, recordIdentityConfigError],
+  );
+
+  const handleIdentityPresetSelect = useCallback(
+    (profileId: string, presetId: string) => {
+      if (identityPanelProfileId !== profileId) {
+        return;
+      }
+
+      setSelectedIdentityPresetId(presetId);
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+    },
+    [identityPanelProfileId],
+  );
+
+  const handleApplyIdentityPreset = useCallback(
+    async (profile: ProfileRecord, presetId: string) => {
+      const requestedPresetId = presetId.trim();
+      const presetExists = identityPresetCache?.some((preset) => preset.presetId === requestedPresetId) ?? false;
+      const lifecycleMutation = chromiumMutationRef.current;
+
+      if (
+        identityPanelProfileId !== profile.id ||
+        identityConfigPhase === "applying-preset" ||
+        requestedPresetId.length === 0 ||
+        !presetExists ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation?.profileId === profile.id
+      ) {
+        return;
+      }
+
+      const requestId = identityConfigRequestIdRef.current;
+      setIdentityConfigPhase("applying-preset");
+      setIdentityCurrentAction("apply-preset");
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+
+      try {
+        const snapshot = await applyProfileIdentityPreset(profile.id, requestedPresetId);
+
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        applyProfileSnapshot(snapshot);
+        setIdentityDraft(seedInitialIdentityDraft(snapshot.profile));
+        setSelectedIdentityPresetId(snapshot.profile.identity.presetId ?? requestedPresetId);
+        setSavedIdentityWarnings(snapshot.warnings);
+        setIdentityConfigSuccess({
+          profileId: profile.id,
+          action: "apply-preset",
+          presetId: requestedPresetId,
+          warningCount: snapshot.warnings.length,
+          occurredAt: new Date().toISOString(),
+        });
+        setIdentityConfigPhase("ready");
+        setIdentityCurrentAction(null);
+        setIdentityConfigError(null);
+      } catch (error) {
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        recordIdentityConfigError(profile.id, "apply-preset", error as SidecarClientError);
+      }
+    },
+    [applyProfileSnapshot, identityConfigPhase, identityPanelProfileId, identityPresetCache, recordIdentityConfigError],
   );
 
   const profileCount = profiles.length;
@@ -1042,9 +1128,11 @@ export function App() {
                     phase: identityPanelProfileId === profile.id ? identityConfigPhase : "idle",
                     draft: identityPanelProfileId === profile.id ? identityDraft : null,
                     presets: identityPanelProfileId === profile.id ? identityPresetCache : null,
+                    selectedPresetId: identityPanelProfileId === profile.id ? selectedIdentityPresetId : "",
                     savedWarnings: identityPanelProfileId === profile.id ? savedIdentityWarnings : [],
                     currentAction: identityPanelProfileId === profile.id ? identityCurrentAction : null,
                     error: identityConfigError?.profileId === profile.id ? identityConfigError : null,
+                    applySuccess: identityConfigSuccess?.profileId === profile.id ? identityConfigSuccess : null,
                   }}
                   isLifecycleActionBusy={chromiumMutation !== null}
                   isProfileBusy={isProfileBusy}
@@ -1059,8 +1147,10 @@ export function App() {
                   onDeleteRequest={setDeleteCandidate}
                   onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
+                  onIdentityApplyPreset={handleApplyIdentityPreset}
                   onIdentityClose={closeIdentityConfig}
                   onIdentityConfigure={openIdentityConfig}
+                  onIdentityPresetSelect={handleIdentityPresetSelect}
                   onLaunch={handleLaunchProfile}
                   onRefreshStatus={() => void refreshChromiumStatus("manual")}
                   onRenameCancel={() => setEditing(null)}
@@ -1693,8 +1783,10 @@ function ProfileCard({
   onDeleteRequest,
   onDiagnosticLookup,
   onEditNameChange,
+  onIdentityApplyPreset,
   onIdentityClose,
   onIdentityConfigure,
+  onIdentityPresetSelect,
   onLaunch,
   onRefreshStatus,
   onRenameCancel,
@@ -1719,8 +1811,10 @@ function ProfileCard({
   onDeleteRequest: (profile: ProfileRecord) => void;
   onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
+  onIdentityApplyPreset: (profile: ProfileRecord, presetId: string) => void;
   onIdentityClose: () => void;
   onIdentityConfigure: (profile: ProfileRecord) => void;
+  onIdentityPresetSelect: (profileId: string, presetId: string) => void;
   onLaunch: (profile: ProfileRecord) => void;
   onRefreshStatus: () => void;
   onRenameCancel: () => void;
@@ -1742,8 +1836,11 @@ function ProfileCard({
   const disableLifecycleControls = isProfileBusy || isLifecycleActionBusy;
   const titleId = `profile-${profile.id}-title`;
   const renameInputId = `rename-${profile.id}`;
-  const runtimeLabel = runningState ? "Running" : isLaunchingThis ? "Launching" : isStoppingThis ? "Stopping" : "Stopped";
-  const runtimeTone = runningState ? "running" : isLaunchingThis || isStoppingThis ? "pending" : "stopped";
+  const runtimeLabel = isStoppingThis ? "Stopping" : isLaunchingThis ? "Launching" : runningState ? "Running" : "Stopped";
+  const runtimeTone = isLaunchingThis || isStoppingThis ? "pending" : runningState ? "running" : "stopped";
+  const identityRuntimeProtectionReason = isRuntimeProtected
+    ? `Identity preset changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before applying; changes affect the next launch only.`
+    : null;
 
   const retryLifecycle = () => {
     if (!lifecycleError) {
@@ -1791,9 +1888,12 @@ function ProfileCard({
         <IdentityConfigurationPanel
           diagnosticLookupState={diagnosticLookupState}
           profile={profile}
+          runtimeProtectionReason={identityRuntimeProtectionReason}
           state={identityConfigState}
+          onApplyPreset={onIdentityApplyPreset}
           onClose={onIdentityClose}
           onDiagnosticLookup={onDiagnosticLookup}
+          onPresetSelect={onIdentityPresetSelect}
         />
       ) : null}
 
@@ -1958,21 +2058,46 @@ function ProfileIdentitySummary({
 function IdentityConfigurationPanel({
   diagnosticLookupState,
   profile,
+  runtimeProtectionReason,
   state,
+  onApplyPreset,
   onClose,
   onDiagnosticLookup,
+  onPresetSelect,
 }: {
   diagnosticLookupState: DiagnosticLookupState;
   profile: ProfileRecord;
+  runtimeProtectionReason: string | null;
   state: IdentityConfigPanelState;
+  onApplyPreset: (profile: ProfileRecord, presetId: string) => void;
   onClose: () => void;
   onDiagnosticLookup: (detailRef: string) => void;
+  onPresetSelect: (profileId: string, presetId: string) => void;
 }) {
   const draft = state.draft ?? profile.identity;
   const controls = getIdentitySurfaceControls(draft);
   const presets = state.presets ?? [];
   const isLoadingPresets = state.phase === "loading-presets";
   const isValidating = state.phase === "validating";
+  const isApplyingPreset = state.phase === "applying-preset" && state.currentAction === "apply-preset";
+  const selectedPresetId = state.selectedPresetId;
+  const selectedPreset = presets.find((preset) => preset.presetId === selectedPresetId) ?? null;
+  const selectedPresetUnavailable = selectedPresetId.length > 0 && selectedPreset === null;
+  const presetSelectId = `identity-preset-select-${profile.id}`;
+  const presetApplyHintId = `identity-preset-apply-hint-${profile.id}`;
+  const applyDisabledReason = runtimeProtectionReason
+    ?? (isLoadingPresets
+      ? "Curated preset choices are still loading."
+      : isValidating
+        ? "Saved identity validation is still running."
+        : isApplyingPreset
+          ? "Preset apply is already running for this profile."
+          : selectedPresetId.length === 0
+            ? "Choose a curated preset before applying."
+            : selectedPresetUnavailable
+              ? `Preset ${selectedPresetId} is not in the loaded curated preset list. Choose an available preset before applying.`
+              : null);
+  const canApplyPreset = applyDisabledReason === null;
 
   return (
     <section
@@ -2016,6 +2141,47 @@ function IdentityConfigurationPanel({
           Validating the saved identity through the typed sidecar client…
         </div>
       ) : null}
+      {isApplyingPreset ? (
+        <div className="identity-status" role="status" aria-live="polite" aria-atomic="true">
+          Applying the selected preset through the typed sidecar client…
+        </div>
+      ) : null}
+
+      <section className="identity-preset-apply" aria-label={`${profile.name} preset apply controls`}>
+        <div className="identity-panel-subhead">
+          <strong>Apply a curated preset</strong>
+          <span>{selectedPreset ? selectedPreset.label : selectedPresetUnavailable ? "Unavailable preset" : "No preset selected"}</span>
+        </div>
+        <div className="identity-preset-apply__controls">
+          <div className="identity-preset-apply__field">
+            <label htmlFor={presetSelectId}>Curated preset</label>
+            <select
+              id={presetSelectId}
+              value={selectedPresetId}
+              disabled={isLoadingPresets || isApplyingPreset}
+              aria-describedby={presetApplyHintId}
+              onChange={(event) => onPresetSelect(profile.id, event.target.value)}
+            >
+              <option value="">Choose a preset…</option>
+              {selectedPresetUnavailable ? <option value={selectedPresetId}>Unavailable preset {selectedPresetId}</option> : null}
+              {presets.map((preset) =>
+                preset.presetId ? (
+                  <option key={preset.presetId} value={preset.presetId}>
+                    {preset.label} · {preset.presetId}
+                  </option>
+                ) : null,
+              )}
+            </select>
+          </div>
+          <button type="button" disabled={!canApplyPreset} onClick={() => onApplyPreset(profile, selectedPresetId)}>
+            {isApplyingPreset ? "Applying preset…" : "Apply preset"}
+          </button>
+        </div>
+        <p id={presetApplyHintId} className="identity-muted-copy" role="status" aria-live="polite">
+          {applyDisabledReason
+            ?? `${selectedPreset?.label ?? "The selected preset"} will be saved through the typed identity mutation and used on the next Chromium launch.`}
+        </p>
+      </section>
 
       {state.error ? (
         <IdentityConfigErrorFeedback
@@ -2048,7 +2214,14 @@ function IdentityConfigurationPanel({
         )}
       </section>
 
-      {state.savedWarnings.length ? <IdentityWarningList warnings={state.savedWarnings} /> : null}
+      {state.applySuccess ? <IdentityApplySuccessFeedback state={state.applySuccess} /> : null}
+
+      {state.savedWarnings.length ? (
+        <IdentityWarningList
+          title={state.applySuccess ? "Preset apply warnings" : "Saved identity warnings"}
+          warnings={state.savedWarnings}
+        />
+      ) : null}
 
       <IdentitySurfaceControlList controls={controls} profile={profile} />
     </section>
@@ -2080,11 +2253,31 @@ function IdentityConfigErrorFeedback({
   );
 }
 
-function IdentityWarningList({ warnings }: { warnings: IdentityWarning[] }) {
+function IdentityApplySuccessFeedback({ state }: { state: IdentityConfigSuccess }) {
+  const warningCopy = state.warningCount === 0
+    ? "Preset applied with 0 sidecar warnings. This records the configured identity for the next Chromium launch; it does not promise full fingerprint protection."
+    : `Preset applied with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Warnings are non-blocking and should be reviewed before the next launch.`;
+
   return (
-    <section className="identity-warning-list" aria-label="Saved identity warnings">
+    <section className="identity-success-feedback" role="status" aria-live="polite" aria-atomic="true">
+      <strong>Preset applied for next launch.</strong>
+      <p>{warningCopy}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Preset" value={`Preset ${state.presetId}`} />
+        <Metric label="Warnings" value={state.warningCount} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+    </section>
+  );
+}
+
+function IdentityWarningList({ title, warnings }: { title?: string; warnings: IdentityWarning[] }) {
+  const heading = title ?? "Saved identity warnings";
+
+  return (
+    <section className="identity-warning-list" aria-label={heading}>
       <div className="identity-panel-subhead">
-        <strong>Saved identity warnings</strong>
+        <strong>{heading}</strong>
         <span>{warnings.length} warning{warnings.length === 1 ? "" : "s"}</span>
       </div>
       <div className="identity-warning-list__items" role="list">

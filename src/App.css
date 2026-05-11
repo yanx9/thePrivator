@@ -70,7 +70,8 @@ select {
 }
 
 button,
-input {
+input,
+select {
   min-height: 44px;
 }
 
@@ -103,18 +104,21 @@ button:active:not(:disabled) {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid #f4c581;
   outline-offset: 3px;
 }
 
 button:disabled,
-input:disabled {
+input:disabled,
+select:disabled {
   cursor: not-allowed;
   opacity: 0.52;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-width: 0;
   padding: 0.78rem 0.95rem;
@@ -132,6 +136,24 @@ input {
 
 input::placeholder {
   color: rgba(211, 197, 167, 0.58);
+}
+
+select {
+  appearance: none;
+  padding-right: 2.4rem;
+  background-image:
+    linear-gradient(45deg, transparent 50%, rgba(242, 234, 219, 0.82) 50%),
+    linear-gradient(135deg, rgba(242, 234, 219, 0.82) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.018));
+  background-position:
+    calc(100% - 1.18rem) 50%,
+    calc(100% - 0.86rem) 50%,
+    0 0;
+  background-repeat: no-repeat;
+  background-size:
+    0.38rem 0.38rem,
+    0.38rem 0.38rem,
+    100% 100%;
 }
 
 input[aria-invalid="true"] {
@@ -962,10 +984,12 @@ p {
 
 .identity-config-observability,
 .identity-status,
+.identity-preset-apply,
 .identity-preset-list,
 .identity-warning-list,
 .identity-surface-controls,
-.identity-error-feedback {
+.identity-error-feedback,
+.identity-success-feedback {
   padding: 14px;
   border: 1px solid rgba(242, 234, 219, 0.12);
   border-radius: 20px;
@@ -985,14 +1009,44 @@ p {
     rgba(0, 0, 0, 0.16);
 }
 
+.identity-success-feedback {
+  border-color: rgba(154, 178, 111, 0.44);
+  background:
+    linear-gradient(180deg, rgba(154, 178, 111, 0.16), rgba(154, 178, 111, 0.06)),
+    rgba(0, 0, 0, 0.14);
+}
+
 .identity-error-feedback > strong {
   color: #ffe0d7;
+}
+
+.identity-success-feedback > strong {
+  color: #def4b2;
 }
 
 .identity-panel-subhead span {
   color: var(--muted-strong);
   font-size: 0.86rem;
   font-weight: 800;
+}
+
+.identity-preset-apply__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.identity-preset-apply__field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.identity-preset-apply .identity-muted-copy,
+.identity-success-feedback p {
+  margin: 10px 0 0;
 }
 
 .identity-preset-list__items,
@@ -1399,6 +1453,7 @@ p {
   .create-controls button,
   .legacy-scan-controls button,
   .legacy-import-actions button,
+  .identity-preset-apply__controls button,
   .identity-summary-panel__header button,
   .identity-config-panel__header button,
   .runtime-panel__header button,
@@ -1411,6 +1466,7 @@ p {
   .profile-metadata,
   .defaults-grid,
   .runtime-proof-grid,
+  .identity-preset-apply__controls,
   .identity-mode-option,
   .legacy-chip-list {
     grid-template-columns: 1fr;
