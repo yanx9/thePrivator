@@ -2445,7 +2445,12 @@ function IdentityConfigurationPanel({
               )}
             </select>
           </div>
-          <button type="button" disabled={!canApplyPreset} onClick={() => onApplyPreset(profile, selectedPresetId)}>
+          <button
+            type="button"
+            disabled={!canApplyPreset}
+            aria-describedby={presetApplyHintId}
+            onClick={() => onApplyPreset(profile, selectedPresetId)}
+          >
             {isApplyingPreset ? "Applying preset…" : "Apply preset"}
           </button>
         </div>
@@ -2489,10 +2494,21 @@ function IdentityConfigurationPanel({
           onSurfaceModeChange={onSurfaceModeChange}
         />
         <div className="identity-advanced-actions">
-          <button type="button" className="button--secondary" disabled={!canRunAdvancedAction} onClick={() => onCheckIdentity(profile)}>
+          <button
+            type="button"
+            className="button--secondary"
+            disabled={!canRunAdvancedAction}
+            aria-describedby={advancedActionHintId}
+            onClick={() => onCheckIdentity(profile)}
+          >
             {isCheckingIdentity ? "Checking identity…" : "Check identity"}
           </button>
-          <button type="button" disabled={!canRunAdvancedAction} onClick={() => onSaveIdentity(profile)}>
+          <button
+            type="button"
+            disabled={!canRunAdvancedAction}
+            aria-describedby={advancedActionHintId}
+            onClick={() => onSaveIdentity(profile)}
+          >
             {isSaving ? "Saving override…" : "Save advanced override"}
           </button>
         </div>
@@ -2555,7 +2571,7 @@ function IdentityConfigErrorFeedback({
   onDiagnosticLookup: (detailRef: string) => void;
 }) {
   return (
-    <section className="identity-error-feedback" role="status" aria-live="polite" aria-atomic="true">
+    <section className="identity-error-feedback" role="alert" aria-live="assertive" aria-atomic="true">
       <strong>{IDENTITY_CONFIG_ACTION_LABELS[state.action]} failed safely.</strong>
       <p>{state.error.message}</p>
       <dl className="metric-list metric-list--inline">
@@ -2643,6 +2659,9 @@ function IdentitySurfaceControlList({
         {controls.map((control) => {
           const modeSelectId = `identity-${profile.id}-${control.surface}-mode`;
           const modeHintId = `${modeSelectId}-hint`;
+          const modeErrorId = `${modeSelectId}-error`;
+          const modeError = draft.errors[`${control.surface}.mode`];
+          const modeDescribedBy = modeError ? `${modeHintId} ${modeErrorId}` : modeHintId;
           return (
             <details key={control.surface} className="identity-surface-section" open>
               <summary>
@@ -2656,7 +2675,8 @@ function IdentitySurfaceControlList({
                     id={modeSelectId}
                     value={control.mode}
                     disabled={isBusy}
-                    aria-describedby={modeHintId}
+                    aria-invalid={Boolean(modeError)}
+                    aria-describedby={modeDescribedBy}
                     onChange={(event) => onSurfaceModeChange(profile.id, control.surface, event.target.value)}
                   >
                     {control.options.map((option) => (
@@ -2668,6 +2688,11 @@ function IdentitySurfaceControlList({
                   <p id={modeHintId} className="identity-field-hint">
                     {control.options.map((option) => `${option.label}: ${option.description}`).join(" ")}
                   </p>
+                  {modeError ? (
+                    <p id={modeErrorId} className="identity-field-error" role="alert">
+                      {modeError}
+                    </p>
+                  ) : null}
                 </div>
                 {control.fields.length ? (
                   <div className="identity-field-grid">

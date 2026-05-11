@@ -475,6 +475,60 @@ describe("ThePrivator profile library UI", () => {
     expect(commandCalls("profiles_list")).toHaveLength(1);
   });
 
+  it("redacts raw identity bridge failures while preserving diagnostic lookup affordances", async () => {
+    const savedIdentity = defaultIdentity({ label: "Bridge failure profile", presetId: null });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    const rawRuntimeMessage = "Traceback (most recent call last): /tmp/theprivator-app-data/profile-store --remote-debugging-port=9222 ws://127.0.0.1/devtools/browser raw command args";
+
+    mockInvoke.mockImplementation(((command: string, args?: unknown) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "identity_presets_list") {
+        return Promise.resolve(identityEnvelope(identityPresetResult()));
+      }
+      if (command === "identity_validate") {
+        return Promise.reject(new Error(rawRuntimeMessage));
+      }
+      if (command === "diagnostics_lookup") {
+        const detailRef = (args as { detailRef?: string } | undefined)?.detailRef ?? "ui-bridge-missing";
+        return Promise.resolve({ found: false, detailRef, reason: "ui-local", logPath: null, entries: [] });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/SIDECAR_BRIDGE_ERROR/i));
+    expect(panel).toHaveTextContent(/Tauri bridge rejected the sidecar request/i);
+    expect(panel).toHaveTextContent(/Sourcebridge/i);
+    expect(panel).not.toHaveTextContent("/tmp/theprivator-app-data");
+    expect(panel).not.toHaveTextContent("--remote-debugging-port");
+    expect(panel).not.toHaveTextContent("ws://127.0.0.1");
+    expect(panel).not.toHaveTextContent(/Traceback/i);
+    expect(panel).not.toHaveTextContent(/raw command args/i);
+
+    const lookupButton = within(panel).getByRole("button", { name: /lookup diagnostics for ui-bridge/i });
+    fireEvent.click(lookupButton);
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/UI-local reference/i);
+    expect(lookupPanel).not.toHaveTextContent("/tmp/theprivator-app-data");
+    expect(lookupPanel).not.toHaveTextContent("--remote-debugging-port");
+    expect(lookupPanel).not.toHaveTextContent("ws://127.0.0.1");
+    expect(commandCalls("profiles_identity_update")).toHaveLength(0);
+  });
+
   it("renders preset-loading failures safely while preserving the saved identity draft", async () => {
     const savedIdentity = defaultIdentity({ label: "Preset failure profile", presetId: "balanced-desktop" });
     const profile = profileRecord({ name: "Research", identity: savedIdentity });
@@ -709,7 +763,15 @@ describe("ThePrivator profile library UI", () => {
     await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
 
     fireEvent.change(within(panel).getByLabelText(/curated preset/i), { target: { value: "balanced-desktop" } });
-    expect(within(panel).getByRole("button", { name: /apply preset/i })).toBeDisabled();
+    const applyPresetButton = within(panel).getByRole("button", { name: /apply preset/i });
+    const checkIdentityButton = within(panel).getByRole("button", { name: /check identity/i });
+    const saveOverrideButton = within(panel).getByRole("button", { name: /save advanced override/i });
+    expect(applyPresetButton).toBeDisabled();
+    expect(applyPresetButton).toHaveAccessibleDescription(/changes affect the next launch only/i);
+    expect(checkIdentityButton).toBeDisabled();
+    expect(checkIdentityButton).toHaveAccessibleDescription(/changes affect the next launch only/i);
+    expect(saveOverrideButton).toBeDisabled();
+    expect(saveOverrideButton).toHaveAccessibleDescription(/changes affect the next launch only/i);
     expect(panel).toHaveTextContent(/disabled while Chromium is running/i);
     expect(panel).toHaveTextContent(/changes affect the next launch only/i);
     expect(commandCalls("profiles_identity_apply_preset")).toHaveLength(0);

@@ -1,13 +1,12 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,23 +16,47 @@ const VENV_PYTHON = process.platform === "win32"
 const PYTHON = process.env.PYTHON ?? (existsSync(VENV_PYTHON) ? VENV_PYTHON : (process.platform === "win32" ? "python" : "python3"));
 const PYTHON_LABEL = "python";
 const SIDECAR_MODULE_LABEL = `${PYTHON_LABEL} -m theprivator_sidecar`;
+const SIDECAR_TIMEOUT_MS = 15_000;
+const SIDECAR_STOP_TIMEOUT_MS = 2_000;
+const SMOKE_PROFILE_NAME = "S03 Identity Profile";
+const TARGET_PRESET_ID = "ubuntu-linux-chrome-120";
+const EXPECTED_PRESET_IDS = [
+  "macos-ventura-chrome-120",
+  "ubuntu-linux-chrome-120",
+  "windows-10-chrome-120",
+  "windows-11-chrome-121",
+];
 const STEP_RESULTS = [];
+const PUBLIC_EVENTS = [];
 const SENSITIVE_VALUES = new Set([ROOT_DIR]);
-const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
+const FORBIDDEN_DURABLE_KEYS = new Set([
+  "args",
+  "argv",
+  "command",
+  "debugPort",
+  "devtoolsPort",
   "pid",
   "process",
-  "command",
-  "status",
+  "remoteControlPort",
+  "remoteDebuggingPort",
   "running",
-  "stoppedAt",
   "startedAt",
+  "status",
+  "stoppedAt",
   "termination",
+  "webSocketDebuggerUrl",
+  "wsEndpoint",
 ]);
-const SAFE_TERMINATIONS = new Set(["graceful", "forced", "reconciled"]);
-const SMOKE_PROFILE_NAME = "S03 Smoke Profile";
-const SIDECAR_TIMEOUT_MS = 15_000;
-const CHROMIUM_LAUNCH_TIMEOUT_MS = 20_000;
-const WAIT_STOPPED_TIMEOUT_MS = 8_000;
+const FORBIDDEN_TEXT_MARKERS = [
+  /--remote-debugging-port/i,
+  /DevToolsActivePort/i,
+  /Traceback \(most recent call last\)/i,
+  /\bWebSocket\b/i,
+  /\bws:\/\//i,
+  /\bwss:\/\//i,
+  /profile-store[\\/]+runtime/i,
+  /runtime-registry/i,
+];
 
 class VerifyFailure extends Error {
   constructor(message, details) {
@@ -43,21 +66,90 @@ class VerifyFailure extends Error {
   }
 }
 
-function emit(event) {
-  console.log(JSON.stringify({ event: "verify.s03", ...event }));
-}
+class LineReader {
+  constructor(stream, streamName) {
+    this.streamName = streamName;
+    this.buffer = "";
+    this.ended = false;
+    this.lines = [];
+    this.tailLines = [];
+    this.waiters = [];
 
-function executable(command) {
-  return process.platform === "win32" && ["npm", "cargo", "rustc"].includes(command)
-    ? `${command}.cmd`
-    : command;
-}
-
-function commandLabel(command, args, label) {
-  if (label) {
-    return label;
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk) => this.acceptChunk(chunk));
+    stream.on("end", () => this.finish());
+    stream.on("error", (error) => this.finish(error));
   }
-  return [basename(command), ...args].join(" ");
+
+  acceptChunk(chunk) {
+    this.buffer += chunk;
+    const parts = this.buffer.split(/\r?\n/);
+    this.buffer = parts.pop() ?? "";
+    for (const line of parts) {
+      this.pushLine(line);
+    }
+  }
+
+  pushLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    this.tailLines.push(trimmed);
+    this.tailLines = this.tailLines.slice(-10);
+
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(trimmed);
+      return;
+    }
+
+    this.lines.push(trimmed);
+  }
+
+  finish(error) {
+    if (this.buffer.trim()) {
+      this.pushLine(this.buffer);
+      this.buffer = "";
+    }
+    this.ended = true;
+
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift();
+      clearTimeout(waiter.timer);
+      waiter.reject(error ?? new Error(`${this.streamName} ended before the source sidecar emitted the expected NDJSON line.`));
+    }
+  }
+
+  next(timeoutMs, onTimeout) {
+    if (this.lines.length > 0) {
+      return Promise.resolve(this.lines.shift());
+    }
+    if (this.ended) {
+      return Promise.reject(new Error(`${this.streamName} ended before the source sidecar emitted the expected NDJSON line.`));
+    }
+
+    return new Promise((resolveLine, rejectLine) => {
+      const timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((waiter) => waiter.timer !== timer);
+        onTimeout();
+        rejectLine(new Error(`${this.streamName} timed out waiting for source sidecar NDJSON.`));
+      }, timeoutMs);
+      this.waiters.push({ resolve: resolveLine, reject: rejectLine, timer });
+    });
+  }
+
+  tail() {
+    return normalizeOutput(this.tailLines.join("\n"));
+  }
+}
+
+function emit(event) {
+  const payload = redact({ event: "verify.s03", ...event });
+  PUBLIC_EVENTS.push(payload);
+  console.log(JSON.stringify(payload));
 }
 
 function rememberSensitive(value) {
@@ -102,7 +194,7 @@ function normalizeOutput(value) {
   return redact(value)
     .split(/\r?\n/)
     .filter((line) => line.trim())
-    .slice(-25)
+    .slice(-10)
     .join("\n");
 }
 
@@ -116,10 +208,10 @@ function assert(condition, message, details) {
   }
 }
 
-function runStep(name, action) {
+async function runStep(name, action) {
   const started = performance.now();
   try {
-    const result = action() ?? {};
+    const result = (await action()) ?? {};
     const durationMs = Math.round(performance.now() - started);
     const logResult = result.log ?? result;
     const returnResult = result.value ?? result;
@@ -130,9 +222,9 @@ function runStep(name, action) {
   } catch (error) {
     const durationMs = Math.round(performance.now() - started);
     const message = error instanceof Error ? error.message : String(error);
-    const record = { name, status: "fail", durationMs, message };
+    const record = { name, status: "fail", durationMs, message: redact(message) };
     STEP_RESULTS.push(record);
-    emit({ step: name, status: "fail", durationMs, message });
+    emit({ step: name, status: "fail", durationMs, message: redact(message) });
     if (error?.details) {
       emit({ step: name, status: "fail-details", details: redact(error.details) });
     }
@@ -140,115 +232,182 @@ function runStep(name, action) {
   }
 }
 
-function runCommand(name, command, args, timeoutMs, options = {}) {
-  return runStep(name, () => {
-    const label = commandLabel(command, args, options.label);
-    const result = spawnSync(executable(command), args, {
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs,
-      maxBuffer: 20 * 1024 * 1024,
-    });
-
-    if (result.error) {
-      if (result.error.code === "ETIMEDOUT") {
-        fail(`${label} timed out.`, {
-          command: label,
-          timeoutMs,
-          detail: "The child process was terminated by verify:s03.",
-        });
-      }
-      fail(`Failed to run ${label}.`, { command: label, error: result.error.message });
-    }
-
-    if (result.status !== 0) {
-      fail(`${label} exited with status ${result.status ?? "unknown"}.`, {
-        command: label,
-        exitCode: result.status,
-        stdoutTail: normalizeOutput(result.stdout),
-        stderrTail: normalizeOutput(result.stderr),
-      });
-    }
-
-    return { command: label };
-  });
+function makeTempRoot(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  rememberSensitive(root);
+  rememberSensitive(join(root, "profile-store"));
+  return root;
 }
 
-function parseNdjsonLines(streamName, value, expectedCount) {
-  const lines = value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length !== expectedCount) {
-    fail(`${streamName} emitted ${lines.length} NDJSON line(s), expected ${expectedCount}.`, {
-      streamName,
-      lineCount: lines.length,
-      tail: normalizeOutput(value),
-    });
-  }
-
-  return lines.map((line, index) => {
-    try {
-      return JSON.parse(line);
-    } catch (error) {
-      fail(`${streamName} line ${index + 1} is not valid JSON.`, {
-        streamName,
-        lineNumber: index + 1,
-        error: error instanceof Error ? error.message : String(error),
-        lineTail: normalizeOutput(line),
-      });
-    }
-  });
+function makeRequestId(label) {
+  return `verify-s03-${label}`;
 }
 
-function callSidecar(request, options = {}) {
-  const timeoutMs = options.timeoutMs ?? SIDECAR_TIMEOUT_MS;
-  const env = { ...process.env, ...(options.env ?? {}) };
-  const input = `${JSON.stringify(request)}\n`;
-  const result = spawnSync(PYTHON, ["-m", "theprivator_sidecar"], {
+function sidecarRequest(id, method, params) {
+  return { id, method, params };
+}
+
+function executable(command) {
+  return process.platform === "win32" && basename(command) === command && !command.endsWith(".exe")
+    ? `${command}.exe`
+    : command;
+}
+
+function startSourceSidecar() {
+  const child = spawn(executable(PYTHON), ["-m", "theprivator_sidecar"], {
     cwd: ROOT_DIR,
-    input,
-    env,
-    encoding: "utf8",
+    env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
-    timeout: timeoutMs,
-    maxBuffer: 2 * 1024 * 1024,
+  });
+  const stdout = new LineReader(child.stdout, "stdout");
+  const stderr = new LineReader(child.stderr, "stderr");
+  let spawnError = null;
+  let exited = false;
+  let exitCode = null;
+  let exitSignal = null;
+  let stopRequested = false;
+
+  child.on("error", (error) => {
+    spawnError = error;
+  });
+  const exitPromise = new Promise((resolveExit) => {
+    child.on("exit", (code, signal) => {
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      resolveExit({ code, signal });
+    });
   });
 
-  if (result.error) {
-    if (result.error.code === "ETIMEDOUT") {
-      fail(`${SIDECAR_MODULE_LABEL} timed out for ${request.method}.`, {
-        method: request.method,
-        timeoutMs,
-        stdoutTail: normalizeOutput(result.stdout),
-        stderrTail: normalizeOutput(result.stderr),
+  const killForTimeout = () => {
+    if (!exited) {
+      child.kill("SIGKILL");
+    }
+  };
+
+  async function request(requestPayload, options = {}) {
+    const timeoutMs = options.timeoutMs ?? SIDECAR_TIMEOUT_MS;
+    if (spawnError) {
+      fail("Failed to start the source sidecar process.", {
+        process: SIDECAR_MODULE_LABEL,
+        error: spawnError.message,
       });
     }
-    fail(`${SIDECAR_MODULE_LABEL} failed for ${request.method}.`, {
-      method: request.method,
-      error: result.error.message,
-      stdoutTail: normalizeOutput(result.stdout),
-      stderrTail: normalizeOutput(result.stderr),
-    });
+    if (exited) {
+      fail("Source sidecar exited before the verifier request completed.", {
+        process: SIDECAR_MODULE_LABEL,
+        exitCode,
+        exitSignal,
+        method: requestPayload.method,
+        stdoutTail: stdout.tail(),
+        stderrTail: stderr.tail(),
+      });
+    }
+
+    try {
+      child.stdin.write(`${JSON.stringify(requestPayload)}\n`);
+    } catch (error) {
+      fail("Failed to send a verifier request to the source sidecar.", {
+        process: SIDECAR_MODULE_LABEL,
+        method: requestPayload.method,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      const [stdoutLine, stderrLine] = await Promise.all([
+        stdout.next(timeoutMs, killForTimeout),
+        stderr.next(timeoutMs, killForTimeout),
+      ]);
+      return {
+        response: parseNdjsonLine("stdout", stdoutLine, requestPayload.method),
+        diagnostic: parseNdjsonLine("stderr", stderrLine, requestPayload.method),
+      };
+    } catch (error) {
+      if (error instanceof VerifyFailure) {
+        throw error;
+      }
+      fail(`${SIDECAR_MODULE_LABEL} failed to complete verifier step ${requestPayload.method}.`, {
+        method: requestPayload.method,
+        timeoutMs,
+        stdoutTail: stdout.tail(),
+        stderrTail: stderr.tail(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
-  if (result.status !== 0) {
-    fail(`${SIDECAR_MODULE_LABEL} exited with status ${result.status ?? "unknown"} for ${request.method}.`, {
-      method: request.method,
-      exitCode: result.status,
-      stdoutTail: normalizeOutput(result.stdout),
-      stderrTail: normalizeOutput(result.stderr),
+  async function stop() {
+    stopRequested = true;
+    if (exited) {
+      assert(exitCode === 0, "Source sidecar exited non-zero before verifier shutdown.", {
+        exitCode,
+        exitSignal,
+        stdoutTail: stdout.tail(),
+        stderrTail: stderr.tail(),
+      });
+      return { exitCode, exitSignal: exitSignal ?? "none" };
+    }
+
+    child.stdin.end();
+    let shutdownTimer;
+    const timeout = new Promise((_, reject) => {
+      shutdownTimer = setTimeout(() => reject(new Error("source sidecar shutdown timed out")), SIDECAR_STOP_TIMEOUT_MS);
     });
+
+    try {
+      const result = await Promise.race([exitPromise, timeout]);
+      clearTimeout(shutdownTimer);
+      assert(result.code === 0, "Source sidecar exited non-zero during verifier shutdown.", {
+        exitCode: result.code,
+        exitSignal: result.signal,
+        stdoutTail: stdout.tail(),
+        stderrTail: stderr.tail(),
+      });
+      return { exitCode: result.code, exitSignal: result.signal ?? "none" };
+    } catch (error) {
+      clearTimeout(shutdownTimer);
+      if (!exited) {
+        child.kill("SIGKILL");
+      }
+      fail("Source sidecar did not shut down cleanly after verifier completion.", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
-  const [response] = parseNdjsonLines("stdout", result.stdout, 1);
-  const [diagnostic] = parseNdjsonLines("stderr", result.stderr, 1);
+  async function cleanup() {
+    if (!stopRequested && !exited) {
+      child.kill("SIGKILL");
+      await Promise.race([
+        exitPromise,
+        new Promise((resolveCleanup) => setTimeout(resolveCleanup, SIDECAR_STOP_TIMEOUT_MS)),
+      ]);
+    }
+  }
+
+  return { request, stop, cleanup };
+}
+
+function parseNdjsonLine(streamName, line, method) {
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    fail(`${streamName} emitted malformed NDJSON for verifier step ${method}.`, {
+      streamName,
+      method,
+      lineTail: normalizeOutput(line),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function callSidecar(client, request, options = {}) {
+  const { response, diagnostic } = await client.request(request, options);
 
   assert(diagnostic.event === "sidecar.request", "Sidecar diagnostic event name changed.", {
     method: request.method,
-    diagnostic,
+    diagnosticEvent: diagnostic.event,
   });
   assert(diagnostic.method === request.method, "Sidecar diagnostic method did not match the request.", {
     method: request.method,
@@ -259,16 +418,13 @@ function callSidecar(request, options = {}) {
     diagnosticRequestId: diagnostic.requestId,
   });
   assert(!("params" in diagnostic), "Sidecar diagnostic leaked request params.", { method: request.method });
+  assert(!("storeRoot" in diagnostic), "Sidecar diagnostic leaked store root.", { method: request.method });
 
   return { response, diagnostic };
 }
 
-function sidecarRequest(id, method, params) {
-  return { id, method, params };
-}
-
-function sidecarSuccess(id, method, params, options = {}) {
-  const { response, diagnostic } = callSidecar(sidecarRequest(id, method, params), options);
+async function sidecarSuccess(client, id, method, params, options = {}) {
+  const { response, diagnostic } = await callSidecar(client, sidecarRequest(id, method, params), options);
   assert(response.id === id, "Sidecar response id did not match the request.", {
     method,
     requestId: id,
@@ -295,11 +451,11 @@ function sidecarSuccess(id, method, params, options = {}) {
     detailRef: diagnostic.detailRef,
   });
   assert(response.result && typeof response.result === "object" && !Array.isArray(response.result), "Success response result must be an object.", { method });
-  return { result: response.result, durationMs: response.durationMs };
+  return response.result;
 }
 
-function sidecarError(id, method, params, options = {}) {
-  const { response, diagnostic } = callSidecar(sidecarRequest(id, method, params), options);
+async function sidecarError(client, id, method, params, options = {}) {
+  const { response, diagnostic } = await callSidecar(client, sidecarRequest(id, method, params), options);
   assert(response.id === id, "Sidecar error response id did not match the request.", {
     method,
     requestId: id,
@@ -328,7 +484,7 @@ function sidecarError(id, method, params, options = {}) {
     method,
     detailRef: response.error.detailRef,
   });
-  return { error: response.error, durationMs: response.durationMs };
+  return response.error;
 }
 
 function isSafeRelativeStoragePath(value) {
@@ -340,497 +496,367 @@ function isSafeRelativeStoragePath(value) {
 }
 
 function assertProfileShape(profile) {
-  assert(profile && typeof profile === "object" && !Array.isArray(profile), "Created profile payload is missing.");
-  assert(typeof profile.id === "string" && profile.id.length > 0, "Created profile is missing id.");
-  assert(profile.name === SMOKE_PROFILE_NAME, "Created profile name mismatch.", { profileName: profile.name });
-  assert(profile.storage && typeof profile.storage === "object", "Created profile is missing storage metadata.");
-  assert(isSafeRelativeStoragePath(profile.storage.userDataDir), "Created profile userDataDir is not a safe relative S02 path.", {
+  assert(profile && typeof profile === "object" && !Array.isArray(profile), "Profile payload is missing.");
+  assert(typeof profile.id === "string" && profile.id.length > 0, "Profile is missing id.");
+  assert(profile.name === SMOKE_PROFILE_NAME, "Profile name mismatch.", { profileName: profile.name });
+  assert(profile.storage && typeof profile.storage === "object", "Profile is missing storage metadata.");
+  assert(isSafeRelativeStoragePath(profile.storage.userDataDir), "Profile userDataDir is not a safe relative S02 path.", {
     userDataDir: profile.storage.userDataDir,
+  });
+  assert(profile.identity && typeof profile.identity === "object" && !Array.isArray(profile.identity), "Profile is missing identity.");
+  assert(profile.identity.identityVersion === 1, "Profile identity version mismatch.", {
+    identityVersion: profile.identity.identityVersion,
   });
   return profile;
 }
 
-function assertRunningPayload(payload, profile, expectedRunningCount = 1) {
-  assert(payload.profileId === profile.id, "Chromium running payload profile id mismatch.", {
-    profileId: payload.profileId,
-    expectedProfileId: profile.id,
+function assertCollectionShape(result, expectedProfileId) {
+  assert(result.storeVersion === 2, "Profile collection must use storeVersion 2.", { storeVersion: result.storeVersion });
+  assert(Array.isArray(result.profiles), "Profile collection profiles field is not an array.");
+  assert(result.count === result.profiles.length, "Profile collection count mismatch.", {
+    count: result.count,
+    profileCount: result.profiles.length,
   });
-  assert(payload.status === "running", "Chromium payload did not report running.", {
-    status: payload.status,
-  });
-  assert(Number.isInteger(payload.pid) && payload.pid > 0, "Chromium running payload is missing a positive PID.", {
-    pid: payload.pid,
-  });
-  assert(typeof payload.startedAt === "string" && payload.startedAt.endsWith("Z"), "Chromium running payload is missing startedAt.", {
-    startedAt: payload.startedAt,
-  });
-  assert(payload.userDataDir === profile.storage.userDataDir, "Chromium running payload userDataDir mismatch.", {
-    userDataDir: payload.userDataDir,
-    expectedUserDataDir: profile.storage.userDataDir,
-  });
-  assert(payload.runningCount === undefined || payload.runningCount === expectedRunningCount, "Chromium running count mismatch.", {
-    runningCount: payload.runningCount,
-    expectedRunningCount,
-  });
-  assert(isPidAlive(payload.pid), "Chromium launch PID is not alive after launch.", { pid: payload.pid });
-  return payload;
+  const profile = result.profiles.find((item) => item?.id === expectedProfileId);
+  assert(profile, "Profile collection did not include the smoke profile.", { expectedProfileId });
+  return assertProfileShape(profile);
 }
 
-function assertStoppedPayload(payload, profile) {
-  assert(payload.profileId === profile.id, "Chromium stopped payload profile id mismatch.", {
-    profileId: payload.profileId,
-    expectedProfileId: profile.id,
-  });
-  assert(payload.status === "stopped", "Chromium stop payload did not report stopped.", {
-    status: payload.status,
-  });
-  assert(SAFE_TERMINATIONS.has(payload.termination), "Chromium stop payload termination was unexpected.", {
-    termination: payload.termination,
-  });
-  assert(payload.runningCount === 0, "Chromium stop payload did not clear running count.", {
-    runningCount: payload.runningCount,
-  });
-  assert(payload.userDataDir === profile.storage.userDataDir, "Chromium stopped payload userDataDir mismatch.", {
-    userDataDir: payload.userDataDir,
-    expectedUserDataDir: profile.storage.userDataDir,
-  });
-  return payload;
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
-function assertStatusRunning(payload, profile, pid, startedAt) {
-  assert(payload.runningCount === 1, "Chromium status did not report one running profile.", {
-    runningCount: payload.runningCount,
-  });
-  assert(Array.isArray(payload.profiles) && payload.profiles.length === 1, "Chromium status profiles did not contain exactly one profile.", {
-    profileCount: Array.isArray(payload.profiles) ? payload.profiles.length : "not-array",
-  });
-  assert(Array.isArray(payload.reconciled) && payload.reconciled.length === 0, "Chromium status unexpectedly reconciled while PID is running.", {
-    reconciledCount: Array.isArray(payload.reconciled) ? payload.reconciled.length : "not-array",
-  });
-  const running = payload.profiles[0];
-  assertRunningPayload({ ...running, runningCount: 1 }, profile);
-  assert(running.pid === pid, "Chromium status PID did not match launch PID.", {
-    statusPid: running.pid,
-    launchPid: pid,
-  });
-  assert(running.startedAt === startedAt, "Chromium status startedAt did not match launch proof.", {
-    statusStartedAt: running.startedAt,
-    launchStartedAt: startedAt,
-  });
-  return running;
+function sortJson(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sortJson(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, sortJson(item)]));
+  }
+  return value;
 }
 
-function assertStatusStopped(payload) {
-  assert(payload.runningCount === 0, "Chromium status did not report zero running profiles after stop.", {
-    runningCount: payload.runningCount,
-  });
-  assert(Array.isArray(payload.profiles) && payload.profiles.length === 0, "Chromium status retained running profiles after stop.", {
-    profileCount: Array.isArray(payload.profiles) ? payload.profiles.length : "not-array",
-  });
-  assert(Array.isArray(payload.reconciled), "Chromium status reconciled field is not an array.", {
-    reconciled: payload.reconciled,
-  });
-  return payload;
+function deepEqualJson(left, right) {
+  return JSON.stringify(sortJson(left)) === JSON.stringify(sortJson(right));
 }
 
-function assertReconciledStatus(payload, profile) {
-  assertStatusStopped(payload);
-  const reconciled = payload.reconciled.find((item) => item?.profileId === profile.id);
-  assert(reconciled, "Chromium status did not report the externally closed profile as reconciled.", {
-    reconciledCount: payload.reconciled.length,
-    profileId: profile.id,
-  });
-  assert(reconciled.status === "stopped", "Reconciled payload did not report stopped.", {
-    status: reconciled.status,
-  });
-  assert(reconciled.termination === "reconciled", "Reconciled payload termination mismatch.", {
-    termination: reconciled.termination,
-  });
-  assert(reconciled.userDataDir === profile.storage.userDataDir, "Reconciled payload userDataDir mismatch.", {
-    userDataDir: reconciled.userDataDir,
-    expectedUserDataDir: profile.storage.userDataDir,
-  });
-  return reconciled;
+function makeSuspiciousOverride(presetIdentity) {
+  const identity = cloneJson(presetIdentity);
+  identity.label = "S03 warning-bearing override";
+  identity.presetId = null;
+  identity.navigator.hardwareConcurrency = 7;
+  identity.navigator.deviceMemory = 3;
+  identity.screen.viewportWidth = identity.screen.width + 1;
+  return identity;
 }
 
-function assertProfilesJsonClean(storeRoot, profileId) {
+function readProfilesJson(storeRoot) {
   const profilesPath = join(storeRoot, "profile-store", "profiles.json");
-  assert(existsSync(profilesPath), "profiles.json was not written for the smoke profile.");
-  const payload = JSON.parse(readFileSync(profilesPath, "utf8"));
+  assert(existsSync(profilesPath), "profiles.json was not written for the identity verifier.");
+  rememberSensitive(profilesPath);
+  const text = readFileSync(profilesPath, "utf8");
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch (error) {
+    fail("profiles.json is not valid JSON.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return { path: profilesPath, text, payload };
+}
+
+function assertNoForbiddenKeys(value, context, path = "$") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenKeys(item, context, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    assert(!FORBIDDEN_DURABLE_KEYS.has(key), `${context} contains forbidden runtime/debug field ${key}.`, {
+      key,
+      path: `${path}.${key}`,
+    });
+    assertNoForbiddenKeys(nestedValue, context, `${path}.${key}`);
+  }
+}
+
+function assertNoForbiddenText(text, context) {
+  for (const sensitive of SENSITIVE_VALUES) {
+    assert(!text.includes(sensitive), `${context} leaked a sensitive absolute path.`, {
+      context,
+      leaked: sensitive === ROOT_DIR ? "repo-root" : "runtime-path",
+    });
+  }
+  for (const marker of FORBIDDEN_TEXT_MARKERS) {
+    assert(!marker.test(text), `${context} leaked a forbidden runtime/debug marker.`, {
+      context,
+      marker: String(marker),
+    });
+  }
+}
+
+function assertProfilesJsonClean(storeRoot, profileId, expectedIdentity) {
+  const { text, payload } = readProfilesJson(storeRoot);
+  assert(payload.storeVersion === 2, "profiles.json must remain a v2 profile-store payload.", {
+    storeVersion: payload.storeVersion,
+  });
   assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");
   const profile = payload.profiles.find((item) => item?.id === profileId);
   assert(profile, "profiles.json does not contain the smoke profile.", { profileId });
-  const runtimeFields = Object.keys(profile).filter((key) => FORBIDDEN_PROFILE_RUNTIME_FIELDS.has(key));
-  assert(runtimeFields.length === 0, "profiles.json persisted forbidden Chromium runtime truth.", {
-    runtimeFields,
+  assert(deepEqualJson(profile.identity, expectedIdentity), "profiles.json did not persist the expected warning-bearing identity override.", {
+    expectedLabel: expectedIdentity.label,
+    actualLabel: profile.identity?.label,
   });
-  return { profileCount: payload.profiles.length };
+  assertNoForbiddenKeys(payload, "profiles.json");
+  assertNoForbiddenText(text, "profiles.json");
+  return { profileCount: payload.profiles.length, storeVersion: payload.storeVersion };
 }
 
-function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
-  }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
+function assertPresetList(result) {
+  assert(result.identityVersion === 1, "Preset list identityVersion mismatch.", { identityVersion: result.identityVersion });
+  assert(Array.isArray(result.presets), "Preset list presets field is not an array.");
+  assert(result.count === result.presets.length, "Preset list count mismatch.", {
+    count: result.count,
+    presetCount: result.presets.length,
+  });
+  const ids = result.presets.map((preset) => preset?.presetId).sort();
+  assert(deepEqualJson(ids, EXPECTED_PRESET_IDS), "Curated preset ids changed unexpectedly.", {
+    expectedPresetIds: EXPECTED_PRESET_IDS,
+    actualPresetIds: ids,
+  });
+  return result.presets;
 }
 
-function sleep(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function waitForPidGone(pid, timeoutMs = WAIT_STOPPED_TIMEOUT_MS) {
-  const deadline = performance.now() + timeoutMs;
-  while (performance.now() <= deadline) {
-    if (!isPidAlive(pid)) {
-      return true;
-    }
-    sleep(100);
-  }
-  return !isPidAlive(pid);
-}
-
-function terminatePid(pid, reason) {
-  if (!Number.isInteger(pid) || pid <= 0 || !isPidAlive(pid)) {
-    return { signal: "none", aliveAfter: false };
-  }
-
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch (error) {
-    if (error?.code !== "ESRCH") {
-      fail(`Failed to terminate smoke Chromium PID during ${reason}.`, {
-        pid,
-        errorCode: error?.code,
-      });
-    }
-  }
-
-  if (waitForPidGone(pid, WAIT_STOPPED_TIMEOUT_MS)) {
-    return { signal: "SIGTERM", aliveAfter: false };
-  }
-
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch (error) {
-    if (error?.code !== "ESRCH") {
-      fail(`Failed to force-kill smoke Chromium PID during ${reason}.`, {
-        pid,
-        errorCode: error?.code,
-      });
-    }
-  }
-
-  const aliveAfter = !waitForPidGone(pid, WAIT_STOPPED_TIMEOUT_MS);
-  return { signal: "SIGKILL", aliveAfter };
-}
-
-function makeTempRoot(prefix) {
-  const root = mkdtempSync(join(tmpdir(), prefix));
-  rememberSensitive(root);
-  return root;
-}
-
-function makeRequestId(label) {
-  return `verify-s03-${label}`;
-}
-
-function runMissingExecutableAssertion() {
-  const missingRoot = makeTempRoot("theprivator-s03-missing-");
-  const emptyPath = join(missingRoot, "empty-path");
-  mkdirSync(emptyPath, { recursive: true });
-  const missingExecutable = join(missingRoot, "missing-chromium");
-  rememberSensitive(missingExecutable);
-
-  try {
-    const create = sidecarSuccess(
-      makeRequestId("missing-create"),
-      "profiles.create",
-      { storeRoot: missingRoot, name: SMOKE_PROFILE_NAME },
-    ).result;
-    const profile = assertProfileShape(create.profile);
-
-    const { error } = sidecarError(
-      makeRequestId("missing-launch"),
-      "chromium.launch",
-      { storeRoot: missingRoot, profileId: profile.id },
-      {
-        env: {
-          THEPRIVATOR_CHROMIUM_PATH: missingExecutable,
-          PATH: emptyPath,
-        },
-        timeoutMs: CHROMIUM_LAUNCH_TIMEOUT_MS,
-      },
-    );
-
-    assert(error.code === "CHROMIUM_EXECUTABLE_NOT_FOUND", "Missing Chromium executable did not surface the typed lifecycle code.", {
-      errorCode: error.code,
-      detailRef: error.detailRef,
-    });
-    assert(typeof error.detailRef === "string" && error.detailRef.startsWith("sidecar-"), "Missing executable error did not preserve detailRef.", {
-      detailRef: error.detailRef,
-    });
-    return { errorCode: error.code, detailRef: error.detailRef };
-  } finally {
-    rmSync(missingRoot, { recursive: true, force: true });
-  }
-}
-
-function runRealChromiumSmoke() {
-  const storeRoot = makeTempRoot("theprivator-s03-smoke-");
+async function runIdentityVerifier(storeRoot) {
+  const client = await runStep("source-sidecar-start", async () => {
+    const startedClient = startSourceSidecar();
+    return { value: startedClient, log: { process: "source-sidecar", transport: "ndjson-stdio" } };
+  });
   let profile;
-  const launchedPids = new Set();
-  let currentPid = null;
-
-  const cleanup = () => {
-    if (profile?.id) {
-      try {
-        sidecarSuccess(
-          makeRequestId("cleanup-stop"),
-          "chromium.stop",
-          { storeRoot, profileId: profile.id },
-          { timeoutMs: SIDECAR_TIMEOUT_MS },
-        );
-      } catch {
-        // The failure path below still kills only PIDs this smoke recorded.
-      }
-    }
-
-    for (const pid of launchedPids) {
-      if (isPidAlive(pid)) {
-        terminatePid(pid, "cleanup");
-      }
-    }
-
-    rmSync(storeRoot, { recursive: true, force: true });
-  };
+  let suspiciousIdentity;
+  let profilesJsonBeforeInvalid;
 
   try {
-    profile = runStep("sidecar-profile-create", () => {
-      const create = sidecarSuccess(
+    profile = await runStep("profile-create", async () => {
+      const create = await sidecarSuccess(
+        client,
         makeRequestId("profile-create"),
         "profiles.create",
         { storeRoot, name: SMOKE_PROFILE_NAME },
-      ).result;
+      );
       const createdProfile = assertProfileShape(create.profile);
+      assertCollectionShape(create, createdProfile.id);
       return {
         value: createdProfile,
         log: {
           profileId: createdProfile.id,
-          userDataDir: createdProfile.storage.userDataDir,
+          storeVersion: create.storeVersion,
+          profileCount: create.count,
         },
       };
     });
 
-    const firstLaunch = runStep("chromium-launch", () => {
-      const { response, diagnostic } = callSidecar(
-        sidecarRequest(
-          makeRequestId("launch"),
-          "chromium.launch",
-          { storeRoot, profileId: profile.id },
-        ),
-        { timeoutMs: CHROMIUM_LAUNCH_TIMEOUT_MS },
+    const presets = await runStep("curated-presets-list", async () => {
+      const presetList = await sidecarSuccess(
+        client,
+        makeRequestId("preset-list"),
+        "identity.presets.list",
+        {},
       );
-
-      if (response.ok === false && response.error?.code === "CHROMIUM_EXECUTABLE_NOT_FOUND") {
-        fail("Chromium executable was not found for the S03 real-runtime smoke.", {
-          errorCode: response.error.code,
-          detailRef: response.error.detailRef,
-          instruction: "Install Chromium/Chrome or set THEPRIVATOR_CHROMIUM_PATH to a local executable before running npm run verify:s03.",
-        });
-      }
-
-      assert(response.ok === true, "Chromium launch failed during the S03 real-runtime smoke.", {
-        errorCode: response.error?.code,
-        detailRef: response.error?.detailRef,
-        diagnosticStatus: diagnostic.status,
-        diagnosticErrorCode: diagnostic.errorCode,
-      });
-      assert(diagnostic.status === "ok", "Chromium launch diagnostic did not report ok.", {
-        diagnosticStatus: diagnostic.status,
-        errorCode: diagnostic.errorCode,
-        detailRef: diagnostic.detailRef,
-      });
-      const running = assertRunningPayload(response.result, profile, 1);
-      launchedPids.add(running.pid);
-      currentPid = running.pid;
+      const loadedPresets = assertPresetList(presetList);
       return {
-        value: running,
+        value: loadedPresets,
         log: {
-          profileId: running.profileId,
-          pid: running.pid,
-          lifecycleStatus: running.status,
-          runningCount: running.runningCount,
-          userDataDir: running.userDataDir,
+          presetCount: loadedPresets.length,
+          presetIds: loadedPresets.map((preset) => preset.presetId).sort(),
         },
       };
     });
 
-    runStep("chromium-status-running", () => {
-      const status = sidecarSuccess(
-        makeRequestId("status-running"),
-        "chromium.status",
-        { storeRoot },
-      ).result;
-      const running = assertStatusRunning(status, profile, firstLaunch.pid, firstLaunch.startedAt);
-      return {
-        profileId: running.profileId,
-        pid: running.pid,
-        lifecycleStatus: running.status,
-        runningCount: status.runningCount,
-      };
-    });
-
-    const stopped = runStep("chromium-stop", () => {
-      const stop = sidecarSuccess(
-        makeRequestId("stop"),
-        "chromium.stop",
-        { storeRoot, profileId: profile.id },
-        { timeoutMs: SIDECAR_TIMEOUT_MS },
-      ).result;
-      const stoppedPayload = assertStoppedPayload(stop, profile);
-      assert(waitForPidGone(firstLaunch.pid, WAIT_STOPPED_TIMEOUT_MS), "Chromium PID remained alive after sidecar stop.", {
-        pid: firstLaunch.pid,
+    const appliedProfile = await runStep("apply-ubuntu-preset", async () => {
+      const apply = await sidecarSuccess(
+        client,
+        makeRequestId("apply-ubuntu"),
+        "profiles.identity.applyPreset",
+        { storeRoot, profileId: profile.id, presetId: TARGET_PRESET_ID },
+      );
+      const updatedProfile = assertProfileShape(apply.profile);
+      assertCollectionShape(apply, profile.id);
+      assert(updatedProfile.identity.presetId === TARGET_PRESET_ID, "Applied profile identity preset id mismatch.", {
+        presetId: updatedProfile.identity.presetId,
       });
-      currentPid = null;
+      assert(Array.isArray(apply.warnings) && apply.warnings.length === 0, "Ubuntu curated preset should apply without warnings.", {
+        warningCount: Array.isArray(apply.warnings) ? apply.warnings.length : "not-array",
+      });
       return {
-        value: stoppedPayload,
+        value: updatedProfile,
         log: {
-          profileId: stoppedPayload.profileId,
-          previousPid: firstLaunch.pid,
-          lifecycleStatus: stoppedPayload.status,
-          termination: stoppedPayload.termination,
-          runningCount: stoppedPayload.runningCount,
+          profileId: updatedProfile.id,
+          presetId: updatedProfile.identity.presetId,
+          warningCount: apply.warnings.length,
         },
       };
     });
 
-    runStep("chromium-status-stopped", () => {
-      const status = sidecarSuccess(
-        makeRequestId("status-stopped"),
-        "chromium.status",
-        { storeRoot },
-      ).result;
-      assertStatusStopped(status);
-      return {
-        runningCount: status.runningCount,
-        profileCount: status.profiles.length,
-        reconciledCount: status.reconciled.length,
-        previousTermination: stopped.termination,
-      };
-    });
+    const targetPreset = presets.find((preset) => preset.presetId === TARGET_PRESET_ID) ?? appliedProfile.identity;
+    suspiciousIdentity = makeSuspiciousOverride(targetPreset);
 
-    const secondLaunch = runStep("chromium-relaunch", () => {
-      const relaunch = sidecarSuccess(
-        makeRequestId("relaunch"),
-        "chromium.launch",
-        { storeRoot, profileId: profile.id },
-        { timeoutMs: CHROMIUM_LAUNCH_TIMEOUT_MS },
-      ).result;
-      const running = assertRunningPayload(relaunch, profile, 1);
-      launchedPids.add(running.pid);
-      currentPid = running.pid;
+    const validatedWarningCodes = await runStep("validate-warning-override", async () => {
+      const validation = await sidecarSuccess(
+        client,
+        makeRequestId("validate-warning"),
+        "identity.validate",
+        { identity: suspiciousIdentity },
+      );
+      assert(validation.identityVersion === 1, "Identity validation version mismatch.", { identityVersion: validation.identityVersion });
+      assert(deepEqualJson(validation.identity, suspiciousIdentity), "Validated suspicious override did not normalize as expected.", {
+        expectedLabel: suspiciousIdentity.label,
+        actualLabel: validation.identity?.label,
+      });
+      assert(Array.isArray(validation.warnings) && validation.warnings.length >= 2, "Suspicious override should return saveable warnings.", {
+        warningCount: Array.isArray(validation.warnings) ? validation.warnings.length : "not-array",
+      });
+      const warningCodes = validation.warnings.map((warning) => warning.code).sort();
+      assert(warningCodes.includes("IDENTITY_UNUSUAL_CPU"), "Suspicious override did not report unusual CPU warning.", { warningCodes });
+      assert(warningCodes.includes("IDENTITY_UNUSUAL_DEVICE_MEMORY"), "Suspicious override did not report unusual memory warning.", { warningCodes });
+      assert(warningCodes.includes("IDENTITY_VIEWPORT_EXCEEDS_SCREEN"), "Suspicious override did not report viewport warning.", { warningCodes });
       return {
-        value: running,
+        value: warningCodes,
         log: {
-          profileId: running.profileId,
-          pid: running.pid,
-          lifecycleStatus: running.status,
-          runningCount: running.runningCount,
+          warningCount: warningCodes.length,
+          warningCodes,
         },
       };
     });
 
-    runStep("chromium-external-close", () => {
-      const termination = terminatePid(secondLaunch.pid, "external-close");
-      assert(termination.aliveAfter === false, "Externally terminated smoke Chromium PID is still alive.", {
-        pid: secondLaunch.pid,
-        signal: termination.signal,
+    await runStep("save-warning-override", async () => {
+      const update = await sidecarSuccess(
+        client,
+        makeRequestId("save-warning"),
+        "profiles.identity.update",
+        { storeRoot, profileId: profile.id, identity: suspiciousIdentity },
+      );
+      const updatedProfile = assertProfileShape(update.profile);
+      assertCollectionShape(update, profile.id);
+      assert(deepEqualJson(updatedProfile.identity, suspiciousIdentity), "Profile update did not return the warning-bearing override.", {
+        expectedLabel: suspiciousIdentity.label,
+        actualLabel: updatedProfile.identity?.label,
       });
-      currentPid = null;
+      const warningCodes = update.warnings.map((warning) => warning.code).sort();
+      assert(deepEqualJson(warningCodes, validatedWarningCodes), "Update warnings did not match validation warnings.", {
+        validationWarningCodes: validatedWarningCodes,
+        updateWarningCodes: warningCodes,
+      });
       return {
-        profileId: profile.id,
-        pid: secondLaunch.pid,
-        externalSignal: termination.signal,
-        aliveAfter: termination.aliveAfter,
+        profileId: updatedProfile.id,
+        presetId: updatedProfile.identity.presetId,
+        warningCount: warningCodes.length,
+        warningCodes,
       };
     });
 
-    runStep("chromium-status-reconciled", () => {
-      const status = sidecarSuccess(
-        makeRequestId("status-reconciled"),
-        "chromium.status",
+    await runStep("reload-persisted-override", async () => {
+      const list = await sidecarSuccess(
+        client,
+        makeRequestId("reload-list"),
+        "profiles.list",
         { storeRoot },
-      ).result;
-      const reconciled = assertReconciledStatus(status, profile);
+      );
+      const reloadedProfile = assertCollectionShape(list, profile.id);
+      assert(deepEqualJson(reloadedProfile.identity, suspiciousIdentity), "Reloaded profile did not preserve the warning-bearing override.", {
+        expectedLabel: suspiciousIdentity.label,
+        actualLabel: reloadedProfile.identity?.label,
+      });
       return {
-        profileId: reconciled.profileId,
-        lifecycleStatus: reconciled.status,
-        termination: reconciled.termination,
-        runningCount: status.runningCount,
-        reconciledCount: status.reconciled.length,
+        profileId: reloadedProfile.id,
+        label: reloadedProfile.identity.label,
+        presetId: reloadedProfile.identity.presetId ?? "none",
+        profileCount: list.count,
       };
     });
 
-    runStep("profile-store-clean", () => {
-      const clean = assertProfilesJsonClean(storeRoot, profile.id);
+    profilesJsonBeforeInvalid = readProfilesJson(storeRoot).text;
+
+    await runStep("invalid-update-no-write", async () => {
+      const invalidIdentity = cloneJson(suspiciousIdentity);
+      invalidIdentity.identityVersion = 999;
+      const error = await sidecarError(
+        client,
+        makeRequestId("invalid-update"),
+        "profiles.identity.update",
+        { storeRoot, profileId: profile.id, identity: invalidIdentity },
+      );
+      assert(error.code.startsWith("IDENTITY_"), "Invalid identity update did not return a typed IDENTITY_* code.", {
+        errorCode: error.code,
+      });
+      assert(error.recoverable === true, "Invalid identity update should be recoverable.", {
+        recoverable: error.recoverable,
+      });
+      const profilesJsonAfterInvalid = readProfilesJson(storeRoot).text;
+      assert(profilesJsonAfterInvalid === profilesJsonBeforeInvalid, "Invalid identity update mutated profiles.json.", {
+        errorCode: error.code,
+      });
+      const list = await sidecarSuccess(
+        client,
+        makeRequestId("post-invalid-list"),
+        "profiles.list",
+        { storeRoot },
+      );
+      const reloadedProfile = assertCollectionShape(list, profile.id);
+      assert(deepEqualJson(reloadedProfile.identity, suspiciousIdentity), "Invalid identity update changed the in-store identity.", {
+        expectedLabel: suspiciousIdentity.label,
+        actualLabel: reloadedProfile.identity?.label,
+      });
       return {
-        profileId: profile.id,
+        errorCode: error.code,
+        detailRef: error.detailRef,
+        noWrite: true,
+      };
+    });
+
+    await runStep("store-redaction-scan", async () => {
+      const clean = assertProfilesJsonClean(storeRoot, profile.id, suspiciousIdentity);
+      const publicText = JSON.stringify(PUBLIC_EVENTS);
+      assertNoForbiddenText(publicText, "verify:s03 public output");
+      return {
+        storeVersion: clean.storeVersion,
         profileCount: clean.profileCount,
-        persistedRuntimeFields: 0,
+        forbiddenRuntimeFields: 0,
+        publicOutputLeaks: 0,
       };
     });
 
-    return {
-      profileId: profile.id,
-      launchPid: firstLaunch.pid,
-      relaunchPid: secondLaunch.pid,
-      stoppedTermination: stopped.termination,
-    };
-  } catch (error) {
-    if (currentPid !== null && isPidAlive(currentPid)) {
-      const cleanup = terminatePid(currentPid, "failure");
-      emit({
-        step: "chromium-cleanup-pid",
-        status: cleanup.aliveAfter ? "fail" : "pass",
-        pid: currentPid,
-        signal: cleanup.signal,
-      });
-    }
-    throw error;
+    await runStep("source-sidecar-stop", async () => {
+      const stopped = await client.stop();
+      return { process: "source-sidecar", exitCode: stopped.exitCode, exitSignal: stopped.exitSignal };
+    });
   } finally {
-    cleanup();
+    await client.cleanup();
   }
+
+  return {
+    profileId: profile.id,
+    savedLabel: suspiciousIdentity.label,
+    presetId: TARGET_PRESET_ID,
+  };
 }
 
-function runRegressionCommands() {
-  runCommand(
-    "python-lifecycle-contract-tests",
-    PYTHON,
-    ["-m", "pytest", "theprivator/tests/test_chromium_lifecycle.py", "theprivator/tests/test_sidecar_contract.py"],
-    120_000,
-    { label: `${PYTHON_LABEL} -m pytest theprivator/tests/test_chromium_lifecycle.py theprivator/tests/test_sidecar_contract.py` },
-  );
-  runCommand("rust-bridge-tests", "cargo", ["test", "--manifest-path", "src-tauri/Cargo.toml"], 180_000);
-  runCommand("node-ui-client-tests", "npm", ["test", "--", "--run"], 120_000);
-  runCommand("frontend-build", "npm", ["run", "build"], 120_000);
-}
+const storeRoot = makeTempRoot("theprivator-s03-identity-");
 
 try {
-  runRegressionCommands();
-  runStep("missing-executable-typed-error", runMissingExecutableAssertion);
-  const smoke = runStep("real-chromium-launch-stop-smoke", runRealChromiumSmoke);
-
+  const proof = await runIdentityVerifier(storeRoot);
+  rmSync(storeRoot, { recursive: true, force: true });
   emit({
     status: "pass",
-    proof: smoke,
+    proof,
     checks: STEP_RESULTS,
   });
 } catch {
+  rmSync(storeRoot, { recursive: true, force: true });
   emit({
     status: "fail",
     checks: STEP_RESULTS,
