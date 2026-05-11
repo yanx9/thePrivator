@@ -56,7 +56,7 @@ npm run verify:s04
 npm run verify:s05
 ```
 
-Those checks cover the sidecar health spine, profile-store contract, Chromium lifecycle contract, S04 full identity-surface local proof with preserved legacy built-sidecar smoke, and legacy import plus diagnostics lookup contract. A failure in one of them usually means the packaged smoke is exposing an upstream regression, not a packaging-only issue.
+Those checks cover the sidecar health spine, profile-store contract, Chromium lifecycle contract, S04 deterministic local full identity-surface proof with preserved legacy built-sidecar smoke, and S05 guided public checker audit entrypoint proof. S05 proves fixed catalog planning, advisory expected-value guidance, typed app-side audit failures, exact curated URL opens, cleanup, and redaction without scraping public checker page content. A failure in one of them usually means the packaged smoke is exposing an upstream regression, not a packaging-only issue; S06 remains the packaged end-to-end regression that proves the bundled app/sidecar loop.
 
 Build the packaged app and run the final smoke:
 
@@ -101,7 +101,7 @@ Do not use test-only bypasses, mocked sidecar data, or a manually started Python
 
 ## Diagnostics lookup workflow
 
-When the UI shows a recoverable error, copy only the `detailRef`. The S05 diagnostics surface routes that value through the Tauri command `diagnostics_lookup(detailRef)` and renders the matching bounded event summary in the app. If the lookup panel says no persisted event matched yet, retry once after the sidecar has had time to flush diagnostics.
+When the UI shows a recoverable error, copy only the `detailRef`. The app diagnostics surface routes that value through the Tauri command `diagnostics_lookup(detailRef)` and renders the matching bounded event summary in the app. If the lookup panel says no persisted event matched yet, retry once after the sidecar has had time to flush diagnostics.
 
 Diagnostics are designed to be shareable. They should include safe codes, statuses, durations, and `detailRef` values. They must not include secrets, absolute user data roots, raw command lines, environment values, Chromium `--user-data-dir` arguments, proxy credentials, stdout/stderr bodies, tracebacks, or copied browser data. If you file an issue, share the verifier JSON lines and diagnostics summaries only after checking those redaction rules.
 
