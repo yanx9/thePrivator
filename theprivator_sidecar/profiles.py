@@ -12,12 +12,13 @@ import math
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Union
 
 from .identity import DEFAULT_REAL_IDENTITY, curated_preset, normalize_identity, warnings_for_identity
+from .proxy import default_proxy_config, is_proxy_secret_key, normalize_proxy_config, public_proxy_summary
 from .protocol import (
     INVALID_REQUEST,
     PROFILE_DELETE_FAILED,
@@ -31,7 +32,7 @@ from .protocol import (
     SidecarError,
 )
 
-STORE_VERSION = 2
+STORE_VERSION = 3
 STORE_DIR = "profile-store"
 PROFILES_DIR = "profiles"
 PROFILES_FILE = "profiles.json"
@@ -93,20 +94,23 @@ class ProfileRecord:
     defaults: ProfileDefaults
     storage: ProfileStorage
     identity: JsonObject
+    proxy: JsonObject = field(default_factory=default_proxy_config)
     metadata: Optional[JsonObject] = None
 
     @classmethod
     def create(cls, name: str, metadata: Optional[Mapping[str, Any]] = None) -> "ProfileRecord":
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
+        proxy = default_proxy_config()
         return cls(
             id=profile_id,
             name=name,
             createdAt=now,
             updatedAt=now,
-            defaults=ProfileDefaults(),
+            defaults=defaults_for_proxy(proxy),
             storage=storage_for_profile(profile_id),
             identity=default_identity(),
+            proxy=proxy,
             metadata=normalize_profile_metadata(metadata),
         )
 
@@ -124,8 +128,10 @@ class ProfileRecord:
             "storage",
             "metadata",
         }
-        if store_version == STORE_VERSION:
+        if store_version in {2, STORE_VERSION}:
             allowed_fields.add("identity")
+        if store_version == STORE_VERSION:
+            allowed_fields.add("proxy")
         if set(data) - allowed_fields:
             raise_corrupt_store()
 
@@ -152,7 +158,9 @@ class ProfileRecord:
             raise_corrupt_store()
         if not isinstance(updated_at, str) or not is_utc_iso_timestamp(updated_at):
             raise_corrupt_store()
-        if defaults != asdict(ProfileDefaults()):
+
+        proxy = proxy_for_store_version(data, store_version)
+        if defaults != asdict(defaults_for_proxy(proxy)):
             raise_corrupt_store()
 
         expected_storage = asdict(storage_for_profile(profile_id))
@@ -165,7 +173,7 @@ class ProfileRecord:
 
         if store_version == 1:
             identity = default_identity()
-        elif store_version == STORE_VERSION:
+        elif store_version in {2, STORE_VERSION}:
             identity = normalize_profile_identity(data.get("identity"))
         else:
             raise_corrupt_store()
@@ -175,49 +183,92 @@ class ProfileRecord:
             name=name,
             createdAt=created_at,
             updatedAt=updated_at,
-            defaults=ProfileDefaults(),
+            defaults=defaults_for_proxy(proxy),
             storage=storage_for_profile(profile_id),
             identity=identity,
+            proxy=proxy,
             metadata=metadata,
         )
 
     def renamed(self, name: str) -> "ProfileRecord":
+        proxy = normalize_proxy_config(self.proxy)
         return ProfileRecord(
             id=self.id,
             name=name,
             createdAt=self.createdAt,
             updatedAt=utc_now_iso(),
-            defaults=self.defaults,
+            defaults=defaults_for_proxy(proxy),
             storage=self.storage,
             identity=self.identity,
+            proxy=proxy,
             metadata=self.metadata,
         )
 
     def with_identity(self, identity: Mapping[str, Any]) -> "ProfileRecord":
+        proxy = normalize_proxy_config(self.proxy)
         return ProfileRecord(
             id=self.id,
             name=self.name,
             createdAt=self.createdAt,
             updatedAt=utc_now_iso(),
-            defaults=self.defaults,
+            defaults=defaults_for_proxy(proxy),
             storage=self.storage,
             identity=normalize_profile_identity(identity),
+            proxy=proxy,
             metadata=self.metadata,
         )
 
-    def to_dict(self) -> JsonObject:
+    def with_proxy(self, proxy: Mapping[str, Any]) -> "ProfileRecord":
+        normalized_proxy = normalize_proxy_config(proxy)
+        return ProfileRecord(
+            id=self.id,
+            name=self.name,
+            createdAt=self.createdAt,
+            updatedAt=utc_now_iso(),
+            defaults=defaults_for_proxy(normalized_proxy),
+            storage=self.storage,
+            identity=self.identity,
+            proxy=normalized_proxy,
+            metadata=self.metadata,
+        )
+
+    def to_store_dict(self) -> JsonObject:
+        """Return the private persisted shape, including raw proxy credentials."""
+        proxy = normalize_proxy_config(self.proxy)
         payload: JsonObject = {
             "id": self.id,
             "name": self.name,
             "createdAt": self.createdAt,
             "updatedAt": self.updatedAt,
-            "defaults": asdict(self.defaults),
+            "defaults": asdict(defaults_for_proxy(proxy)),
             "storage": asdict(self.storage),
             "identity": normalize_profile_identity(self.identity),
+            "proxy": proxy,
         }
         if self.metadata is not None:
             payload["metadata"] = normalize_profile_metadata(self.metadata)
         return payload
+
+    def to_public_dict(self) -> JsonObject:
+        """Return the redaction-safe command/UI shape for a profile."""
+        proxy = normalize_proxy_config(self.proxy)
+        payload: JsonObject = {
+            "id": self.id,
+            "name": self.name,
+            "createdAt": self.createdAt,
+            "updatedAt": self.updatedAt,
+            "defaults": asdict(defaults_for_proxy(proxy)),
+            "storage": asdict(self.storage),
+            "identity": normalize_profile_identity(self.identity),
+            "proxy": public_proxy_summary(proxy),
+        }
+        if self.metadata is not None:
+            payload["metadata"] = normalize_profile_metadata(self.metadata)
+        return payload
+
+    def to_dict(self) -> JsonObject:
+        """Backward-compatible alias for the private persisted shape."""
+        return self.to_store_dict()
 
 
 class ProfileStore:
@@ -309,6 +360,24 @@ class ProfileStore:
             warnings=warnings,
         )
 
+    def update_proxy(self, profile_id: str, proxy: Mapping[str, Any]) -> JsonObject:
+        """Replace one profile proxy after validating the private proxy draft."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Profile id is required.",
+            )
+
+        normalized_proxy = normalize_proxy_config(proxy)
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        updated = target.with_proxy(normalized_proxy)
+        updated_profiles = sort_profiles(
+            [updated if profile.id == target.id else profile for profile in profiles]
+        )
+        self._write_profiles(updated_profiles)
+        return self._collection_response(updated_profiles, profile=updated)
+
     def apply_identity_preset(self, profile_id: str, preset_id: str) -> JsonObject:
         """Apply a curated identity preset to one profile and return warnings."""
         if not isinstance(profile_id, str) or not profile_id.strip():
@@ -373,7 +442,7 @@ class ProfileStore:
             self._ensure_write_layout()
             payload = {
                 "storeVersion": STORE_VERSION,
-                "profiles": [profile.to_dict() for profile in sort_profiles(profiles)],
+                "profiles": [profile.to_store_dict() for profile in sort_profiles(profiles)],
             }
             temp_file = self.store_file.with_name(
                 f".{self.store_file.name}.{uuid.uuid4().hex}.tmp"
@@ -468,11 +537,11 @@ class ProfileStore:
         sorted_profiles = sort_profiles(profiles)
         response: JsonObject = {
             "storeVersion": STORE_VERSION,
-            "profiles": [item.to_dict() for item in sorted_profiles],
+            "profiles": [item.to_public_dict() for item in sorted_profiles],
             "count": len(sorted_profiles),
         }
         if profile is not None:
-            response["profile"] = profile.to_dict()
+            response["profile"] = profile.to_public_dict()
         if warnings is not None:
             response["warnings"] = warnings
         return response
@@ -485,12 +554,14 @@ def parse_store_payload(payload: Any) -> List[ProfileRecord]:
 
 
 def parse_store_payload_for_read(payload: Any) -> tuple[List[ProfileRecord], bool]:
-    """Parse v1/v2 store payloads and report whether v1 should be rewritten."""
+    """Parse v1/v2/v3 store payloads and report whether they should be rewritten."""
     if not isinstance(payload, Mapping):
         raise_corrupt_store()
 
     store_version = payload.get("storeVersion")
-    if store_version not in {1, STORE_VERSION}:
+    if isinstance(store_version, bool) or not isinstance(store_version, int):
+        raise_corrupt_store()
+    if store_version not in {1, 2, STORE_VERSION}:
         raise_corrupt_store()
 
     raw_profiles = payload.get("profiles")
@@ -501,7 +572,22 @@ def parse_store_payload_for_read(payload: Any) -> tuple[List[ProfileRecord], boo
         ProfileRecord.from_dict(raw_profile, store_version=store_version)
         for raw_profile in raw_profiles
     ]
-    return profiles, store_version == 1
+    return profiles, store_version < STORE_VERSION
+
+
+def proxy_for_store_version(data: Mapping[str, Any], store_version: int) -> JsonObject:
+    """Return the private proxy config for a record read from a given store version."""
+    if store_version == STORE_VERSION:
+        return normalize_proxy_config(data.get("proxy"))
+    if store_version in {1, 2}:
+        return default_proxy_config()
+    raise_corrupt_store()
+
+
+def defaults_for_proxy(proxy: Any) -> ProfileDefaults:
+    """Derive non-authoritative defaults from canonical proxy truth."""
+    normalized = normalize_proxy_config(proxy)
+    return ProfileDefaults(proxyMode=normalized["mode"])
 
 
 def default_identity() -> JsonObject:
@@ -595,7 +681,12 @@ def _is_string_key(key: Any, *, scrub_unsafe_legacy_fields: bool = False) -> boo
 
 def _is_unsafe_metadata_key(key: str) -> bool:
     folded = key.casefold()
-    return folded in _UNSAFE_METADATA_KEYS or "proxy" in folded or "debugport" in folded
+    return (
+        folded in _UNSAFE_METADATA_KEYS
+        or "proxy" in folded
+        or "debugport" in folded
+        or is_proxy_secret_key(key)
+    )
 
 
 def _json_safe_metadata_value(value: Any, *, scrub_unsafe_legacy_fields: bool = False) -> Any:

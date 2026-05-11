@@ -8,6 +8,14 @@ from typing import Any, Mapping
 import pytest
 
 from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
+from theprivator_sidecar.proxy import (
+    CREDENTIAL_STATE_CONFIGURED,
+    CREDENTIAL_STATE_NONE,
+    DIRECT_PROXY_MODE,
+    FIXED_SERVER_PROXY_MODE,
+    PROXY_VERSION,
+    default_proxy_config,
+)
 from theprivator_sidecar.profiles import (
     PROFILE_DELETE_FAILED,
     PROFILE_DUPLICATE_NAME,
@@ -23,6 +31,8 @@ from theprivator_sidecar.protocol import (
     IDENTITY_INVALID,
     IDENTITY_UNSUPPORTED_MODE,
     INVALID_REQUEST,
+    PROXY_INVALID,
+    PROXY_PAC_UNSUPPORTED,
     SidecarError,
 )
 
@@ -43,6 +53,30 @@ def profile_names(result):
 def assert_default_identity(profile: Mapping[str, Any]) -> None:
     assert profile["identity"] == DEFAULT_REAL_IDENTITY
     assert profile["identity"]["identityVersion"] == 1
+
+
+def assert_public_direct_proxy(profile: Mapping[str, Any]) -> None:
+    assert profile["proxy"] == {
+        "proxyVersion": PROXY_VERSION,
+        "mode": DIRECT_PROXY_MODE,
+        "credentialState": CREDENTIAL_STATE_NONE,
+        "summary": "Direct connection",
+    }
+    assert profile["defaults"]["proxyMode"] == DIRECT_PROXY_MODE
+
+
+def assert_store_direct_proxy(profile: Mapping[str, Any]) -> None:
+    assert profile["proxy"] == default_proxy_config()
+    assert profile["defaults"]["proxyMode"] == DIRECT_PROXY_MODE
+
+
+def assert_public_profile_has_no_proxy_credentials(profile: Mapping[str, Any]) -> None:
+    encoded = json.dumps(profile, ensure_ascii=False, sort_keys=True)
+    assert "credentials" not in profile["proxy"]
+    assert "username" not in encoded
+    assert "password" not in encoded
+    assert "proxy-user-sentinel" not in encoded
+    assert "proxy-pass-sentinel" not in encoded
 
 
 def assert_no_runtime_or_absolute_truth(profile: Mapping[str, Any], root: Path) -> None:
@@ -82,16 +116,31 @@ def write_profiles_payload(root: Path, payload: Mapping[str, Any]) -> Path:
 
 
 def v1_profile_payload(name: str = "Legacy") -> dict[str, Any]:
-    payload = ProfileRecord.create(name).to_dict()
+    payload = ProfileRecord.create(name).to_store_dict()
     payload.pop("identity", None)
+    payload.pop("proxy", None)
     return payload
 
 
+def v2_profile_payload(name: str = "Legacy", identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    payload = ProfileRecord.create(name).to_store_dict()
+    payload.pop("proxy", None)
+    if identity is not None:
+        payload["identity"] = copy.deepcopy(identity)
+    return payload
+
+
+def public_equivalent_for_store_profile(store_profile: Mapping[str, Any], public_proxy: Mapping[str, Any]) -> dict[str, Any]:
+    public = copy.deepcopy(dict(store_profile))
+    public["proxy"] = dict(public_proxy)
+    return public
+
+
 def test_empty_store_returns_versioned_empty_collection(tmp_path):
-    assert STORE_VERSION == 2
+    assert STORE_VERSION == 3
     result = ProfileStore(tmp_path).list()
 
-    assert result == {"storeVersion": 2, "profiles": [], "count": 0}
+    assert result == {"storeVersion": 3, "profiles": [], "count": 0}
 
 
 def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
@@ -99,7 +148,7 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
 
     result = store.create("Research")
 
-    assert result["storeVersion"] == 2
+    assert result["storeVersion"] == 3
     assert result["count"] == 1
     assert len(result["profiles"]) == 1
     assert result["profile"] == result["profiles"][0]
@@ -120,6 +169,8 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
         "userDataDir": f"profile-store/profiles/{profile['id']}/user-data",
     }
     assert_default_identity(profile)
+    assert_public_direct_proxy(profile)
+    assert_public_profile_has_no_proxy_credentials(profile)
     assert_no_runtime_or_absolute_truth(profile, tmp_path)
     assert not Path(profile["storage"]["profileDir"]).is_absolute()
     assert not Path(profile["storage"]["userDataDir"]).is_absolute()
@@ -127,7 +178,9 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
 
     store_payload = json.loads(Path(tmp_path, "profile-store", "profiles.json").read_text())
     assert store_payload["storeVersion"] == STORE_VERSION
-    assert store_payload["profiles"] == [profile]
+    stored_profile = store_payload["profiles"][0]
+    assert_store_direct_proxy(stored_profile)
+    assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
     assert "metadata" not in profile
     assert_no_runtime_or_absolute_truth(profile, tmp_path)
 
@@ -136,7 +189,7 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
     assert reloaded["count"] == 1
 
 
-def test_v1_profiles_migrate_to_v2_with_default_identity_and_rewrite(tmp_path):
+def test_v1_profiles_migrate_to_v3_with_default_identity_direct_proxy_and_rewrite(tmp_path):
     legacy_profile = v1_profile_payload("Legacy Research")
     store_file = write_profiles_payload(
         tmp_path,
@@ -146,18 +199,63 @@ def test_v1_profiles_migrate_to_v2_with_default_identity_and_rewrite(tmp_path):
     result = ProfileStore(tmp_path).list()
 
     profile = result["profiles"][0]
-    assert result["storeVersion"] == 2
+    assert result["storeVersion"] == 3
     assert profile["id"] == legacy_profile["id"]
     assert profile["name"] == "Legacy Research"
     assert profile["storage"] == legacy_profile["storage"]
     assert_default_identity(profile)
+    assert_public_direct_proxy(profile)
     persisted = json.loads(store_file.read_text(encoding="utf-8"))
-    assert persisted == {"storeVersion": 2, "profiles": [profile]}
+    stored_profile = persisted["profiles"][0]
+    assert persisted["storeVersion"] == 3
+    assert_store_direct_proxy(stored_profile)
+    assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
     assert ProfileStore(tmp_path).list()["profiles"] == [profile]
+
+
+def test_v2_profiles_migrate_to_v3_preserving_identity_storage_and_direct_proxy(tmp_path):
+    identity = curated_preset("ubuntu-linux-chrome-120")
+    legacy_profile = v2_profile_payload("Legacy Research", identity=identity)
+    store_file = write_profiles_payload(
+        tmp_path,
+        {"storeVersion": 2, "profiles": [legacy_profile]},
+    )
+
+    result = ProfileStore(tmp_path).list()
+
+    profile = result["profiles"][0]
+    assert result["storeVersion"] == 3
+    assert profile["id"] == legacy_profile["id"]
+    assert profile["storage"] == legacy_profile["storage"]
+    assert profile["identity"] == identity
+    assert_public_direct_proxy(profile)
+    persisted = json.loads(store_file.read_text(encoding="utf-8"))
+    stored_profile = persisted["profiles"][0]
+    assert persisted["storeVersion"] == 3
+    assert stored_profile["identity"] == identity
+    assert_store_direct_proxy(stored_profile)
+    assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
 
 
 def test_migration_write_failure_keeps_v1_file_and_returns_write_error(tmp_path, monkeypatch):
     legacy_payload = {"storeVersion": 1, "profiles": [v1_profile_payload("Legacy Research")]}
+    store_file = write_profiles_payload(tmp_path, legacy_payload)
+    original = store_file.read_text(encoding="utf-8")
+
+    def fail_replace(source, destination):
+        raise OSError("simulated migration replace failure")
+
+    monkeypatch.setattr("theprivator_sidecar.profiles.os.replace", fail_replace)
+
+    with pytest.raises(SidecarError) as exc_info:
+        ProfileStore(tmp_path).list()
+
+    assert_profile_error(exc_info, PROFILE_STORE_WRITE_FAILED)
+    assert store_file.read_text(encoding="utf-8") == original
+
+
+def test_migration_write_failure_keeps_v2_file_and_returns_write_error(tmp_path, monkeypatch):
+    legacy_payload = {"storeVersion": 2, "profiles": [v2_profile_payload("Legacy Research")]}
     store_file = write_profiles_payload(tmp_path, legacy_payload)
     original = store_file.read_text(encoding="utf-8")
 
@@ -186,9 +284,69 @@ def test_v1_records_missing_m001_fields_remain_corrupt_without_rewrite(tmp_path)
 
 
 def test_v2_record_missing_identity_raises_identity_error_without_rewrite(tmp_path):
-    profile = ProfileRecord.create("Broken").to_dict()
+    profile = v2_profile_payload("Broken")
     profile.pop("identity", None)
     payload = {"storeVersion": 2, "profiles": [profile]}
+    store_file = write_profiles_payload(tmp_path, payload)
+    original = store_file.read_text(encoding="utf-8")
+
+    with pytest.raises(SidecarError) as exc_info:
+        ProfileStore(tmp_path).list()
+
+    assert_profile_error(exc_info, IDENTITY_INVALID)
+    assert store_file.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    [
+        (lambda profile: profile.pop("proxy", None), PROXY_INVALID),
+        (
+            lambda profile: profile.__setitem__(
+                "proxy", {"proxyVersion": PROXY_VERSION, "mode": DIRECT_PROXY_MODE, "unexpected": True}
+            ),
+            PROXY_INVALID,
+        ),
+        (
+            lambda profile: profile.__setitem__(
+                "proxy", {"proxyVersion": PROXY_VERSION, "mode": "system"}
+            ),
+            PROXY_PAC_UNSUPPORTED,
+        ),
+        (
+            lambda profile: profile.__setitem__(
+                "proxy",
+                {
+                    "proxyVersion": PROXY_VERSION,
+                    "mode": FIXED_SERVER_PROXY_MODE,
+                    "protocol": "http",
+                    "host": "proxy.example.invalid",
+                    "port": 8080,
+                    "credentials": {"username": "proxy-user-sentinel", "password": ""},
+                },
+            ),
+            PROXY_INVALID,
+        ),
+    ],
+)
+def test_malformed_v3_proxy_store_fails_without_rewrite(tmp_path, mutate, expected_code):
+    profile = ProfileRecord.create("Broken").to_store_dict()
+    mutate(profile)
+    payload = {"storeVersion": STORE_VERSION, "profiles": [profile]}
+    store_file = write_profiles_payload(tmp_path, payload)
+    original = store_file.read_text(encoding="utf-8")
+
+    with pytest.raises(SidecarError) as exc_info:
+        ProfileStore(tmp_path).list()
+
+    assert_profile_error(exc_info, expected_code)
+    assert store_file.read_text(encoding="utf-8") == original
+
+
+def test_v3_record_missing_identity_raises_identity_error_without_rewrite(tmp_path):
+    profile = ProfileRecord.create("Broken").to_store_dict()
+    profile.pop("identity", None)
+    payload = {"storeVersion": STORE_VERSION, "profiles": [profile]}
     store_file = write_profiles_payload(tmp_path, payload)
     original = store_file.read_text(encoding="utf-8")
 
@@ -225,7 +383,7 @@ def test_optional_profile_metadata_round_trips_without_changing_storage_invarian
     store_file.parent.mkdir(parents=True)
     store_file.write_text(
         json.dumps(
-            {"storeVersion": STORE_VERSION, "profiles": [profile.to_dict()]},
+            {"storeVersion": STORE_VERSION, "profiles": [profile.to_store_dict()]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -287,7 +445,7 @@ def test_create_imported_profile_reuses_duplicate_name_validation(tmp_path):
 
 def test_profile_metadata_must_be_json_safe_object(tmp_path):
     profile = ProfileRecord.create("Imported")
-    payload = profile.to_dict()
+    payload = profile.to_store_dict()
     payload["metadata"] = ["not", "an", "object"]
     store_file = Path(tmp_path, "profile-store", "profiles.json")
     store_file.parent.mkdir(parents=True)
@@ -306,6 +464,7 @@ def test_profile_metadata_rejects_paths_proxy_like_values_and_debug_ports(tmp_pa
     unsafe_metadata_values = [
         {"source": "legacy-theprivator", "absolutePath": str(tmp_path / "secret")},
         {"source": "legacy-theprivator", "proxyUrl": "http://proxy.example.invalid"},
+        {"source": "legacy-theprivator", "credentials": {"username": "proxy-user-sentinel"}},
         {"source": "legacy-theprivator", "remoteControlPort": 9222},
     ]
 
@@ -372,6 +531,104 @@ def test_invalid_identity_update_does_not_modify_store(tmp_path):
     assert_profile_error(exc_info, IDENTITY_UNSUPPORTED_MODE)
     assert store_file.read_text(encoding="utf-8") == original_payload
     assert ProfileStore(tmp_path).list()["profiles"] == [profile]
+
+
+def test_fixed_server_proxy_persists_credentials_only_in_private_store_dict(tmp_path):
+    store = ProfileStore(tmp_path)
+    profile = store.create("Research")["profile"]
+    proxy = {
+        "proxyVersion": PROXY_VERSION,
+        "mode": FIXED_SERVER_PROXY_MODE,
+        "protocol": "http",
+        "host": " proxy.example.invalid ",
+        "port": 8080,
+        "credentials": {
+            "username": "proxy-user-sentinel",
+            "password": "proxy-pass-sentinel",
+        },
+    }
+
+    result = store.update_proxy(profile["id"], proxy)
+
+    public_profile = result["profile"]
+    assert result["profiles"] == [public_profile]
+    assert public_profile["defaults"]["proxyMode"] == FIXED_SERVER_PROXY_MODE
+    assert public_profile["proxy"] == {
+        "proxyVersion": PROXY_VERSION,
+        "mode": FIXED_SERVER_PROXY_MODE,
+        "protocol": "http",
+        "host": "proxy.example.invalid",
+        "port": 8080,
+        "credentialState": CREDENTIAL_STATE_CONFIGURED,
+        "summary": "http://proxy.example.invalid:8080",
+    }
+    assert_public_profile_has_no_proxy_credentials(public_profile)
+
+    store_payload = json.loads((tmp_path / "profile-store" / "profiles.json").read_text(encoding="utf-8"))
+    stored_profile = store_payload["profiles"][0]
+    assert stored_profile["proxy"] == {
+        "proxyVersion": PROXY_VERSION,
+        "mode": FIXED_SERVER_PROXY_MODE,
+        "protocol": "http",
+        "host": "proxy.example.invalid",
+        "port": 8080,
+        "credentials": {
+            "username": "proxy-user-sentinel",
+            "password": "proxy-pass-sentinel",
+        },
+    }
+    without_credentials = copy.deepcopy(stored_profile)
+    without_credentials["proxy"].pop("credentials")
+    encoded_without_credentials = json.dumps(without_credentials, ensure_ascii=False, sort_keys=True)
+    assert "proxy-user-sentinel" not in encoded_without_credentials
+    assert "proxy-pass-sentinel" not in encoded_without_credentials
+    assert ProfileStore(tmp_path).list()["profiles"] == [public_profile]
+
+
+@pytest.mark.parametrize(
+    ("proxy_draft", "expected_code"),
+    [
+        (
+            {"proxyVersion": PROXY_VERSION, "mode": DIRECT_PROXY_MODE, "unexpected": True},
+            PROXY_INVALID,
+        ),
+        (
+            {"proxyVersion": PROXY_VERSION, "mode": "system"},
+            PROXY_PAC_UNSUPPORTED,
+        ),
+        (
+            {
+                "proxyVersion": PROXY_VERSION,
+                "mode": FIXED_SERVER_PROXY_MODE,
+                "protocol": "http",
+                "host": "proxy.example.invalid",
+                "port": 8080,
+                "credentials": {"username": "", "password": "proxy-pass-sentinel"},
+            },
+            PROXY_INVALID,
+        ),
+    ],
+)
+def test_invalid_proxy_update_does_not_modify_store(tmp_path, proxy_draft, expected_code):
+    store = ProfileStore(tmp_path)
+    profile = store.create("Research")["profile"]
+    store_file = tmp_path / "profile-store" / "profiles.json"
+    original_payload = store_file.read_text(encoding="utf-8")
+
+    with pytest.raises(SidecarError) as exc_info:
+        store.update_proxy(profile["id"], proxy_draft)
+
+    assert_profile_error(exc_info, expected_code)
+    assert store_file.read_text(encoding="utf-8") == original_payload
+    assert ProfileStore(tmp_path).list()["profiles"] == [profile]
+
+
+def test_update_proxy_rejects_missing_non_string_profile_id(tmp_path):
+    store = ProfileStore(tmp_path)
+    with pytest.raises(SidecarError) as exc_info:
+        store.update_proxy("", default_proxy_config())
+
+    assert_profile_error(exc_info, INVALID_REQUEST)
 
 
 def test_apply_identity_preset_persists_curated_identity_without_warnings(tmp_path):
