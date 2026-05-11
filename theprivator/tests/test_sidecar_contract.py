@@ -550,6 +550,79 @@ def test_identity_commands_return_typed_errors_without_persisting_bad_shapes_or_
     )
 
 
+def test_identity_audit_plan_and_unknown_open_are_dispatched_with_redacted_diagnostics(tmp_path):
+    store_root = str(tmp_path / "audit-app-data-path-should-not-leak")
+    profile_name = "Audit Profile Should Not Leak"
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "audit-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": profile_name},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+
+    plan_proc = run_sidecar(
+        request_line(
+            {
+                "id": "audit-plan",
+                "method": "identity.audit.plan",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        )
+    )
+    plan_response = parse_ndjson(plan_proc.stdout)[0]
+    plan_diagnostic = parse_ndjson(plan_proc.stderr)[0]
+    assert plan_response["ok"] is True
+    plan = plan_response["result"]
+    assert plan["auditVersion"] == 1
+    assert any(page["id"] == "browserleaks-webgl" for page in plan["pages"])
+    assert not Path(store_root, "profile-store", "runtime").exists()
+    assert plan_diagnostic == {
+        "event": "sidecar.request",
+        "requestId": "audit-plan",
+        "method": "identity.audit.plan",
+        "status": "ok",
+        "durationMs": plan_diagnostic["durationMs"],
+        "errorCode": None,
+        "detailRef": None,
+    }
+
+    open_proc = run_sidecar(
+        request_line(
+            {
+                "id": "audit-open-unknown",
+                "method": "identity.audit.open",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "pageId": "missing-page",
+                },
+            }
+        )
+    )
+    open_response = parse_ndjson(open_proc.stdout)[0]
+    open_diagnostic = parse_ndjson(open_proc.stderr)[0]
+    error = assert_error_envelope(open_response, "IDENTITY_AUDIT_PAGE_NOT_FOUND", "audit-open-unknown")
+    assert open_diagnostic["event"] == "sidecar.request"
+    assert open_diagnostic["method"] == "identity.audit.open"
+    assert open_diagnostic["status"] == "error"
+    assert open_diagnostic["errorCode"] == "IDENTITY_AUDIT_PAGE_NOT_FOUND"
+    assert open_diagnostic["detailRef"] == error["detailRef"]
+    assert not Path(store_root, "profile-store", "runtime").exists()
+
+    combined = create_proc.stdout + create_proc.stderr + plan_proc.stdout + plan_proc.stderr + open_proc.stdout + open_proc.stderr
+    assert store_root not in plan_proc.stderr + open_proc.stderr
+    assert profile_name not in plan_proc.stderr + open_proc.stderr
+    assert "missing-page" not in combined
+    assert "DevToolsActivePort" not in combined
+    assert "ws://" not in combined
+    assert "--remote-debugging-port" not in combined
+    assert "Traceback" not in combined
+
+
 def test_profile_identity_command_corrupt_store_surfaces_existing_typed_error(tmp_path):
     store_root = tmp_path / "corrupt-app-data-path-should-not-leak"
     store_file = store_root / "profile-store" / "profiles.json"
@@ -742,6 +815,26 @@ def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_
             "id": "identity-update-missing-profile",
             "method": "profiles.identity.update",
             "params": {"storeRoot": "root", "identity": DEFAULT_REAL_IDENTITY},
+        },
+        {
+            "id": "audit-plan-missing-store",
+            "method": "identity.audit.plan",
+            "params": {"profileId": "profile-id"},
+        },
+        {
+            "id": "audit-plan-blank-profile",
+            "method": "identity.audit.plan",
+            "params": {"storeRoot": "root", "profileId": "   "},
+        },
+        {
+            "id": "audit-open-missing-page",
+            "method": "identity.audit.open",
+            "params": {"storeRoot": "root", "profileId": "profile-id"},
+        },
+        {
+            "id": "audit-open-bad-page",
+            "method": "identity.audit.open",
+            "params": {"storeRoot": "root", "profileId": "profile-id", "pageId": 42},
         },
     ],
 )

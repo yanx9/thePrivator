@@ -12,7 +12,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
-from .profiles import normalize_profile_identity
+from .profiles import ProfileStore, normalize_profile_identity
 from .protocol import IDENTITY_AUDIT_FAILED, IDENTITY_AUDIT_PAGE_NOT_FOUND, JsonObject, SidecarError
 
 AUDIT_VERSION = 1
@@ -195,6 +195,28 @@ def audit_catalog_payload() -> list[JsonObject]:
     return [page.to_dict() for page in AUDIT_CATALOG]
 
 
+def audit_plan_for_profile(store_root: Any, profile_id: str) -> JsonObject:
+    """Load a stored profile and return its safe guided audit plan."""
+    profile = ProfileStore(store_root).get(profile_id)
+    return build_audit_plan(profile)
+
+
+def open_audit_page_for_profile(store_root: Any, profile_id: str, page_id: str) -> JsonObject:
+    """Open one catalog audit page for a profile through Chromium internals."""
+    profile = ProfileStore(store_root).get(profile_id)
+    plan = build_audit_plan(profile)
+    page = _select_plan_page(plan, page_id)
+
+    from . import chromium  # Imported lazily to keep catalog helpers cycle-free.
+
+    return chromium.open_identity_audit_page(
+        store_root,
+        profile.id,
+        page,
+        audit_version=AUDIT_VERSION,
+    )
+
+
 def build_audit_plan(profile: Any) -> JsonObject:
     """Build a safe, profile-specific manual audit plan.
 
@@ -231,6 +253,20 @@ def get_audit_page(page_id: str) -> JsonObject:
     for page in AUDIT_CATALOG:
         if page.page_id == page_id:
             return page.to_dict()
+    raise SidecarError(
+        code=IDENTITY_AUDIT_PAGE_NOT_FOUND,
+        message="Audit page was not found.",
+    )
+
+
+def _select_plan_page(plan: Mapping[str, Any], page_id: str) -> JsonObject:
+    get_audit_page(page_id)
+    pages = plan.get("pages") if isinstance(plan, Mapping) else None
+    if not isinstance(pages, list):
+        _raise_audit_failed("Audit plan pages are unavailable.")
+    for page in pages:
+        if isinstance(page, Mapping) and page.get("id") == page_id:
+            return dict(page)
     raise SidecarError(
         code=IDENTITY_AUDIT_PAGE_NOT_FOUND,
         message="Audit page was not found.",
@@ -444,7 +480,9 @@ __all__ = [
     "NO_GUARANTEE_COPY",
     "PUBLIC_CHECKER_INSTABILITY_COPY",
     "audit_catalog_payload",
+    "audit_plan_for_profile",
     "build_audit_plan",
     "get_audit_page",
+    "open_audit_page_for_profile",
     "validate_audit_catalog",
 ]

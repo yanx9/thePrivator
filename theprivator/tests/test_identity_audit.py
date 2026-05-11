@@ -11,11 +11,13 @@ from theprivator_sidecar.identity_audit import (
     AUDIT_SURFACES,
     AuditPage,
     audit_catalog_payload,
+    audit_plan_for_profile,
     build_audit_plan,
     get_audit_page,
+    open_audit_page_for_profile,
     validate_audit_catalog,
 )
-from theprivator_sidecar.profiles import ProfileRecord
+from theprivator_sidecar.profiles import ProfileRecord, ProfileStore
 from theprivator_sidecar.protocol import (
     IDENTITY_AUDIT_FAILED,
     IDENTITY_AUDIT_PAGE_NOT_FOUND,
@@ -194,3 +196,68 @@ def test_build_audit_plan_propagates_malformed_identity_errors_without_partial_g
         build_audit_plan({"identity": identity, "name": "Sensitive Verifier Profile"})
 
     assert_sidecar_error(exc_info, IDENTITY_INVALID)
+
+
+def test_audit_plan_for_profile_reads_store_without_launching_or_writing_runtime(tmp_path):
+    profile = ProfileStore(tmp_path).create("Sensitive Verifier Profile")["profile"]
+    ProfileStore(tmp_path).apply_identity_preset(profile["id"], "ubuntu-linux-chrome-120")
+    store_file = tmp_path / "profile-store" / "profiles.json"
+    before_store = store_file.read_text(encoding="utf-8")
+
+    plan = audit_plan_for_profile(tmp_path, profile["id"])
+
+    assert plan["auditVersion"] == 1
+    assert [page["id"] for page in plan["pages"]] == list(EXPECTED_PAGE_URLS)
+    assert not (tmp_path / "profile-store" / "runtime").exists()
+    assert store_file.read_text(encoding="utf-8") == before_store
+    combined = encoded(plan)
+    assert "Sensitive Verifier Profile" not in combined
+    for marker in FORBIDDEN_MARKERS:
+        assert marker not in combined
+
+
+def test_open_audit_page_for_profile_delegates_catalog_page_without_runtime_write(tmp_path, monkeypatch):
+    profile = ProfileStore(tmp_path).create("Audit Open Profile")["profile"]
+    calls = []
+
+    def fake_open_identity_audit_page(store_root, profile_id, page, *, audit_version):
+        calls.append((store_root, profile_id, page, audit_version))
+        assert page["id"] == "browserleaks-webgl"
+        assert page["url"] == EXPECTED_PAGE_URLS["browserleaks-webgl"]
+        assert any(row["surface"] == "webgl" for row in page["expectedRows"])
+        return {
+            "auditVersion": audit_version,
+            "profileId": profile_id,
+            "pageId": page["id"],
+            "status": "opened",
+            "openedAt": "2026-01-01T00:00:00.000Z",
+            "launched": False,
+            "runningCount": 1,
+            "page": page,
+        }
+
+    monkeypatch.setattr("theprivator_sidecar.chromium.open_identity_audit_page", fake_open_identity_audit_page)
+
+    result = open_audit_page_for_profile(tmp_path, profile["id"], "browserleaks-webgl")
+
+    assert result["pageId"] == "browserleaks-webgl"
+    assert len(calls) == 1
+    assert not (tmp_path / "profile-store" / "runtime").exists()
+    combined = encoded(result)
+    for marker in FORBIDDEN_MARKERS:
+        assert marker not in combined
+
+
+def test_open_audit_page_for_profile_unknown_page_id_is_typed_and_does_not_open(tmp_path, monkeypatch):
+    profile = ProfileStore(tmp_path).create("Audit Unknown Profile")["profile"]
+
+    def fail_if_opened(*args, **kwargs):
+        raise AssertionError("unknown audit pages must not reach Chromium")
+
+    monkeypatch.setattr("theprivator_sidecar.chromium.open_identity_audit_page", fail_if_opened)
+
+    with pytest.raises(SidecarError) as exc_info:
+        open_audit_page_for_profile(tmp_path, profile["id"], "missing-page")
+
+    assert_sidecar_error(exc_info, IDENTITY_AUDIT_PAGE_NOT_FOUND)
+    assert not (tmp_path / "profile-store" / "runtime").exists()

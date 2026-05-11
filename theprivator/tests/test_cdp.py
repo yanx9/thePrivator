@@ -361,6 +361,92 @@ def test_create_page_target_endpoint_uses_browser_cdp_and_discovers_created_page
     assert socket.closed is True
 
 
+def test_create_page_target_endpoint_keeps_public_urls_audit_allowlist_only():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    with pytest.raises(SidecarError) as default_exc:
+        create_page_target_endpoint(endpoint, target_url="https://browserleaks.com/webgl")
+    assert_sidecar_error(default_exc)
+
+    socket = FakeSocket([json.dumps({"id": 1, "result": {"targetId": "created-target"}})])
+
+    def fake_get(url: str, *, timeout: float) -> FakeResponse:
+        return FakeResponse(
+            [
+                {
+                    "id": "created-target",
+                    "type": "page",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:45678/devtools/page/created",
+                }
+            ]
+        )
+
+    page = create_page_target_endpoint(
+        endpoint,
+        target_url="https://browserleaks.com/webgl",
+        allowed_public_urls={"https://browserleaks.com/webgl"},
+        client_factory=lambda url, **kwargs: CdpClient(url, connect=lambda _url, _timeout: socket, **kwargs),
+        http_get=fake_get,
+        timeout_seconds=0.25,
+        poll_interval_seconds=0.001,
+        http_timeout_seconds=0.025,
+    )
+
+    assert page.target_id == "created-target"
+    assert socket.sent == [
+        {"id": 1, "method": "Target.createTarget", "params": {"url": "https://browserleaks.com/webgl"}}
+    ]
+    assert socket.closed is True
+
+
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        "http://browserleaks.com/webgl",
+        "file:///tmp/checker.html",
+        "https://browserleaks.com/webgl?tampered=1",
+        "https://127.0.0.1/browserleaks-webgl",
+    ],
+)
+def test_create_page_target_endpoint_rejects_non_exact_or_unsafe_public_targets(target_url):
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+
+    with pytest.raises(SidecarError) as exc_info:
+        create_page_target_endpoint(
+            endpoint,
+            target_url=target_url,
+            allowed_public_urls={"https://browserleaks.com/webgl"},
+        )
+
+    assert_sidecar_error(exc_info, forbidden=(target_url,))
+
+
+def test_create_page_target_endpoint_rejects_tampered_public_url_even_if_allowlist_mirrors_it():
+    endpoint = CdpEndpoint(
+        port=45678,
+        browser_target_path="/devtools/browser/browser-id",
+        web_socket_debugger_url="ws://127.0.0.1:45678/devtools/browser/browser-id",
+    )
+    tampered_url = "https://browserleaks.com/webgl?tampered=1"
+
+    with pytest.raises(SidecarError) as exc_info:
+        create_page_target_endpoint(
+            endpoint,
+            target_url=tampered_url,
+            allowed_public_urls={tampered_url},
+        )
+
+    assert_sidecar_error(exc_info, forbidden=(tampered_url,))
+
+
 def test_close_page_target_sends_validated_close_command_and_closes_socket():
     endpoint = CdpEndpoint(
         port=45678,

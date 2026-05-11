@@ -15,6 +15,7 @@ from theprivator_sidecar.protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
+    IDENTITY_AUDIT_FAILED,
     IDENTITY_CDP_FAILED,
     IDENTITY_EXTENSION_FAILED,
     INVALID_REQUEST,
@@ -59,6 +60,26 @@ def make_fake_chromium(tmp_path: Path) -> Path:
 
 def create_profile(tmp_path: Path, name: str = "Research") -> Mapping[str, Any]:
     return ProfileStore(tmp_path).create(name)["profile"]
+
+
+def audit_page_payload(page_id: str = "browserleaks-webgl") -> Mapping[str, Any]:
+    return {
+        "id": page_id,
+        "label": "BrowserLeaks WebGL",
+        "category": "browserleaks",
+        "url": "https://browserleaks.com/webgl",
+        "surfaces": ["webgl"],
+        "comparisonNote": "Compare WebGL values manually.",
+        "requiresUserAction": False,
+        "expectedRows": [
+            {
+                "surface": "webgl",
+                "label": "WebGL",
+                "expected": "Real host WebGL vendor and renderer values.",
+                "guidance": "Compare visible vendor and renderer strings when exposed.",
+            }
+        ],
+    }
 
 
 def assert_sidecar_error(exc_info: pytest.ExceptionInfo[SidecarError], code: str) -> SidecarError:
@@ -232,6 +253,175 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
         assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
     finally:
         chromium.stop(tmp_path, profile["id"])
+
+
+def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_safe_payload(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert Path(user_data_dir) == tmp_path / profile["storage"]["userDataDir"]
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("discover", kwargs))
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fail_apply_identity_cdp_overrides(*args, **kwargs):
+        raise AssertionError("real identity audit should not apply identity CDP overrides")
+
+    def fake_create_audit_page_target_endpoint(endpoint, **kwargs):
+        assert endpoint == "ws://127.0.0.1:1/devtools/browser/test"
+        assert kwargs["target_url"] == "https://browserleaks.com/webgl"
+        assert kwargs["allowed_public_urls"] == {"https://browserleaks.com/webgl"}
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("open", kwargs))
+        return object()
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fail_apply_identity_cdp_overrides)
+    monkeypatch.setattr(chromium, "create_audit_page_target_endpoint", fake_create_audit_page_target_endpoint)
+
+    result = chromium.open_identity_audit_page(tmp_path, profile["id"], audit_page_payload(), audit_version=1)
+
+    try:
+        assert [call[0] for call in calls] == ["discover", "open"]
+        assert result["auditVersion"] == 1
+        assert result["profileId"] == profile["id"]
+        assert result["pageId"] == "browserleaks-webgl"
+        assert result["status"] == "opened"
+        assert result["openedAt"].endswith("Z")
+        assert result["launched"] is True
+        assert result["runningCount"] == 1
+        assert result["page"]["url"] == "https://browserleaks.com/webgl"
+        assert set(result) == {
+            "auditVersion",
+            "profileId",
+            "pageId",
+            "status",
+            "openedAt",
+            "launched",
+            "runningCount",
+            "page",
+        }
+        assert "pid" not in json.dumps(result)
+        assert "userDataDir" not in json.dumps(result)
+        assert "ws://" not in json.dumps(result)
+        assert "--remote-debugging-port" not in json.dumps(result)
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        assert "--remote-debugging-port=0" in argv
+        assert not any(arg.startswith("--load-extension=") for arg in argv)
+        assert chromium.status(tmp_path)["runningCount"] == 1
+        assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_audit_open_applies_masked_identity_cdp_before_public_target_and_registry_write(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append("discover")
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fake_apply_identity_cdp_overrides(endpoint, overrides, **kwargs):
+        assert endpoint == "ws://127.0.0.1:1/devtools/browser/test"
+        assert "userAgent" in overrides
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append("apply")
+        return {"applied": ["userAgent"]}
+
+    def fake_create_audit_page_target_endpoint(endpoint, **kwargs):
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        assert kwargs["target_url"] == "https://browserleaks.com/webgl"
+        calls.append("open")
+        return object()
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fake_apply_identity_cdp_overrides)
+    monkeypatch.setattr(chromium, "create_audit_page_target_endpoint", fake_create_audit_page_target_endpoint)
+
+    result = chromium.open_identity_audit_page(tmp_path, profile["id"], audit_page_payload(), audit_version=1)
+
+    try:
+        assert calls == ["discover", "apply", "open"]
+        assert result["launched"] is True
+        assert result["runningCount"] == 1
+        assert chromium.status(tmp_path)["runningCount"] == 1
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_audit_open_running_profile_without_cdp_returns_restart_guidance(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    launch = chromium.launch(tmp_path, profile["id"])
+    assert launch["status"] == "running"
+
+    def fail_discover_devtools_endpoint(*args, **kwargs):
+        raise SidecarError(code=IDENTITY_CDP_FAILED, message="Identity CDP operation failed.")
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fail_discover_devtools_endpoint)
+
+    try:
+        with pytest.raises(SidecarError) as exc_info:
+            chromium.open_identity_audit_page(tmp_path, profile["id"], audit_page_payload(), audit_version=1)
+
+        error = assert_sidecar_error(exc_info, IDENTITY_AUDIT_FAILED)
+        assert "Stop this profile" in error.message
+        assert "ws://" not in error.to_dict()["message"]
+        assert chromium.status(tmp_path)["runningCount"] == 1
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_audit_open_target_failure_after_launch_stops_child_and_leaves_no_runtime_record(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setattr(chromium, "GRACEFUL_STOP_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(chromium, "FORCE_STOP_TIMEOUT_SECONDS", 0.1)
+    spawned_pids = []
+    real_spawn = chromium._spawn_chromium
+
+    def capture_spawn(args, *, owner_token):
+        process = real_spawn(args, owner_token=owner_token)
+        spawned_pids.append(process.pid)
+        return process
+
+    def fake_discover_devtools_endpoint(*args, **kwargs):
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fail_create_audit_page_target_endpoint(*args, **kwargs):
+        raise SidecarError(code=IDENTITY_CDP_FAILED, message="Identity CDP operation failed.")
+
+    monkeypatch.setattr(chromium, "_spawn_chromium", capture_spawn)
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "create_audit_page_target_endpoint", fail_create_audit_page_target_endpoint)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.open_identity_audit_page(tmp_path, profile["id"], audit_page_payload(), audit_version=1)
+
+    assert_sidecar_error(exc_info, IDENTITY_CDP_FAILED)
+    assert spawned_pids
+    assert not chromium.is_process_alive(spawned_pids[0])
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
 
 
 def test_extension_failure_happens_before_spawn_and_leaves_registry_empty(tmp_path, monkeypatch):

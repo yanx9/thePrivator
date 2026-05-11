@@ -37,6 +37,7 @@ from .protocol import (
     CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
     CHROMIUM_STOP_FAILED,
+    IDENTITY_AUDIT_FAILED,
     IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
@@ -88,6 +89,8 @@ _ALLOWED_IDENTITY_VALUE_ARG_PREFIXES = (
 )
 IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
+AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
+AUDIT_TARGET_OPEN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -276,6 +279,45 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     return {**_running_payload(record), "runningCount": len(updated)}
 
 
+def open_identity_audit_page(
+    store_root: Union[str, Path],
+    profile_id: str,
+    page: Mapping[str, Any],
+    *,
+    audit_version: int,
+) -> JsonObject:
+    """Open one curated public checker page through the internal CDP boundary."""
+    profile = _load_profile(store_root, profile_id)
+    audit_page = _safe_audit_page_metadata(page)
+    identity_plan = build_identity_runtime_plan(profile.identity)
+    registry = RuntimeRegistry(store_root)
+    records = registry.read()
+    active, _reconciled, changed = _reconcile_records(records)
+    if changed:
+        registry.write(active, error_code=IDENTITY_AUDIT_FAILED)
+
+    existing = active.get(profile.id)
+    if existing is not None and is_process_alive(existing.pid):
+        return _open_identity_audit_page_for_running(
+            store_root,
+            profile,
+            identity_plan,
+            audit_page,
+            audit_version=audit_version,
+            running_count=len(active),
+        )
+
+    return _launch_and_open_identity_audit_page(
+        store_root,
+        profile,
+        identity_plan,
+        audit_page,
+        audit_version=audit_version,
+        active=active,
+        registry=registry,
+    )
+
+
 
 def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Stop only the owned process tree for one stored profile."""
@@ -358,13 +400,15 @@ def _prepare_identity_extension(
 def _identity_launch_args(
     identity_plan: IdentityRuntimePlan,
     extension_artifact: Optional[IdentityExtensionArtifact],
+    *,
+    force_remote_debugging: bool = False,
 ) -> list[str]:
     args: list[str] = []
     if extension_artifact is not None:
         extension_dir = str(extension_artifact.extension_dir)
         args.append(f"{_LOAD_EXTENSION_PREFIX}{extension_dir}")
         args.append(f"{_DISABLE_EXTENSIONS_EXCEPT_PREFIX}{extension_dir}")
-    if identity_plan.requires_cdp:
+    if force_remote_debugging or identity_plan.requires_cdp:
         args.append(_REMOTE_DEBUGGING_ARG)
     args.extend(identity_plan.launch_flags)
     return _validate_extra_launch_args(args)
@@ -458,6 +502,18 @@ def apply_identity_cdp_overrides(endpoint_or_url: Any, overrides: Mapping[str, A
     return _apply_identity_cdp_overrides(endpoint_or_url, overrides, **kwargs)
 
 
+def create_audit_page_target_endpoint(endpoint: Any, **kwargs: Any) -> Any:
+    """Lazy CDP target wrapper for audit-specific exact public URL opens."""
+    try:
+        from .cdp import create_page_target_endpoint as _create_page_target_endpoint
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        ) from exc
+    return _create_page_target_endpoint(endpoint, **kwargs)
+
+
 def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_path: Path) -> None:
     if not identity_plan.requires_cdp:
         return
@@ -469,6 +525,194 @@ def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_
         endpoint,
         identity_plan.cdp_overrides,
         timeout_seconds=IDENTITY_CDP_APPLY_TIMEOUT_SECONDS,
+    )
+
+
+def _open_identity_audit_page_for_running(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+    audit_page: JsonObject,
+    *,
+    audit_version: int,
+    running_count: int,
+) -> JsonObject:
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        endpoint = discover_devtools_endpoint(
+            user_data_path,
+            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+    except SidecarError as exc:
+        if exc.code == IDENTITY_CDP_FAILED:
+            raise SidecarError(
+                code=IDENTITY_AUDIT_FAILED,
+                message="Stop this profile and start the audit again so ThePrivator can attach its internal browser control endpoint.",
+            ) from exc
+        raise
+    _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+    _open_public_audit_target(endpoint, audit_page)
+    return _audit_open_payload(
+        profile,
+        audit_page,
+        audit_version=audit_version,
+        launched=False,
+        running_count=running_count,
+    )
+
+
+def _launch_and_open_identity_audit_page(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+    audit_page: JsonObject,
+    *,
+    audit_version: int,
+    active: Mapping[str, RuntimeRecord],
+    registry: RuntimeRegistry,
+) -> JsonObject:
+    executable = discover_executable()
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        user_data_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium user data directory could not be prepared.",
+        ) from exc
+
+    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    owner_token = uuid.uuid4().hex
+    args = build_launch_args(
+        executable,
+        user_data_path,
+        "about:blank",
+        extra_args=_identity_launch_args(
+            identity_plan,
+            extension_artifact,
+            force_remote_debugging=True,
+        ),
+    )
+    process = _spawn_chromium(args, owner_token=owner_token)
+    try:
+        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
+        if process.poll() is not None or not is_process_alive(process.pid):
+            _reap_if_child(process.pid)
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium exited before it could be registered as running.",
+            )
+
+        endpoint = discover_devtools_endpoint(
+            user_data_path,
+            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+        _open_public_audit_target(endpoint, audit_page)
+
+        record = RuntimeRecord(
+            profile_id=profile.id,
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            user_data_dir=profile.storage.userDataDir,
+            owner_token=owner_token,
+        )
+        updated = dict(active)
+        updated[profile.id] = record
+        registry.write(updated, error_code=IDENTITY_AUDIT_FAILED)
+    except SidecarError:
+        _stop_child_after_failed_launch(process.pid)
+        raise
+    return _audit_open_payload(
+        profile,
+        audit_page,
+        audit_version=audit_version,
+        launched=True,
+        running_count=len(updated),
+    )
+
+
+def _apply_identity_cdp_to_endpoint_if_needed(identity_plan: IdentityRuntimePlan, endpoint: Any) -> None:
+    if not identity_plan.requires_cdp:
+        return
+    apply_identity_cdp_overrides(
+        endpoint,
+        identity_plan.cdp_overrides,
+        timeout_seconds=IDENTITY_CDP_APPLY_TIMEOUT_SECONDS,
+    )
+
+
+def _open_public_audit_target(endpoint: Any, audit_page: Mapping[str, Any]) -> None:
+    url = audit_page.get("url")
+    if not isinstance(url, str) or not url:
+        raise _audit_error()
+    create_audit_page_target_endpoint(
+        endpoint,
+        target_url=url,
+        allowed_public_urls={url},
+        timeout_seconds=AUDIT_TARGET_OPEN_TIMEOUT_SECONDS,
+    )
+
+
+def _audit_open_payload(
+    profile: ProfileRecord,
+    audit_page: JsonObject,
+    *,
+    audit_version: int,
+    launched: bool,
+    running_count: int,
+) -> JsonObject:
+    page_id = audit_page.get("id")
+    if not isinstance(page_id, str) or not page_id:
+        raise _audit_error()
+    return {
+        "auditVersion": audit_version,
+        "profileId": profile.id,
+        "pageId": page_id,
+        "status": "opened",
+        "openedAt": utc_now_iso(),
+        "launched": launched,
+        "runningCount": running_count,
+        "page": dict(audit_page),
+    }
+
+
+def _safe_audit_page_metadata(page: Mapping[str, Any]) -> JsonObject:
+    if not isinstance(page, Mapping):
+        raise _audit_error()
+    allowed_keys = {
+        "id",
+        "label",
+        "category",
+        "url",
+        "surfaces",
+        "comparisonNote",
+        "requiresUserAction",
+        "expectedRows",
+    }
+    if set(page) - allowed_keys:
+        raise _audit_error()
+    page_id = page.get("id")
+    url = page.get("url")
+    if not isinstance(page_id, str) or not page_id.strip() or not isinstance(url, str) or not url.strip():
+        raise _audit_error()
+    return _json_safe_page_metadata({key: page[key] for key in allowed_keys if key in page})
+
+
+def _json_safe_page_metadata(page: Mapping[str, Any]) -> JsonObject:
+    try:
+        copied = json.loads(json.dumps(page, ensure_ascii=False, allow_nan=False, sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise _audit_error() from exc
+    if not isinstance(copied, dict):
+        raise _audit_error()
+    return copied
+
+
+def _audit_error() -> SidecarError:
+    return SidecarError(
+        code=IDENTITY_AUDIT_FAILED,
+        message="Identity audit could not be opened.",
     )
 
 
@@ -805,6 +1049,7 @@ __all__ = [
     "discover_executable",
     "is_process_alive",
     "launch",
+    "open_identity_audit_page",
     "resolve_user_data_path",
     "status",
     "stop",

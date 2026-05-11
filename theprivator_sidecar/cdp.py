@@ -14,7 +14,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Protocol, Union
+from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Union
 from urllib.parse import urlsplit
 
 import requests
@@ -221,17 +221,22 @@ def create_page_target_endpoint(
     endpoint: CdpEndpoint,
     *,
     target_url: str = "about:blank",
+    allowed_public_urls: Optional[Collection[str]] = None,
     client_factory: Optional[Callable[..., Any]] = None,
     timeout_seconds: float = DEFAULT_WS_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
     http_get: HttpGet = requests.get,
 ) -> CdpPageEndpoint:
-    """Create a new page target and return its validated page endpoint."""
+    """Create a new page target and return its validated page endpoint.
+
+    By default this helper remains restricted to local proof URLs: ``about:blank``
+    and loopback HTTP. Guided audits may pass an explicit exact set of public
+    HTTPS URLs, but no caller can provide arbitrary navigation strings.
+    """
     if not isinstance(endpoint, CdpEndpoint):
         raise _cdp_error()
-    if target_url != "about:blank" and not target_url.startswith("http://127.0.0.1:"):
-        raise _cdp_error()
+    _validate_create_target_url(target_url, allowed_public_urls=allowed_public_urls)
     factory = client_factory or CdpClient
     try:
         with factory(endpoint.web_socket_debugger_url, timeout_seconds=timeout_seconds) as client:
@@ -334,6 +339,38 @@ def _discover_page_target_endpoint(
         if time.monotonic() >= deadline:
             raise _cdp_error()
         time.sleep(_bounded_poll_interval(poll_interval_seconds, deadline))
+
+
+def _validate_create_target_url(target_url: str, *, allowed_public_urls: Optional[Collection[str]]) -> None:
+    if target_url == "about:blank":
+        return
+    if isinstance(target_url, str) and target_url.startswith("http://127.0.0.1:"):
+        return
+    if allowed_public_urls is None:
+        raise _cdp_error()
+    _validate_public_target_url(target_url)
+    for allowed_url in allowed_public_urls:
+        _validate_public_target_url(allowed_url)
+    if target_url not in allowed_public_urls:
+        raise _cdp_error()
+
+
+def _validate_public_target_url(url: str) -> None:
+    if not isinstance(url, str) or not url or any(ord(character) < 32 for character in url):
+        raise _cdp_error()
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise _cdp_error() from exc
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise _cdp_error()
+    if not parsed.hostname or parsed.hostname in _LOOPBACK_HOSTS:
+        raise _cdp_error()
+    if port is not None:
+        raise _cdp_error()
+    if parsed.fragment or parsed.query:
+        raise _cdp_error()
 
 
 class CdpClient:

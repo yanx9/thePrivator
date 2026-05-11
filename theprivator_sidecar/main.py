@@ -7,7 +7,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
-from . import chromium, legacy_import
+from . import chromium, identity_audit, legacy_import
 from .diagnostics import append_events
 from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
 from .profiles import ProfileStore, require_string_param
@@ -196,6 +196,37 @@ def dispatch_identity_request(request: SidecarRequest) -> JsonObject:
                 "identity": normalized,
                 "warnings": warnings_for_identity(normalized),
             }
+
+        if request.method == "identity.audit.plan":
+            store_root = require_string_param(
+                request.params,
+                "storeRoot",
+                "Audit storeRoot is required.",
+            )
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Audit profileId is required.",
+            )
+            return identity_audit.audit_plan_for_profile(store_root, profile_id)
+
+        if request.method == "identity.audit.open":
+            store_root = require_string_param(
+                request.params,
+                "storeRoot",
+                "Audit storeRoot is required.",
+            )
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Audit profileId is required.",
+            )
+            page_id = require_string_param(
+                request.params,
+                "pageId",
+                "Audit pageId is required.",
+            )
+            return identity_audit.open_audit_page_for_profile(store_root, profile_id, page_id)
 
         raise SidecarError(
             code=UNKNOWN_COMMAND,
