@@ -1,9 +1,18 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  createIdentityDraftState,
+  formatIdentityExpectedValueSummary,
   formatIdentityMode,
   formatIdentitySummary,
   getIdentitySurfaceControls,
-  seedInitialIdentityDraft,
+  markIdentityAsAdvancedOverride,
+  parseIdentityDraftState,
+  updateIdentityDraftField,
+  updateIdentityDraftLabel,
+  updateIdentityDraftSurfaceMode,
+  type IdentityDraftFieldDescriptor,
+  type IdentityDraftFieldPath,
+  type IdentityDraftState,
 } from "./identityControls";
 import {
   applyProfileIdentityPreset,
@@ -20,6 +29,7 @@ import {
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
+  updateProfileIdentity,
   validateIdentity,
 } from "./sidecar/client";
 import type {
@@ -35,6 +45,7 @@ import type {
   LegacyScanCandidate,
   LegacyScanSnapshot,
   ProfileIdentity,
+  IdentitySurface,
   IdentityWarning,
   ProfileListSnapshot,
   ProfileMutationSnapshot,
@@ -83,7 +94,7 @@ type IdentityConfigPhase =
   | "saving"
   | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
 
-type IdentityConfigAction = "load-presets" | "validate-saved" | "apply-preset" | "save";
+type IdentityConfigAction = "load-presets" | "validate-saved" | "apply-preset" | "check" | "save";
 
 type IdentityConfigError = {
   profileId: string;
@@ -94,8 +105,9 @@ type IdentityConfigError = {
 
 type IdentityConfigSuccess = {
   profileId: string;
-  action: Extract<IdentityConfigAction, "apply-preset">;
-  presetId: string;
+  action: Extract<IdentityConfigAction, "apply-preset" | "check" | "save">;
+  presetId: string | null;
+  label: string;
   warningCount: number;
   occurredAt: string;
 };
@@ -103,7 +115,7 @@ type IdentityConfigSuccess = {
 type IdentityConfigPanelState = {
   isOpen: boolean;
   phase: IdentityConfigPhase;
-  draft: ProfileIdentity | null;
+  draft: IdentityDraftState | null;
   presets: ProfileIdentity[] | null;
   selectedPresetId: string;
   savedWarnings: IdentityWarning[];
@@ -235,6 +247,7 @@ const IDENTITY_CONFIG_ACTION_LABELS: Record<IdentityConfigAction, string> = {
   "load-presets": "Load curated presets",
   "validate-saved": "Saved identity validation",
   "apply-preset": "Apply identity preset",
+  check: "Check identity draft",
   save: "Save identity override",
 };
 
@@ -278,7 +291,7 @@ export function App() {
   const [legacyImportRefreshState, setLegacyImportRefreshState] = useState<LegacyImportRefreshState>(null);
   const [diagnosticLookupState, setDiagnosticLookupState] = useState<DiagnosticLookupState>(INITIAL_DIAGNOSTIC_LOOKUP_STATE);
   const [identityPanelProfileId, setIdentityPanelProfileId] = useState<string | null>(null);
-  const [identityDraft, setIdentityDraft] = useState<ProfileIdentity | null>(null);
+  const [identityDraft, setIdentityDraft] = useState<IdentityDraftState | null>(null);
   const [identityConfigPhase, setIdentityConfigPhase] = useState<IdentityConfigPhase>("idle");
   const [identityPresetCache, setIdentityPresetCache] = useState<ProfileIdentity[] | null>(null);
   const [selectedIdentityPresetId, setSelectedIdentityPresetId] = useState("");
@@ -877,12 +890,12 @@ export function App() {
     (profile: ProfileRecord) => {
       const requestId = identityConfigRequestIdRef.current + 1;
       identityConfigRequestIdRef.current = requestId;
-      const draft = seedInitialIdentityDraft(profile);
+      const draft = createIdentityDraftState(profile);
       const hasPresetCache = identityPresetCache !== null;
 
       setIdentityPanelProfileId(profile.id);
       setIdentityDraft(draft);
-      setSelectedIdentityPresetId(draft.presetId ?? "");
+      setSelectedIdentityPresetId(draft.identity.presetId ?? "");
       setSavedIdentityWarnings([]);
       setIdentityConfigError(null);
       setIdentityConfigSuccess(null);
@@ -913,11 +926,13 @@ export function App() {
           recordIdentityConfigError(profile.id, "load-presets", error as SidecarClientError);
         });
 
-      void validateIdentity(draft)
+      void validateIdentity(draft.identity)
         .then((snapshot) => {
           if (identityConfigRequestIdRef.current !== requestId) {
             return;
           }
+          setIdentityDraft(createIdentityDraftState(snapshot.identity));
+          setSelectedIdentityPresetId(snapshot.identity.presetId ?? "");
           setSavedIdentityWarnings(snapshot.warnings);
           setIdentityConfigPhase((current) => (current === "recoverable-error" || current === "bridge-error" ? current : "ready"));
           setIdentityCurrentAction((current) => (current === "load-presets" ? current : null));
@@ -976,13 +991,14 @@ export function App() {
         }
 
         applyProfileSnapshot(snapshot);
-        setIdentityDraft(seedInitialIdentityDraft(snapshot.profile));
+        setIdentityDraft(createIdentityDraftState(snapshot.profile));
         setSelectedIdentityPresetId(snapshot.profile.identity.presetId ?? requestedPresetId);
         setSavedIdentityWarnings(snapshot.warnings);
         setIdentityConfigSuccess({
           profileId: profile.id,
           action: "apply-preset",
           presetId: requestedPresetId,
+          label: snapshot.profile.identity.label,
           warningCount: snapshot.warnings.length,
           occurredAt: new Date().toISOString(),
         });
@@ -998,6 +1014,190 @@ export function App() {
       }
     },
     [applyProfileSnapshot, identityConfigPhase, identityPanelProfileId, identityPresetCache, recordIdentityConfigError],
+  );
+
+  const handleIdentityDraftLabelChange = useCallback(
+    (profileId: string, value: string) => {
+      if (identityPanelProfileId !== profileId) {
+        return;
+      }
+
+      setIdentityDraft((current) => (current ? updateIdentityDraftLabel(current, value) : current));
+      setSavedIdentityWarnings([]);
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+      setIdentityConfigPhase("ready");
+      setIdentityCurrentAction(null);
+    },
+    [identityPanelProfileId],
+  );
+
+  const handleIdentityDraftFieldChange = useCallback(
+    (profileId: string, path: Exclude<IdentityDraftFieldPath, "label">, value: string) => {
+      if (identityPanelProfileId !== profileId) {
+        return;
+      }
+
+      setIdentityDraft((current) => (current ? updateIdentityDraftField(current, path, value) : current));
+      setSavedIdentityWarnings([]);
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+      setIdentityConfigPhase("ready");
+      setIdentityCurrentAction(null);
+    },
+    [identityPanelProfileId],
+  );
+
+  const handleIdentitySurfaceModeChange = useCallback(
+    (profileId: string, surface: IdentitySurface, mode: string) => {
+      if (identityPanelProfileId !== profileId) {
+        return;
+      }
+
+      setIdentityDraft((current) => (current ? updateIdentityDraftSurfaceMode(current, surface, mode) : current));
+      setSavedIdentityWarnings([]);
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+      setIdentityConfigPhase("ready");
+      setIdentityCurrentAction(null);
+    },
+    [identityPanelProfileId],
+  );
+
+  const handleCheckIdentity = useCallback(
+    async (profile: ProfileRecord) => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      if (
+        identityPanelProfileId !== profile.id ||
+        !identityDraft ||
+        identityConfigPhase === "loading-presets" ||
+        identityConfigPhase === "validating" ||
+        identityConfigPhase === "applying-preset" ||
+        identityConfigPhase === "saving" ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation?.profileId === profile.id
+      ) {
+        return;
+      }
+
+      const parsed = parseIdentityDraftState(identityDraft);
+      if (!parsed.ok) {
+        setIdentityDraft({ ...identityDraft, errors: parsed.errors });
+        setIdentityConfigError(null);
+        setIdentityConfigSuccess(null);
+        setIdentityConfigPhase("ready");
+        setIdentityCurrentAction(null);
+        return;
+      }
+
+      const requestId = identityConfigRequestIdRef.current;
+      setIdentityDraft({ ...identityDraft, errors: {} });
+      setIdentityConfigPhase("validating");
+      setIdentityCurrentAction("check");
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+
+      try {
+        const snapshot = await validateIdentity(parsed.identity);
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const nextDraft = createIdentityDraftState(snapshot.identity);
+        nextDraft.labelEdited = identityDraft.labelEdited;
+        setIdentityDraft(nextDraft);
+        setSelectedIdentityPresetId(snapshot.identity.presetId ?? "");
+        setSavedIdentityWarnings(snapshot.warnings);
+        setIdentityConfigSuccess({
+          profileId: profile.id,
+          action: "check",
+          presetId: snapshot.identity.presetId,
+          label: snapshot.identity.label,
+          warningCount: snapshot.warnings.length,
+          occurredAt: new Date().toISOString(),
+        });
+        setIdentityConfigPhase("ready");
+        setIdentityCurrentAction(null);
+        setIdentityConfigError(null);
+      } catch (error) {
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        recordIdentityConfigError(profile.id, "check", error as SidecarClientError);
+      }
+    },
+    [identityConfigPhase, identityDraft, identityPanelProfileId, recordIdentityConfigError],
+  );
+
+  const handleSaveIdentity = useCallback(
+    async (profile: ProfileRecord) => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      if (
+        identityPanelProfileId !== profile.id ||
+        !identityDraft ||
+        identityConfigPhase === "loading-presets" ||
+        identityConfigPhase === "validating" ||
+        identityConfigPhase === "applying-preset" ||
+        identityConfigPhase === "saving" ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation?.profileId === profile.id
+      ) {
+        return;
+      }
+
+      const parsed = parseIdentityDraftState(identityDraft);
+      if (!parsed.ok) {
+        setIdentityDraft({ ...identityDraft, errors: parsed.errors });
+        setIdentityConfigError(null);
+        setIdentityConfigSuccess(null);
+        setIdentityConfigPhase("ready");
+        setIdentityCurrentAction(null);
+        return;
+      }
+
+      const identity = markIdentityAsAdvancedOverride(parsed.identity, {
+        preserveLabel: identityDraft.labelEdited || parsed.identity.presetId === null,
+      });
+      const attemptedDraft = createIdentityDraftState(identity);
+      attemptedDraft.labelEdited = identityDraft.labelEdited;
+      const requestId = identityConfigRequestIdRef.current;
+      setIdentityDraft(attemptedDraft);
+      setIdentityConfigPhase("saving");
+      setIdentityCurrentAction("save");
+      setIdentityConfigError(null);
+      setIdentityConfigSuccess(null);
+
+      try {
+        const snapshot = await updateProfileIdentity(profile.id, identity);
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        applyProfileSnapshot(snapshot);
+        setIdentityDraft(createIdentityDraftState(snapshot.profile));
+        setSelectedIdentityPresetId(snapshot.profile.identity.presetId ?? "");
+        setSavedIdentityWarnings(snapshot.warnings);
+        setIdentityConfigSuccess({
+          profileId: profile.id,
+          action: "save",
+          presetId: snapshot.profile.identity.presetId,
+          label: snapshot.profile.identity.label,
+          warningCount: snapshot.warnings.length,
+          occurredAt: new Date().toISOString(),
+        });
+        setIdentityConfigPhase("ready");
+        setIdentityCurrentAction(null);
+        setIdentityConfigError(null);
+      } catch (error) {
+        if (identityConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        recordIdentityConfigError(profile.id, "save", error as SidecarClientError);
+      }
+    },
+    [applyProfileSnapshot, identityConfigPhase, identityDraft, identityPanelProfileId, recordIdentityConfigError],
   );
 
   const profileCount = profiles.length;
@@ -1148,9 +1348,14 @@ export function App() {
                   onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
                   onIdentityApplyPreset={handleApplyIdentityPreset}
+                  onIdentityCheck={handleCheckIdentity}
                   onIdentityClose={closeIdentityConfig}
                   onIdentityConfigure={openIdentityConfig}
+                  onIdentityDraftFieldChange={handleIdentityDraftFieldChange}
+                  onIdentityDraftLabelChange={handleIdentityDraftLabelChange}
                   onIdentityPresetSelect={handleIdentityPresetSelect}
+                  onIdentitySave={handleSaveIdentity}
+                  onIdentitySurfaceModeChange={handleIdentitySurfaceModeChange}
                   onLaunch={handleLaunchProfile}
                   onRefreshStatus={() => void refreshChromiumStatus("manual")}
                   onRenameCancel={() => setEditing(null)}
@@ -1784,9 +1989,14 @@ function ProfileCard({
   onDiagnosticLookup,
   onEditNameChange,
   onIdentityApplyPreset,
+  onIdentityCheck,
   onIdentityClose,
   onIdentityConfigure,
+  onIdentityDraftFieldChange,
+  onIdentityDraftLabelChange,
   onIdentityPresetSelect,
+  onIdentitySave,
+  onIdentitySurfaceModeChange,
   onLaunch,
   onRefreshStatus,
   onRenameCancel,
@@ -1812,9 +2022,14 @@ function ProfileCard({
   onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
   onIdentityApplyPreset: (profile: ProfileRecord, presetId: string) => void;
+  onIdentityCheck: (profile: ProfileRecord) => void;
   onIdentityClose: () => void;
   onIdentityConfigure: (profile: ProfileRecord) => void;
+  onIdentityDraftFieldChange: (profileId: string, path: Exclude<IdentityDraftFieldPath, "label">, value: string) => void;
+  onIdentityDraftLabelChange: (profileId: string, value: string) => void;
   onIdentityPresetSelect: (profileId: string, presetId: string) => void;
+  onIdentitySave: (profile: ProfileRecord) => void;
+  onIdentitySurfaceModeChange: (profileId: string, surface: IdentitySurface, mode: string) => void;
   onLaunch: (profile: ProfileRecord) => void;
   onRefreshStatus: () => void;
   onRenameCancel: () => void;
@@ -1839,7 +2054,7 @@ function ProfileCard({
   const runtimeLabel = isStoppingThis ? "Stopping" : isLaunchingThis ? "Launching" : runningState ? "Running" : "Stopped";
   const runtimeTone = isLaunchingThis || isStoppingThis ? "pending" : runningState ? "running" : "stopped";
   const identityRuntimeProtectionReason = isRuntimeProtected
-    ? `Identity preset changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before applying; changes affect the next launch only.`
+    ? `Identity changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before checking or saving; changes affect the next launch only.`
     : null;
 
   const retryLifecycle = () => {
@@ -1891,9 +2106,14 @@ function ProfileCard({
           runtimeProtectionReason={identityRuntimeProtectionReason}
           state={identityConfigState}
           onApplyPreset={onIdentityApplyPreset}
+          onCheckIdentity={onIdentityCheck}
           onClose={onIdentityClose}
           onDiagnosticLookup={onDiagnosticLookup}
+          onDraftFieldChange={onIdentityDraftFieldChange}
+          onDraftLabelChange={onIdentityDraftLabelChange}
           onPresetSelect={onIdentityPresetSelect}
+          onSaveIdentity={onIdentitySave}
+          onSurfaceModeChange={onIdentitySurfaceModeChange}
         />
       ) : null}
 
@@ -2061,43 +2281,83 @@ function IdentityConfigurationPanel({
   runtimeProtectionReason,
   state,
   onApplyPreset,
+  onCheckIdentity,
   onClose,
   onDiagnosticLookup,
+  onDraftFieldChange,
+  onDraftLabelChange,
   onPresetSelect,
+  onSaveIdentity,
+  onSurfaceModeChange,
 }: {
   diagnosticLookupState: DiagnosticLookupState;
   profile: ProfileRecord;
   runtimeProtectionReason: string | null;
   state: IdentityConfigPanelState;
   onApplyPreset: (profile: ProfileRecord, presetId: string) => void;
+  onCheckIdentity: (profile: ProfileRecord) => void;
   onClose: () => void;
   onDiagnosticLookup: (detailRef: string) => void;
+  onDraftFieldChange: (profileId: string, path: Exclude<IdentityDraftFieldPath, "label">, value: string) => void;
+  onDraftLabelChange: (profileId: string, value: string) => void;
   onPresetSelect: (profileId: string, presetId: string) => void;
+  onSaveIdentity: (profile: ProfileRecord) => void;
+  onSurfaceModeChange: (profileId: string, surface: IdentitySurface, mode: string) => void;
 }) {
-  const draft = state.draft ?? profile.identity;
-  const controls = getIdentitySurfaceControls(draft);
+  const draftState = state.draft ?? createIdentityDraftState(profile);
+  const draftIdentity = draftState.identity;
+  const controls = getIdentitySurfaceControls(draftIdentity);
   const presets = state.presets ?? [];
   const isLoadingPresets = state.phase === "loading-presets";
   const isValidating = state.phase === "validating";
+  const isCheckingIdentity = state.phase === "validating" && state.currentAction === "check";
+  const isValidatingSaved = state.phase === "validating" && state.currentAction !== "check";
   const isApplyingPreset = state.phase === "applying-preset" && state.currentAction === "apply-preset";
+  const isSaving = state.phase === "saving";
+  const isIdentityBusy = isLoadingPresets || isValidating || isApplyingPreset || isSaving;
+  const fieldErrorCount = Object.keys(draftState.errors).length;
   const selectedPresetId = state.selectedPresetId;
   const selectedPreset = presets.find((preset) => preset.presetId === selectedPresetId) ?? null;
   const selectedPresetUnavailable = selectedPresetId.length > 0 && selectedPreset === null;
   const presetSelectId = `identity-preset-select-${profile.id}`;
   const presetApplyHintId = `identity-preset-apply-hint-${profile.id}`;
+  const draftLabelId = `identity-label-${profile.id}`;
+  const draftLabelHintId = `identity-label-hint-${profile.id}`;
+  const draftLabelErrorId = `identity-label-error-${profile.id}`;
+  const draftLabelError = draftState.errors.label;
+  const advancedActionHintId = `identity-advanced-action-hint-${profile.id}`;
   const applyDisabledReason = runtimeProtectionReason
     ?? (isLoadingPresets
       ? "Curated preset choices are still loading."
-      : isValidating
+      : isValidatingSaved
         ? "Saved identity validation is still running."
-        : isApplyingPreset
-          ? "Preset apply is already running for this profile."
-          : selectedPresetId.length === 0
-            ? "Choose a curated preset before applying."
-            : selectedPresetUnavailable
-              ? `Preset ${selectedPresetId} is not in the loaded curated preset list. Choose an available preset before applying.`
-              : null);
+        : isCheckingIdentity
+          ? "Identity draft check is already running."
+          : isSaving
+            ? "An advanced override save is already running."
+            : isApplyingPreset
+              ? "Preset apply is already running for this profile."
+              : selectedPresetId.length === 0
+                ? "Choose a curated preset before applying."
+                : selectedPresetUnavailable
+                  ? `Preset ${selectedPresetId} is not in the loaded curated preset list. Choose an available preset before applying.`
+                  : null);
+  const advancedDisabledReason = runtimeProtectionReason
+    ?? (isLoadingPresets
+      ? "Curated preset choices are still loading."
+      : isValidatingSaved
+        ? "Saved identity validation is still running."
+        : isCheckingIdentity
+          ? "Identity draft check is already running."
+          : isApplyingPreset
+            ? "Preset apply is already running for this profile."
+            : isSaving
+              ? "An advanced override save is already running."
+              : fieldErrorCount > 0
+                ? `Fix ${fieldErrorCount} field error${fieldErrorCount === 1 ? "" : "s"} before checking or saving.`
+                : null);
   const canApplyPreset = applyDisabledReason === null;
+  const canRunAdvancedAction = advancedDisabledReason === null;
 
   return (
     <section
@@ -2110,10 +2370,10 @@ function IdentityConfigurationPanel({
       <div className="identity-config-panel__header">
         <div>
           <p className="signal-label">Profile identity configuration</p>
-          <h4>{draft.label}</h4>
+          <h4>{draftState.values.label || draftIdentity.label}</h4>
           <p>
-            This panel reads the saved S02 identity, loads curated presets only after opening, and keeps warnings scoped
-            to this profile.
+            This panel reads the saved S02 identity, loads curated presets only after opening, validates advanced drafts
+            through the sidecar, and keeps warnings scoped to this profile.
           </p>
         </div>
         <button type="button" className="button--secondary" onClick={onClose} aria-label="Close identity configuration">
@@ -2124,10 +2384,12 @@ function IdentityConfigurationPanel({
       <dl className="metric-list metric-list--inline identity-config-observability" aria-label={`${profile.name} identity observability`}>
         <Metric label="Identity configuration phase" value={`${state.phase} · ${IDENTITY_CONFIG_PHASE_LABELS[state.phase]}`} />
         <Metric label="Current action" value={state.currentAction ? IDENTITY_CONFIG_ACTION_LABELS[state.currentAction] : "No active identity action"} />
-        <Metric label="Draft label" value={draft.label} />
-        <Metric label="Draft preset" value={draft.presetId ? `Preset ${draft.presetId}` : "No preset"} />
+        <Metric label="Draft label" value={draftState.values.label} />
+        <Metric label="Draft preset" value={draftIdentity.presetId ? `Preset ${draftIdentity.presetId}` : "No preset"} />
         <Metric label="Preset count" value={presets.length} />
         <Metric label="Saved warnings" value={state.savedWarnings.length} />
+        <Metric label="Field errors" value={fieldErrorCount} />
+        <Metric label="Expected values" value={formatIdentityExpectedValueSummary(draftIdentity)} />
         <Metric label="Last identity detailRef" value={state.error?.error.detailRef} />
       </dl>
 
@@ -2136,14 +2398,24 @@ function IdentityConfigurationPanel({
           Loading curated identity presets through the typed sidecar client…
         </div>
       ) : null}
-      {isValidating ? (
+      {isValidatingSaved ? (
         <div className="identity-status" role="status" aria-live="polite" aria-atomic="true">
           Validating the saved identity through the typed sidecar client…
+        </div>
+      ) : null}
+      {isCheckingIdentity ? (
+        <div className="identity-status" role="status" aria-live="polite" aria-atomic="true">
+          Checking the advanced identity draft through the typed sidecar client…
         </div>
       ) : null}
       {isApplyingPreset ? (
         <div className="identity-status" role="status" aria-live="polite" aria-atomic="true">
           Applying the selected preset through the typed sidecar client…
+        </div>
+      ) : null}
+      {isSaving ? (
+        <div className="identity-status" role="status" aria-live="polite" aria-atomic="true">
+          Saving the advanced identity override through the typed sidecar client…
         </div>
       ) : null}
 
@@ -2158,7 +2430,7 @@ function IdentityConfigurationPanel({
             <select
               id={presetSelectId}
               value={selectedPresetId}
-              disabled={isLoadingPresets || isApplyingPreset}
+              disabled={isIdentityBusy}
               aria-describedby={presetApplyHintId}
               onChange={(event) => onPresetSelect(profile.id, event.target.value)}
             >
@@ -2180,6 +2452,53 @@ function IdentityConfigurationPanel({
         <p id={presetApplyHintId} className="identity-muted-copy" role="status" aria-live="polite">
           {applyDisabledReason
             ?? `${selectedPreset?.label ?? "The selected preset"} will be saved through the typed identity mutation and used on the next Chromium launch.`}
+        </p>
+      </section>
+
+      <section className="identity-advanced-editor" aria-label={`${profile.name} advanced identity editor`}>
+        <div className="identity-panel-subhead">
+          <strong>Advanced identity override</strong>
+          <span>{fieldErrorCount ? `${fieldErrorCount} field error${fieldErrorCount === 1 ? "" : "s"}` : "Locally parseable draft"}</span>
+        </div>
+        <div className="identity-label-field">
+          <label htmlFor={draftLabelId}>Advanced identity label</label>
+          <input
+            id={draftLabelId}
+            value={draftState.values.label}
+            maxLength={128}
+            disabled={isIdentityBusy}
+            aria-invalid={Boolean(draftLabelError)}
+            aria-describedby={draftLabelError ? `${draftLabelHintId} ${draftLabelErrorId}` : draftLabelHintId}
+            onChange={(event) => onDraftLabelChange(profile.id, event.target.value)}
+          />
+          <p id={draftLabelHintId} className="identity-field-hint">
+            Advanced edits clear curated preset identity; edit this label if you want a custom name preserved on save.
+          </p>
+          {draftLabelError ? (
+            <p id={draftLabelErrorId} className="identity-field-error" role="alert">
+              {draftLabelError}
+            </p>
+          ) : null}
+        </div>
+        <IdentitySurfaceControlList
+          controls={controls}
+          draft={draftState}
+          isBusy={isIdentityBusy}
+          profile={profile}
+          onFieldChange={onDraftFieldChange}
+          onSurfaceModeChange={onSurfaceModeChange}
+        />
+        <div className="identity-advanced-actions">
+          <button type="button" className="button--secondary" disabled={!canRunAdvancedAction} onClick={() => onCheckIdentity(profile)}>
+            {isCheckingIdentity ? "Checking identity…" : "Check identity"}
+          </button>
+          <button type="button" disabled={!canRunAdvancedAction} onClick={() => onSaveIdentity(profile)}>
+            {isSaving ? "Saving override…" : "Save advanced override"}
+          </button>
+        </div>
+        <p id={advancedActionHintId} className="identity-muted-copy" role="status" aria-live="polite">
+          {advancedDisabledReason
+            ?? "Warnings from Check identity are visible but do not block Save advanced override; hard errors preserve the draft and previous profile truth."}
         </p>
       </section>
 
@@ -2214,16 +2533,14 @@ function IdentityConfigurationPanel({
         )}
       </section>
 
-      {state.applySuccess ? <IdentityApplySuccessFeedback state={state.applySuccess} /> : null}
+      {state.applySuccess ? <IdentityConfigSuccessFeedback state={state.applySuccess} /> : null}
 
       {state.savedWarnings.length ? (
         <IdentityWarningList
-          title={state.applySuccess ? "Preset apply warnings" : "Saved identity warnings"}
+          title={state.applySuccess ? getIdentityWarningTitle(state.applySuccess.action) : "Saved identity warnings"}
           warnings={state.savedWarnings}
         />
       ) : null}
-
-      <IdentitySurfaceControlList controls={controls} profile={profile} />
     </section>
   );
 }
@@ -2253,17 +2570,22 @@ function IdentityConfigErrorFeedback({
   );
 }
 
-function IdentityApplySuccessFeedback({ state }: { state: IdentityConfigSuccess }) {
-  const warningCopy = state.warningCount === 0
-    ? "Preset applied with 0 sidecar warnings. This records the configured identity for the next Chromium launch; it does not promise full fingerprint protection."
-    : `Preset applied with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Warnings are non-blocking and should be reviewed before the next launch.`;
+function IdentityConfigSuccessFeedback({ state }: { state: IdentityConfigSuccess }) {
+  const warningCopy = formatIdentitySuccessCopy(state);
+  const heading = state.action === "apply-preset"
+    ? "Preset applied for next launch."
+    : state.action === "check"
+      ? "Identity check completed."
+      : "Advanced override saved for next launch.";
 
   return (
     <section className="identity-success-feedback" role="status" aria-live="polite" aria-atomic="true">
-      <strong>Preset applied for next launch.</strong>
+      <strong>{heading}</strong>
       <p>{warningCopy}</p>
       <dl className="metric-list metric-list--inline">
-        <Metric label="Preset" value={`Preset ${state.presetId}`} />
+        <Metric label="Action" value={IDENTITY_CONFIG_ACTION_LABELS[state.action]} />
+        <Metric label="Label" value={state.label} />
+        <Metric label="Preset" value={state.presetId ? `Preset ${state.presetId}` : "No preset"} />
         <Metric label="Warnings" value={state.warningCount} />
         <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
       </dl>
@@ -2296,39 +2618,193 @@ function IdentityWarningList({ title, warnings }: { title?: string; warnings: Id
   );
 }
 
-function IdentitySurfaceControlList({ controls, profile }: { controls: ReturnType<typeof getIdentitySurfaceControls>; profile: ProfileRecord }) {
+function IdentitySurfaceControlList({
+  controls,
+  draft,
+  isBusy,
+  profile,
+  onFieldChange,
+  onSurfaceModeChange,
+}: {
+  controls: ReturnType<typeof getIdentitySurfaceControls>;
+  draft: IdentityDraftState;
+  isBusy: boolean;
+  profile: ProfileRecord;
+  onFieldChange: (profileId: string, path: Exclude<IdentityDraftFieldPath, "label">, value: string) => void;
+  onSurfaceModeChange: (profileId: string, surface: IdentitySurface, mode: string) => void;
+}) {
   return (
     <section className="identity-surface-controls" aria-label={`${profile.name} supported identity controls`}>
       <div className="identity-panel-subhead">
         <strong>Supported surface controls</strong>
-        <span>Draft seeded from saved identity</span>
+        <span>Only supported modes are offered per surface</span>
       </div>
       <div className="identity-surface-controls__items">
-        {controls.map((control) => (
-          <fieldset key={control.surface} className="identity-mode-group">
-            <legend>{control.label} mode</legend>
-            {control.options.map((option) => {
-              const optionId = `identity-${profile.id}-${control.surface}-${option.value}`;
-              return (
-                <label key={option.value} htmlFor={optionId} className="identity-mode-option">
-                  <input
-                    id={optionId}
-                    type="radio"
-                    name={`identity-${profile.id}-${control.surface}`}
-                    value={option.value}
-                    checked={control.mode === option.value}
-                    readOnly
-                  />
-                  <span>{option.label}</span>
-                  <small>{option.description}</small>
-                </label>
-              );
-            })}
-          </fieldset>
-        ))}
+        {controls.map((control) => {
+          const modeSelectId = `identity-${profile.id}-${control.surface}-mode`;
+          const modeHintId = `${modeSelectId}-hint`;
+          return (
+            <details key={control.surface} className="identity-surface-section" open>
+              <summary>
+                <span>{control.label}</span>
+                <span>{control.modeLabel}</span>
+              </summary>
+              <div className="identity-surface-section__body">
+                <div className="identity-field identity-field--mode">
+                  <label htmlFor={modeSelectId}>{control.label} mode</label>
+                  <select
+                    id={modeSelectId}
+                    value={control.mode}
+                    disabled={isBusy}
+                    aria-describedby={modeHintId}
+                    onChange={(event) => onSurfaceModeChange(profile.id, control.surface, event.target.value)}
+                  >
+                    {control.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p id={modeHintId} className="identity-field-hint">
+                    {control.options.map((option) => `${option.label}: ${option.description}`).join(" ")}
+                  </p>
+                </div>
+                {control.fields.length ? (
+                  <div className="identity-field-grid">
+                    {control.fields.map((field) => (
+                      <IdentityDraftFieldControl
+                        key={field.path}
+                        draft={draft}
+                        field={field}
+                        isBusy={isBusy}
+                        profile={profile}
+                        onFieldChange={onFieldChange}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="identity-muted-copy">
+                    {control.label} is using real host values; no saved advanced fields are sent for this surface.
+                  </p>
+                )}
+              </div>
+            </details>
+          );
+        })}
       </div>
     </section>
   );
+}
+
+function IdentityDraftFieldControl({
+  draft,
+  field,
+  isBusy,
+  profile,
+  onFieldChange,
+}: {
+  draft: IdentityDraftState;
+  field: IdentityDraftFieldDescriptor;
+  isBusy: boolean;
+  profile: ProfileRecord;
+  onFieldChange: (profileId: string, path: Exclude<IdentityDraftFieldPath, "label">, value: string) => void;
+}) {
+  const fieldId = `identity-${profile.id}-${field.path.replace(/\./g, "-")}`;
+  const hintId = `${fieldId}-hint`;
+  const errorId = `${fieldId}-error`;
+  const error = draft.errors[field.path];
+  const describedBy = error ? `${hintId} ${errorId}` : hintId;
+  const value = draft.values[field.path];
+
+  return (
+    <div className={`identity-field identity-field--${field.kind}`}>
+      <label htmlFor={fieldId}>{field.label}</label>
+      {field.kind === "textarea" ? (
+        <textarea
+          id={fieldId}
+          value={value}
+          rows={3}
+          maxLength={field.maxLength}
+          disabled={isBusy}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onFieldChange(profile.id, field.path, event.target.value)}
+        />
+      ) : field.kind === "boolean" ? (
+        <select
+          id={fieldId}
+          value={value}
+          disabled={isBusy}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onFieldChange(profile.id, field.path, event.target.value)}
+        >
+          <option value="false">False</option>
+          <option value="true">True</option>
+        </select>
+      ) : field.kind === "webrtc-policy" ? (
+        <select
+          id={fieldId}
+          value={value}
+          disabled={isBusy}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onFieldChange(profile.id, field.path, event.target.value)}
+        >
+          <option value="real">Real</option>
+          <option value="disableNonProxiedUdp">Disable non-proxied UDP</option>
+          <option value="block">Block WebRTC</option>
+        </select>
+      ) : (
+        <input
+          id={fieldId}
+          type="text"
+          inputMode={field.kind === "integer" ? "numeric" : field.kind === "number" ? "decimal" : undefined}
+          value={value}
+          maxLength={field.maxLength}
+          disabled={isBusy}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onFieldChange(profile.id, field.path, event.target.value)}
+        />
+      )}
+      <p id={hintId} className="identity-field-hint">
+        {field.description}
+        {field.min !== undefined && field.max !== undefined ? ` Supported range: ${field.min}–${field.max}.` : ""}
+      </p>
+      {error ? (
+        <p id={errorId} className="identity-field-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function getIdentityWarningTitle(action: IdentityConfigSuccess["action"]): string {
+  if (action === "apply-preset") {
+    return "Preset apply warnings";
+  }
+  if (action === "check") {
+    return "Identity check warnings";
+  }
+  return "Saved override warnings";
+}
+
+function formatIdentitySuccessCopy(state: IdentityConfigSuccess): string {
+  if (state.action === "apply-preset") {
+    return state.warningCount === 0
+      ? "Preset applied with 0 sidecar warnings. This records the configured identity for the next Chromium launch; it does not promise full fingerprint protection."
+      : `Preset applied with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Warnings are non-blocking and should be reviewed before the next launch.`;
+  }
+  if (state.action === "check") {
+    return state.warningCount === 0
+      ? "Identity check completed with 0 sidecar warnings. Save is still an explicit profile-store mutation."
+      : `Identity check completed with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Warnings are visible and saveable.`;
+  }
+  return state.warningCount === 0
+    ? "Advanced override saved with 0 sidecar warnings and will be restored from the profile store on the next startup."
+    : `Advanced override saved with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Warnings are non-blocking and the profile-store snapshot is now visible.`;
 }
 
 function SystemStatusPanel({

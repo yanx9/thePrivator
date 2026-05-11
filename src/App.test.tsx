@@ -804,6 +804,261 @@ describe("ThePrivator profile library UI", () => {
     });
   });
 
+  it("renders only supported advanced mode options per identity surface", async () => {
+    const profile = profileRecord({ name: "Research", identity: defaultIdentity({ label: "Advanced source" }) });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(profile.identity, [])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    const canvasMode = within(panel).getByLabelText(/canvas mode/i) as HTMLSelectElement;
+    const webglMode = within(panel).getByLabelText(/webgl mode/i) as HTMLSelectElement;
+
+    expect(Array.from(canvasMode.options).map((option) => option.value)).toEqual(["real", "noise"]);
+    expect(Array.from(webglMode.options).map((option) => option.value)).toEqual(["real", "masked", "custom"]);
+    expect(Array.from(canvasMode.options).map((option) => option.value)).not.toContain("custom");
+    expect(Array.from(webglMode.options).map((option) => option.value)).not.toContain("noise");
+  });
+
+  it("shows local field errors and blocks sidecar writes until the advanced draft is parseable", async () => {
+    const profile = profileRecord({ name: "Research", identity: defaultIdentity({ label: "Parse source" }) });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(profile.identity, [])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/navigator mode/i), { target: { value: "custom" } });
+    fireEvent.change(within(panel).getByLabelText(/locale mode/i), { target: { value: "custom" } });
+    const hardwareConcurrency = within(panel).getByLabelText(/hardware concurrency/i);
+    fireEvent.change(hardwareConcurrency, { target: { value: "9007199254740993" } });
+    fireEvent.change(within(panel).getByLabelText(/languages/i), { target: { value: "en-US, , de-DE" } });
+    fireEvent.change(within(panel).getByLabelText(/webrtc policy/i), { target: { value: "block" } });
+
+    expect(hardwareConcurrency).toHaveAttribute("aria-invalid", "true");
+    expect(panel).toHaveTextContent(/must be a safe whole number/i);
+    expect(panel).toHaveTextContent(/without blank entries/i);
+    expect(panel).toHaveTextContent(/must be real when WebRTC mode is real/i);
+    expect(within(panel).getByRole("button", { name: /check identity/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save advanced override/i })).toBeDisabled();
+    expect(commandCalls("identity_validate")).toHaveLength(1);
+    expect(commandCalls("profiles_identity_update")).toHaveLength(0);
+  });
+
+  it("checks and saves a warning-bearing advanced override without blocking persistence", async () => {
+    const savedIdentity = defaultIdentity({
+      label: "Balanced desktop",
+      presetId: "balanced-desktop",
+      screen: {
+        mode: "masked",
+        width: 1920,
+        height: 1080,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        colorDepth: 24,
+        pixelRatio: 1,
+      },
+      locale: { mode: "custom", locale: "en-US", languages: ["en-US", "en"], timezoneId: "UTC" },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    const checkedIdentity = defaultIdentity({
+      label: "Custom identity override",
+      presetId: null,
+      screen: {
+        mode: "masked",
+        width: 3200,
+        height: 1080,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        colorDepth: 24,
+        pixelRatio: 1,
+      },
+      locale: { mode: "custom", locale: "en-US", languages: ["en-US", "en"], timezoneId: "UTC" },
+    });
+    const warning = identityWarning({
+      code: "IDENTITY_VIEWPORT_MISMATCH",
+      message: "Screen width and viewport width are unusual together.",
+      surface: "screen",
+      path: "screen.viewportWidth",
+    });
+    const updatedProfile = profileRecord({ id: profile.id, name: "Research", identity: checkedIdentity, updatedAt: "2026-05-04T18:20:00.000Z" });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(checkedIdentity, [warning])))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([updatedProfile], { profile: updatedProfile, warnings: [warning] })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/screen width/i), { target: { value: "3200" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /check identity/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Identity check completed with 1 warning/i));
+    expect(panel).toHaveTextContent(/Warnings are visible and saveable/i);
+    expect(panel).toHaveTextContent(/IDENTITY_VIEWPORT_MISMATCH/i);
+    expect(within(panel).getByRole("button", { name: /save advanced override/i })).toBeEnabled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: /save advanced override/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Advanced override saved with 1 warning/i));
+    expect(panel).toHaveTextContent(/Saved override warnings/i);
+    expect(card).toHaveTextContent(/Custom identity override/i);
+    expect(card).toHaveTextContent(/No preset/i);
+    expect(commandCalls("profiles_identity_update")).toHaveLength(1);
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_update", {
+      profileId: profile.id,
+      identity: expect.objectContaining({
+        label: "Custom identity override",
+        presetId: null,
+        screen: expect.objectContaining({ mode: "masked", width: 3200 }),
+        locale: expect.objectContaining({ languages: ["en-US", "en"] }),
+      }),
+    });
+  });
+
+  it("renders typed validation errors with detailRef while preserving the draft and avoiding writes", async () => {
+    const savedIdentity = defaultIdentity({
+      label: "Unsupported source",
+      screen: {
+        mode: "masked",
+        width: 1920,
+        height: 1080,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        colorDepth: 24,
+        pixelRatio: 1,
+      },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockRejectedValueOnce(profileError("IDENTITY_UNSUPPORTED_MODE", "The identity mode is not supported by this surface.", "sidecar-unsupported-detail"));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/advanced identity label/i), { target: { value: "Lab draft" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /check identity/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_UNSUPPORTED_MODE/i));
+    expect(panel).toHaveTextContent(/sidecar-unsupported-detail/i);
+    expect(within(panel).getByLabelText(/advanced identity label/i)).toHaveValue("Lab draft");
+    expect(commandCalls("profiles_identity_update")).toHaveLength(0);
+  });
+
+  it("keeps previous profile truth visible when save returns a typed invalid identity error", async () => {
+    const savedIdentity = defaultIdentity({
+      label: "Original identity",
+      presetId: null,
+      screen: {
+        mode: "masked",
+        width: 1920,
+        height: 1080,
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        colorDepth: 24,
+        pixelRatio: 1,
+      },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockRejectedValueOnce(profileError("IDENTITY_INVALID", "The advanced identity override failed validation.", "sidecar-save-detail"));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const summary = within(card).getByLabelText(/research saved identity summary/i);
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/Preset count4/i));
+
+    fireEvent.change(within(panel).getByLabelText(/screen width/i), { target: { value: "3200" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /save advanced override/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_INVALID/i));
+    expect(panel).toHaveTextContent(/The advanced identity override failed validation/i);
+    expect(panel).toHaveTextContent(/sidecar-save-detail/i);
+    expect(within(panel).getByLabelText(/screen width/i)).toHaveValue("3200");
+    expect(summary).toHaveTextContent(/Original identity/i);
+    expect(summary).not.toHaveTextContent(/Custom identity override/i);
+    expect(commandCalls("profiles_identity_update")).toHaveLength(1);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
+  it("restores a saved advanced override from a fresh startup profile list", async () => {
+    const savedOverride = defaultIdentity({
+      label: "Lab viewport override",
+      presetId: null,
+      browser: { mode: "custom", userAgent: "Mozilla/5.0 Lab Override" },
+      screen: {
+        mode: "custom",
+        width: 2560,
+        height: 1440,
+        viewportWidth: 1600,
+        viewportHeight: 1000,
+        colorDepth: 24,
+        pixelRatio: 1.25,
+      },
+      canvas: { mode: "noise", noiseSeed: 777 },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedOverride });
+    mockStartup([profile]);
+
+    const firstRender = render(<App />);
+    const firstCard = await screen.findByRole("listitem", { name: /research/i });
+    expect(firstCard).toHaveTextContent(/Lab viewport override/i);
+    expect(firstCard).toHaveTextContent(/Browser custom/i);
+    expect(firstCard).toHaveTextContent(/Screen custom/i);
+    expect(firstCard).toHaveTextContent(/Canvas noise/i);
+
+    firstRender.unmount();
+    mockInvoke.mockReset();
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedOverride, [])));
+
+    render(<App />);
+    const restartedCard = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(restartedCard).getByRole("button", { name: /configure identity for research/i }));
+    const restartedPanel = await within(restartedCard).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(restartedPanel).toHaveTextContent(/Preset count4/i));
+
+    expect(within(restartedPanel).getByLabelText(/advanced identity label/i)).toHaveValue("Lab viewport override");
+    expect(within(restartedPanel).getByLabelText(/user agent/i)).toHaveValue("Mozilla/5.0 Lab Override");
+    expect(within(restartedPanel).getByLabelText(/screen width/i)).toHaveValue("2560");
+    expect(within(restartedPanel).getByLabelText(/canvas noise seed/i)).toHaveValue("777");
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
   it("renders startup profile load failures as actionable recovery without claiming an empty store", async () => {
     mockInvoke
       .mockResolvedValueOnce(healthEnvelope())
@@ -1561,6 +1816,7 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("listIdentityPresets");
     expect(source).toContain("validateIdentity");
     expect(source).toContain("applyProfileIdentityPreset");
+    expect(source).toContain("updateProfileIdentity");
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);

@@ -105,6 +105,7 @@ button:active:not(:disabled) {
 
 button:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 select:focus-visible {
   outline: 2px solid #f4c581;
   outline-offset: 3px;
@@ -112,12 +113,14 @@ select:focus-visible {
 
 button:disabled,
 input:disabled,
+textarea:disabled,
 select:disabled {
   cursor: not-allowed;
   opacity: 0.52;
 }
 
 input,
+textarea,
 select {
   width: 100%;
   min-width: 0;
@@ -134,8 +137,15 @@ select {
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: rgba(211, 197, 167, 0.58);
+}
+
+textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 select {
@@ -156,7 +166,9 @@ select {
     100% 100%;
 }
 
-input[aria-invalid="true"] {
+input[aria-invalid="true"],
+textarea[aria-invalid="true"],
+select[aria-invalid="true"] {
   border-color: rgba(230, 120, 95, 0.78);
   box-shadow:
     0 0 0 4px rgba(230, 120, 95, 0.12),
@@ -988,6 +1000,7 @@ p {
 .identity-preset-list,
 .identity-warning-list,
 .identity-surface-controls,
+.identity-advanced-editor,
 .identity-error-feedback,
 .identity-success-feedback {
   padding: 14px;
@@ -1102,6 +1115,107 @@ p {
   width: 20px;
   min-height: 20px;
   accent-color: var(--sage);
+}
+
+.identity-advanced-editor,
+.identity-label-field,
+.identity-surface-section__body,
+.identity-field,
+.identity-field-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.identity-label-field,
+.identity-surface-section,
+.identity-field {
+  min-width: 0;
+}
+
+.identity-advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+
+.identity-surface-section {
+  overflow: clip;
+  border: 1px solid rgba(242, 234, 219, 0.11);
+  border-radius: 18px;
+  background:
+    linear-gradient(145deg, rgba(242, 234, 219, 0.04), transparent 65%),
+    rgba(0, 0, 0, 0.13);
+}
+
+.identity-surface-section summary {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  cursor: pointer;
+  color: var(--ink);
+  font-weight: 850;
+  list-style-position: inside;
+}
+
+.identity-surface-section summary span:last-child {
+  border: 1px solid rgba(154, 178, 111, 0.32);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  color: #dce9bb;
+  background: rgba(154, 178, 111, 0.09);
+  font-size: 0.78rem;
+}
+
+.identity-surface-section__body {
+  padding: 0 14px 14px;
+}
+
+.identity-field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.identity-field--textarea,
+.identity-field--language-list,
+.identity-field--mode {
+  grid-column: 1 / -1;
+}
+
+.identity-field label,
+.identity-label-field label {
+  font-size: 0.9rem;
+}
+
+.identity-field-hint,
+.identity-field-error {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.identity-field-hint {
+  color: var(--muted);
+}
+
+.identity-field-error {
+  color: #ffe0d7;
+  font-weight: 800;
+}
+
+.identity-field:has([aria-invalid="true"]),
+.identity-label-field:has([aria-invalid="true"]) {
+  border-color: rgba(230, 120, 95, 0.44);
+}
+
+.identity-field select,
+.identity-field input,
+.identity-field textarea,
+.identity-label-field input {
+  background-color: rgba(0, 0, 0, 0.24);
 }
 
 .runtime-panel {

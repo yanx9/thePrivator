@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_ADVANCED_IDENTITY_LABEL,
+  formatIdentityExpectedValueSummary,
   formatIdentitySummary,
+  getIdentitySurfaceControls,
   getSupportedIdentityModeOptions,
+  createIdentityDraftState,
+  parseIdentityDraftState,
   seedInitialIdentityDraft,
+  updateIdentityDraftField,
+  updateIdentityDraftLabel,
+  updateIdentityDraftSurfaceMode,
 } from "./identityControls";
+import type { IdentityDraftFieldValues, IdentityDraftState } from "./identityControls";
 import type { IdentitySurface, ProfileIdentity, ProfileRecord } from "./sidecar/types";
 
 const maskingSurfaces: IdentitySurface[] = ["browser", "navigator", "screen", "locale", "webgl", "webrtc"];
@@ -110,4 +119,110 @@ describe("identity control helpers", () => {
     }
     expect(savedIdentity.label).toBe("Research laptop");
   });
+
+  it("adds advanced field descriptors only for fields supported by the selected mode", () => {
+    const controls = getIdentitySurfaceControls(identity());
+    const browser = controls.find((control) => control.surface === "browser");
+    const canvas = controls.find((control) => control.surface === "canvas");
+    const audio = controls.find((control) => control.surface === "audio");
+
+    expect(browser?.fields.map((field) => field.path)).toContain("browser.userAgent");
+    expect(canvas?.fields.map((field) => field.path)).toEqual(["canvas.noiseSeed"]);
+    expect(audio?.fields).toEqual([]);
+  });
+
+  it("clears preset identity and seeds a labeled custom override when an advanced mode changes", () => {
+    const draft = updateIdentityDraftSurfaceMode(createIdentityDraftState(profileRecord(identity({ browser: { mode: "real" } }))), "browser", "custom");
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.identity.presetId).toBeNull();
+      expect(parsed.identity.label).toBe(DEFAULT_ADVANCED_IDENTITY_LABEL);
+      expect(parsed.identity.browser.mode).toBe("custom");
+    }
+  });
+
+  it("preserves an intentionally edited label while clearing preset identity", () => {
+    const profile = profileRecord(identity());
+    let draft = updateIdentityDraftLabel({ identity: profile.identity, values: seedValues(profile.identity), errors: {}, labelEdited: false }, "Lab override");
+    draft = updateIdentityDraftField(draft, "navigator.hardwareConcurrency", "12");
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.identity.label).toBe("Lab override");
+      expect(parsed.identity.presetId).toBeNull();
+      expect(parsed.identity.navigator.mode).toBe("custom");
+      if (parsed.identity.navigator.mode !== "real") {
+        expect(parsed.identity.navigator.hardwareConcurrency).toBe(12);
+      }
+    }
+  });
+
+  it("guards unsupported modes and malformed local fields before a sidecar payload is built", () => {
+    const profile = profileRecord(identity({ webrtc: { mode: "real", policy: "real" } }));
+    let draft: IdentityDraftState = { identity: profile.identity, values: seedValues(profile.identity), errors: {}, labelEdited: false };
+
+    draft = updateIdentityDraftSurfaceMode(draft, "canvas", "custom");
+    expect(draft.errors["canvas.mode"]).toMatch(/does not support custom mode/i);
+
+    draft = updateIdentityDraftField(draft, "navigator.hardwareConcurrency", "9007199254740993");
+    draft = updateIdentityDraftField(draft, "locale.languages", "en-US, , de-DE");
+    draft = updateIdentityDraftField(draft, "webrtc.policy", "block");
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.errors["navigator.hardwareConcurrency"]).toMatch(/safe whole number/i);
+      expect(parsed.errors["locale.languages"]).toMatch(/without blank entries/i);
+      expect(parsed.errors["webrtc.policy"]).toMatch(/must be real when WebRTC mode is real/i);
+    }
+  });
+
+  it("formats expected values for S05 verifier wording without leaking implementation paths", () => {
+    const summary = formatIdentityExpectedValueSummary(identity());
+
+    expect(summary).toContain("Browser: Masked UA Mozilla/5.0 Test");
+    expect(summary).toContain("Navigator: Custom Linux x86_64, 8 cores, 8 GiB");
+    expect(summary).toContain("Locale: Custom en-US, en-US/en, UTC");
+    expect(summary).toContain("WebRTC: Custom WebRTC policy block");
+  });
 });
+
+function seedValues(savedIdentity: ProfileIdentity): IdentityDraftFieldValues {
+  return {
+    label: savedIdentity.label,
+    "browser.userAgent": savedIdentity.browser.mode === "real" ? "Mozilla/5.0 Test" : savedIdentity.browser.userAgent,
+    "browser.clientHints.platform": "",
+    "browser.clientHints.platformVersion": "",
+    "browser.clientHints.architecture": "",
+    "browser.clientHints.bitness": "",
+    "browser.clientHints.model": "",
+    "browser.clientHints.mobile": "false",
+    "navigator.platform": savedIdentity.navigator.mode === "real" ? "Linux x86_64" : savedIdentity.navigator.platform,
+    "navigator.hardwareConcurrency": savedIdentity.navigator.mode === "real" ? "8" : String(savedIdentity.navigator.hardwareConcurrency),
+    "navigator.deviceMemory": savedIdentity.navigator.mode === "real" ? "8" : String(savedIdentity.navigator.deviceMemory),
+    "navigator.uaPlatform": savedIdentity.navigator.mode === "real" ? "Linux" : savedIdentity.navigator.uaPlatform,
+    "navigator.uaPlatformVersion": savedIdentity.navigator.mode === "real" ? "" : savedIdentity.navigator.uaPlatformVersion,
+    "navigator.uaArchitecture": savedIdentity.navigator.mode === "real" ? "x86" : savedIdentity.navigator.uaArchitecture,
+    "navigator.uaMobile": savedIdentity.navigator.mode === "real" ? "false" : String(savedIdentity.navigator.uaMobile),
+    "screen.width": savedIdentity.screen.mode === "real" ? "1920" : String(savedIdentity.screen.width),
+    "screen.height": savedIdentity.screen.mode === "real" ? "1080" : String(savedIdentity.screen.height),
+    "screen.viewportWidth": savedIdentity.screen.mode === "real" ? "1440" : String(savedIdentity.screen.viewportWidth),
+    "screen.viewportHeight": savedIdentity.screen.mode === "real" ? "900" : String(savedIdentity.screen.viewportHeight),
+    "screen.colorDepth": savedIdentity.screen.mode === "real" ? "24" : String(savedIdentity.screen.colorDepth),
+    "screen.pixelRatio": savedIdentity.screen.mode === "real" ? "1" : String(savedIdentity.screen.pixelRatio),
+    "locale.locale": savedIdentity.locale.mode === "real" ? "en-US" : savedIdentity.locale.locale,
+    "locale.languages": savedIdentity.locale.mode === "real" ? "en-US, en" : savedIdentity.locale.languages.join(", "),
+    "locale.timezoneId": savedIdentity.locale.mode === "real" ? "UTC" : savedIdentity.locale.timezoneId,
+    "canvas.noiseSeed": savedIdentity.canvas.mode === "real" ? "1001" : String(savedIdentity.canvas.noiseSeed),
+    "audio.noiseSeed": savedIdentity.audio.mode === "real" ? "2001" : String(savedIdentity.audio.noiseSeed),
+    "webgl.vendor": savedIdentity.webgl.mode === "real" ? "Intel Inc." : savedIdentity.webgl.vendor,
+    "webgl.renderer": savedIdentity.webgl.mode === "real" ? "Mesa Intel" : savedIdentity.webgl.renderer,
+    "webgl.noiseSeed": savedIdentity.webgl.mode === "real" || savedIdentity.webgl.noiseSeed === undefined ? "" : String(savedIdentity.webgl.noiseSeed),
+    "webrtc.policy": String(savedIdentity.webrtc.policy),
+  };
+}
