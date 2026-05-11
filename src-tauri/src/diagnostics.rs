@@ -699,6 +699,22 @@ fn is_safe_short_string(value: &str) -> bool {
         "stdout",
         "stderr",
         "params",
+        "authorization",
+        "credential",
+        "credentials",
+        "password",
+        "proxyauthorization",
+        "proxypass",
+        "proxypassword",
+        "proxyuser",
+        "proxyusername",
+        "username",
+        "proxy-authorization",
+        "proxy_authorization",
+        "proxy-pass",
+        "proxy-password",
+        "proxy-user",
+        "proxy-username",
         "proxy_user",
         "proxy_pass",
         "token=",
@@ -834,6 +850,39 @@ mod tests {
         assert_eq!(outcome.written, 1);
         assert_eq!(row["method"], "profiles.identity.applyPreset");
         assert!(!log_text.contains("params"));
+    }
+
+    #[test]
+    fn proxy_secret_marker_detail_refs_are_rejected_without_persistence() {
+        let store = temp_store();
+        let outcome = store.append_events([
+            json!({
+                "event": "sidecar.request",
+                "requestId": "bridge-1",
+                "method": "proxy.validate",
+                "status": "error",
+                "durationMs": 2.5,
+                "errorCode": "PROXY_INVALID",
+                "detailRef": "sidecar-proxy-user-sentinel"
+            }),
+            json!({
+                "event": "sidecar.request",
+                "requestId": "bridge-2",
+                "method": "profiles.proxy.update",
+                "status": "error",
+                "durationMs": 3.0,
+                "errorCode": "PROXY_INVALID",
+                "detailRef": "sidecar-proxypassword-sentinel"
+            }),
+        ]);
+
+        assert_eq!(outcome.written, 0);
+        assert_eq!(outcome.skipped, 2);
+        assert!(!store.log_path().exists());
+        assert_eq!(
+            store.lookup("sidecar-proxy-user-sentinel").reason,
+            "invalid-detail-ref"
+        );
     }
 
     #[test]

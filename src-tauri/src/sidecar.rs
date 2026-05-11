@@ -160,6 +160,15 @@ pub async fn identity_validate(
 }
 
 #[tauri::command]
+pub async fn proxy_validate(
+    app: tauri::AppHandle,
+    proxy: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let runner = TauriSidecarRunner::new(app);
+    proxy_validate_with_runner(&runner, proxy).await
+}
+
+#[tauri::command]
 pub async fn identity_audit_plan(
     app: tauri::AppHandle,
     profile_id: String,
@@ -200,6 +209,17 @@ pub async fn profiles_identity_update(
     let store_root = resolve_profile_store_root(&app)?;
     let runner = TauriSidecarRunner::new(app);
     profiles_identity_update_with_runner(&runner, store_root, profile_id, identity).await
+}
+
+#[tauri::command]
+pub async fn profiles_proxy_update(
+    app: tauri::AppHandle,
+    profile_id: String,
+    proxy: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_proxy_update_with_runner(&runner, store_root, profile_id, proxy).await
 }
 
 #[tauri::command]
@@ -324,6 +344,20 @@ pub async fn identity_validate_with_runner<R: SidecarRunner>(
     .await
 }
 
+pub async fn proxy_validate_with_runner<R: SidecarRunner>(
+    runner: &R,
+    proxy: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "proxy.validate",
+        json!({
+            "proxy": proxy,
+        }),
+    )
+    .await
+}
+
 async fn identity_audit_plan_with_runner<R: SidecarRunner>(
     runner: &R,
     store_root: String,
@@ -390,6 +424,24 @@ async fn profiles_identity_update_with_runner<R: SidecarRunner>(
             "storeRoot": store_root,
             "profileId": profile_id,
             "identity": identity,
+        }),
+    )
+    .await
+}
+
+async fn profiles_proxy_update_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    proxy: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "profiles.proxy.update",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "proxy": proxy,
         }),
     )
     .await
@@ -1289,6 +1341,13 @@ mod tests {
         tauri::async_runtime::block_on(identity_validate_with_runner(runner, identity))
     }
 
+    fn run_proxy_validate(
+        runner: &FakeRunner,
+        proxy: Value,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(proxy_validate_with_runner(runner, proxy))
+    }
+
     fn run_profiles_identity_apply_preset(
         runner: &FakeRunner,
         store_root: &str,
@@ -1314,6 +1373,20 @@ mod tests {
             store_root.to_string(),
             profile_id.to_string(),
             identity,
+        ))
+    }
+
+    fn run_profiles_proxy_update(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        proxy: Value,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_proxy_update_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            proxy,
         ))
     }
 
@@ -1645,10 +1718,29 @@ mod tests {
             "webrtc": { "mode": "real", "policy": "real" }
         });
 
-        run_identity_validate(&runner, identity.clone()).expect("identity validate reaches sidecar");
+        run_identity_validate(&runner, identity.clone())
+            .expect("identity validate reaches sidecar");
 
         let request = runner.last_request();
         assert_request_params(&request, "identity.validate", &[("identity", identity)]);
+    }
+
+    #[test]
+    fn proxy_validate_request_passes_proxy_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let proxy = json!({
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "http",
+            "host": "proxy.example.test",
+            "port": 8080
+        });
+
+        run_proxy_validate(&runner, proxy.clone()).expect("proxy validate reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(&request, "proxy.validate", &[("proxy", proxy)]);
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
     }
 
     #[test]
@@ -1696,6 +1788,35 @@ mod tests {
     }
 
     #[test]
+    fn profiles_proxy_update_injects_store_root_profile_id_and_proxy_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let proxy = json!({
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "socks5",
+            "host": "proxy.example.test",
+            "port": 1080
+        });
+
+        run_profiles_proxy_update(&runner, "/app/data/root", "profile-id", proxy.clone())
+            .expect("proxy update reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.proxy.update",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("proxy", proxy),
+            ],
+        );
+        let params = request["params"].as_object().expect("params object");
+        assert_eq!(params.get("profile-store"), None);
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
     fn identity_warning_payloads_pass_through_success_envelopes() {
         let runner = FakeRunner::new(FakeMode::SuccessResult(json!({
             "identityVersion": 1,
@@ -1733,6 +1854,98 @@ mod tests {
         assert!(error.recoverable);
         assert_eq!(error.detail_ref, "identity-invalid-detail");
         assert_eq!(runner.last_request()["method"], "identity.validate");
+    }
+
+    #[test]
+    fn proxy_validate_error_is_passed_through_and_diagnostic_lookup_is_redacted() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::TypedError {
+                code: "PROXY_INVALID",
+                message: "Proxy configuration is invalid.",
+                detail_ref: "sidecar-proxy-invalid-detail",
+            },
+            store.clone(),
+        );
+        let proxy = json!({
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "http",
+            "host": "proxy.example.test",
+            "port": 8080,
+            "credentials": {
+                "username": "proxy-user-should-not-leak",
+                "password": "proxy-pass-should-not-leak"
+            }
+        });
+
+        let error = run_proxy_validate(&runner, proxy).expect_err("proxy invalid error surfaces");
+        let lookup = store.lookup(&error.detail_ref);
+        let log_text = diagnostics_log_text(&store);
+
+        assert_eq!(error.code, "PROXY_INVALID");
+        assert_eq!(error.message, "Proxy configuration is invalid.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "sidecar-proxy-invalid-detail");
+        assert!(lookup.found);
+        assert_eq!(lookup.entries[0]["method"], "proxy.validate");
+        assert_eq!(lookup.entries[0]["errorCode"], "PROXY_INVALID");
+        assert!(!log_text.contains("proxy-user-should-not-leak"));
+        assert!(!log_text.contains("proxy-pass-should-not-leak"));
+        assert!(!log_text.contains("credentials"));
+    }
+
+    #[test]
+    fn profiles_proxy_update_error_is_passed_through_and_diagnostic_lookup_is_redacted() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::TypedError {
+                code: "PROXY_UNSUPPORTED_MODE",
+                message: "Proxy mode is not supported.",
+                detail_ref: "sidecar-proxy-update-detail",
+            },
+            store.clone(),
+        );
+        let proxy = json!({
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "http",
+            "host": "proxy.example.test",
+            "port": 8080,
+            "credentials": {
+                "username": "proxy-user-should-not-leak",
+                "password": "proxy-pass-should-not-leak"
+            }
+        });
+
+        let error = run_profiles_proxy_update(&runner, "/app/data/root", "profile-id", proxy)
+            .expect_err("proxy update error surfaces");
+        let lookup = store.lookup(&error.detail_ref);
+        let log_text = diagnostics_log_text(&store);
+
+        assert_eq!(error.code, "PROXY_UNSUPPORTED_MODE");
+        assert_eq!(error.message, "Proxy mode is not supported.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "sidecar-proxy-update-detail");
+        assert!(lookup.found);
+        assert_eq!(lookup.entries[0]["method"], "profiles.proxy.update");
+        assert_eq!(lookup.entries[0]["errorCode"], "PROXY_UNSUPPORTED_MODE");
+        assert!(!log_text.contains("/app/data/root"));
+        assert!(!log_text.contains("proxy-user-should-not-leak"));
+        assert!(!log_text.contains("proxy-pass-should-not-leak"));
+        assert!(!log_text.contains("credentials"));
+    }
+
+    #[test]
+    fn proxy_malformed_stdout_maps_to_protocol_error_with_bridge_detail_ref() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_proxy_validate(&runner, json!({ "proxyVersion": 1 }))
+            .expect_err("proxy malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "proxy.validate");
     }
 
     #[test]
@@ -1923,13 +2136,9 @@ mod tests {
 
         let plan_error = run_identity_audit_plan(&plan_runner, "/app/data/root", "missing-profile")
             .expect_err("audit plan error surfaces");
-        let open_error = run_identity_audit_open(
-            &open_runner,
-            "/app/data/root",
-            "profile-id",
-            "missing-page",
-        )
-        .expect_err("audit open error surfaces");
+        let open_error =
+            run_identity_audit_open(&open_runner, "/app/data/root", "profile-id", "missing-page")
+                .expect_err("audit open error surfaces");
 
         assert_eq!(plan_error.code, "PROFILE_NOT_FOUND");
         assert_eq!(plan_error.message, "Profile not found.");
