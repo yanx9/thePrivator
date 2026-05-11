@@ -233,6 +233,67 @@ export interface IdentityWarning {
   path: string;
 }
 
+export type IdentityAuditSurface = IdentitySurface | "clientHints";
+export type IdentityAuditCategory = "browserleaks" | "consistency" | "privacy";
+export type IdentityAuditOpenStatus = "opened";
+
+export interface IdentityAuditExpectedRow {
+  surface: IdentityAuditSurface;
+  label: string;
+  expected: string;
+  guidance: string;
+}
+
+export interface IdentityAuditPage {
+  id: string;
+  label: string;
+  category: IdentityAuditCategory;
+  url: string;
+  surfaces: IdentityAuditSurface[];
+  comparisonNote: string;
+  requiresUserAction: boolean;
+  expectedRows: IdentityAuditExpectedRow[];
+}
+
+export interface IdentityAuditPlanCopy {
+  advisory: string;
+  localProof: string;
+  publicCheckerInstability: string;
+}
+
+export interface IdentityAuditPlanResult {
+  auditVersion: 1;
+  copy: IdentityAuditPlanCopy;
+  pages: IdentityAuditPage[];
+}
+
+export interface IdentityAuditPlanSnapshot extends IdentityAuditPlanResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface IdentityAuditOpenResult {
+  auditVersion: 1;
+  profileId: string;
+  pageId: string;
+  status: IdentityAuditOpenStatus;
+  openedAt: string;
+  launched: boolean;
+  runningCount: number;
+  page: IdentityAuditPage;
+}
+
+export interface IdentityAuditOpenSnapshot extends IdentityAuditOpenResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface IdentityPresetListResult {
   identityVersion: 1;
   presets: ProfileIdentity[];

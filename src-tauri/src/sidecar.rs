@@ -21,6 +21,8 @@ const BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 const LEGACY_IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 // Identity-aware Chromium launch can include extension generation, process
 // startup, DevTools readiness polling, and CDP apply before the sidecar responds.
+// Identity audit open uses the same budget because it may launch Chromium and
+// open a curated page after CDP identity overrides are applied.
 const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
@@ -155,6 +157,27 @@ pub async fn identity_validate(
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let runner = TauriSidecarRunner::new(app);
     identity_validate_with_runner(&runner, identity).await
+}
+
+#[tauri::command]
+pub async fn identity_audit_plan(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    identity_audit_plan_with_runner(&runner, store_root, profile_id).await
+}
+
+#[tauri::command]
+pub async fn identity_audit_open(
+    app: tauri::AppHandle,
+    profile_id: String,
+    page_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    identity_audit_open_with_runner(&runner, store_root, profile_id, page_id).await
 }
 
 #[tauri::command]
@@ -297,6 +320,41 @@ pub async fn identity_validate_with_runner<R: SidecarRunner>(
         json!({
             "identity": identity,
         }),
+    )
+    .await
+}
+
+async fn identity_audit_plan_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(
+        runner,
+        "identity.audit.plan",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+        }),
+    )
+    .await
+}
+
+async fn identity_audit_open_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    page_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "identity.audit.open",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "pageId": page_id,
+        }),
+        CHROMIUM_LAUNCH_TIMEOUT,
     )
     .await
 }
@@ -1335,6 +1393,32 @@ mod tests {
         ))
     }
 
+    fn run_identity_audit_plan(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_audit_plan_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+        ))
+    }
+
+    fn run_identity_audit_open(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        page_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_audit_open_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            page_id.to_string(),
+        ))
+    }
+
     fn run_legacy_scan(
         runner: &FakeRunner,
         store_root: &str,
@@ -1777,6 +1861,115 @@ mod tests {
                 ("profileId", json!("profile-id")),
             ],
         );
+    }
+
+    #[test]
+    fn identity_audit_plan_request_injects_store_root_and_profile_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_identity_audit_plan(&runner, "/app/data/root", "profile-id")
+            .expect("audit plan reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "identity.audit.plan",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn identity_audit_open_request_injects_store_root_profile_id_and_page_id_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_identity_audit_open(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "browserleaks-webgl",
+        )
+        .expect("audit open reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "identity.audit.open",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("pageId", json!("browserleaks-webgl")),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), CHROMIUM_LAUNCH_TIMEOUT);
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn identity_audit_errors_are_passed_through() {
+        let plan_runner = FakeRunner::new(FakeMode::TypedError {
+            code: "PROFILE_NOT_FOUND",
+            message: "Profile not found.",
+            detail_ref: "sidecar-audit-plan-detail",
+        });
+        let open_runner = FakeRunner::new(FakeMode::TypedError {
+            code: "IDENTITY_AUDIT_PAGE_NOT_FOUND",
+            message: "Audit page was not found.",
+            detail_ref: "sidecar-audit-open-detail",
+        });
+
+        let plan_error = run_identity_audit_plan(&plan_runner, "/app/data/root", "missing-profile")
+            .expect_err("audit plan error surfaces");
+        let open_error = run_identity_audit_open(
+            &open_runner,
+            "/app/data/root",
+            "profile-id",
+            "missing-page",
+        )
+        .expect_err("audit open error surfaces");
+
+        assert_eq!(plan_error.code, "PROFILE_NOT_FOUND");
+        assert_eq!(plan_error.message, "Profile not found.");
+        assert!(plan_error.recoverable);
+        assert_eq!(plan_error.detail_ref, "sidecar-audit-plan-detail");
+        assert_eq!(plan_runner.last_request()["method"], "identity.audit.plan");
+        assert_eq!(open_error.code, "IDENTITY_AUDIT_PAGE_NOT_FOUND");
+        assert_eq!(open_error.message, "Audit page was not found.");
+        assert!(open_error.recoverable);
+        assert_eq!(open_error.detail_ref, "sidecar-audit-open-detail");
+        assert_eq!(open_runner.last_request()["method"], "identity.audit.open");
+    }
+
+    #[test]
+    fn identity_audit_open_timeout_uses_chromium_launch_budget() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_identity_audit_open(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "browserleaks-webgl",
+        )
+        .expect_err("audit open timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "identity.audit.open");
+        assert_eq!(runner.last_timeout(), CHROMIUM_LAUNCH_TIMEOUT);
+    }
+
+    #[test]
+    fn identity_audit_malformed_stdout_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_identity_audit_plan(&runner, "/app/data/root", "profile-id")
+            .expect_err("audit malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(runner.last_request()["method"], "identity.audit.plan");
     }
 
     #[test]

@@ -4,6 +4,7 @@ import {
   createProfile,
   deleteProfile,
   getChromiumStatus,
+  getIdentityAuditPlan,
   applyProfileIdentityPreset,
   getSidecarHealth,
   importLegacyProfiles,
@@ -11,6 +12,7 @@ import {
   listIdentityPresets,
   listProfiles,
   lookupDiagnosticDetail,
+  openIdentityAuditPage,
   scanLegacyProfiles,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
@@ -237,6 +239,146 @@ function chromiumEnvelope(result: unknown, overrides: Record<string, unknown> = 
     result,
     ...overrides,
   };
+}
+
+const AUDIT_PROFILE_ID = "11111111-1111-1111-1111-111111111111";
+
+function auditExpectedRow(surface = "browser", overrides: Record<string, unknown> = {}) {
+  return {
+    surface,
+    label: "Browser",
+    expected: "Real host browser values.",
+    guidance: "Compare visible values manually against ThePrivator local proof.",
+    ...overrides,
+  };
+}
+
+function auditPage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "browserleaks-webgl",
+    label: "BrowserLeaks WebGL",
+    category: "browserleaks",
+    url: "https://browserleaks.com/webgl",
+    surfaces: ["webgl"],
+    comparisonNote: "Compare configured WebGL vendor and renderer when masked or custom; noise only means a stable per-profile altered signature.",
+    requiresUserAction: false,
+    expectedRows: [auditExpectedRow("webgl", { label: "WebGL", expected: "Real host WebGL vendor and renderer values." })],
+    ...overrides,
+  };
+}
+
+function auditPlanResult(overrides: Record<string, unknown> = {}) {
+  const pages = overrides.pages ?? [
+    auditPage({
+      id: "browserleaks-client-hints",
+      label: "BrowserLeaks Client Hints",
+      url: "https://browserleaks.com/client-hints",
+      surfaces: ["browser", "clientHints"],
+      comparisonNote: "Compare User-Agent Client Hints platform, architecture, bitness, model, and mobile flag where the public page exposes them.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints", { label: "Client Hints" })],
+    }),
+    auditPage({
+      id: "browserleaks-javascript",
+      label: "BrowserLeaks JavaScript",
+      url: "https://browserleaks.com/javascript",
+      surfaces: ["browser", "navigator", "screen", "locale"],
+      comparisonNote: "Compare User-Agent, navigator platform and hardware, languages, timezone, screen, and viewport values manually.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale")],
+    }),
+    auditPage({
+      id: "browserleaks-canvas",
+      label: "BrowserLeaks Canvas",
+      url: "https://browserleaks.com/canvas",
+      surfaces: ["canvas"],
+      comparisonNote: "For noise mode, expect a stable per-profile altered signature rather than a known hash or universal score.",
+      expectedRows: [auditExpectedRow("canvas", { label: "Canvas", expected: "Stable per-profile altered signature from configured noise." })],
+    }),
+    auditPage(),
+    auditPage({
+      id: "browserleaks-webrtc",
+      label: "BrowserLeaks WebRTC",
+      url: "https://browserleaks.com/webrtc",
+      surfaces: ["webrtc"],
+      comparisonNote: "For restricted policies, compare whether non-proxied UDP or local IP candidates are absent; external network behavior is checker-dependent.",
+      expectedRows: [auditExpectedRow("webrtc", { label: "WebRTC", expected: "Real host WebRTC behavior." })],
+    }),
+    auditPage({
+      id: "pixelscan-fingerprint-check",
+      label: "Pixelscan Fingerprint Check",
+      category: "consistency",
+      url: "https://pixelscan.net/fingerprint-check",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "Treat flags and scores as advisory consistency hints; compare contradictions instead of treating one score as authoritative.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio"), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "browserscan-browser-checker",
+      label: "BrowserScan Browser Checker",
+      category: "consistency",
+      url: "https://www.browserscan.net/browser-checker",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "webrtc"],
+      comparisonNote: "Use the report as a cross-check for browser, kernel, timezone, and surface mismatches, not as an authoritative result.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "amiunique-fingerprint",
+      label: "AmIUnique Fingerprint",
+      category: "privacy",
+      url: "https://amiunique.org/fingerprint",
+      surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "Use attributes and similarity ratios for interpretation; uniqueness reporting is not a pass or fail assertion.",
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("screen"), auditExpectedRow("locale"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio"), auditExpectedRow("webrtc")],
+    }),
+    auditPage({
+      id: "cover-your-tracks",
+      label: "Cover Your Tracks",
+      category: "privacy",
+      url: "https://coveryourtracks.eff.org/",
+      surfaces: ["browser", "clientHints", "navigator", "canvas", "webgl", "audio", "webrtc"],
+      comparisonNote: "The page requires a user-started test and collects anonymous data according to its site copy; use results as privacy guidance only.",
+      requiresUserAction: true,
+      expectedRows: [auditExpectedRow("browser"), auditExpectedRow("clientHints"), auditExpectedRow("navigator"), auditExpectedRow("canvas"), auditExpectedRow("webgl"), auditExpectedRow("audio"), auditExpectedRow("webrtc")],
+    }),
+  ];
+
+  return {
+    auditVersion: 1,
+    copy: {
+      advisory: "This guide is advisory and does not promise invisibility, checker success scores, or stable public-page assertions.",
+      localProof: "Use ThePrivator local proof for contractual app behavior; public pages are manual comparison aids.",
+      publicCheckerInstability: "Public checker pages can change labels, scoring, collection rules, and exposed fields without notice.",
+    },
+    pages,
+    ...overrides,
+  };
+}
+
+function auditEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-audit-1",
+    protocolVersion: "1.0.0",
+    durationMs: 7.5,
+    result,
+    ...overrides,
+  };
+}
+
+function auditOpenResult(overrides: Record<string, unknown> = {}) {
+  return {
+    auditVersion: 1,
+    profileId: AUDIT_PROFILE_ID,
+    pageId: "browserleaks-webgl",
+    status: "opened",
+    openedAt: "2026-05-04T18:07:00.000Z",
+    launched: false,
+    runningCount: 1,
+    page: auditPage(),
+    ...overrides,
+  };
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function legacyIssue(overrides: Record<string, unknown> = {}) {
@@ -868,6 +1010,139 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
       detailRef: "bridge-protocol-detail",
+    });
+  });
+
+  it("loads the fixed identity audit plan through a safe Tauri command wrapper", async () => {
+    mockInvoke.mockResolvedValueOnce(auditEnvelope(auditPlanResult()));
+
+    const snapshot = await getIdentityAuditPlan(AUDIT_PROFILE_ID);
+
+    expect(mockInvoke).toHaveBeenCalledWith("identity_audit_plan", { profileId: AUDIT_PROFILE_ID });
+    expect(snapshot).toMatchObject({
+      auditVersion: 1,
+      requestId: "bridge-audit-1",
+      protocolVersion: "1.0.0",
+      bridgeDurationMs: 7.5,
+    });
+    expect(snapshot.pages).toHaveLength(9);
+    expect(snapshot.pages.map((page) => page.id)).toContain("cover-your-tracks");
+    expect(snapshot.pages.find((page) => page.id === "cover-your-tracks")?.requiresUserAction).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(/targetId|debugPort|webSocketDebuggerUrl|storeRoot|extensionDir|DevToolsActivePort|ws:\/\//i);
+  });
+
+  it("opens an audit catalog page through safe profile/page identifiers only", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(auditEnvelope(auditOpenResult({ launched: false })))
+      .mockResolvedValueOnce(auditEnvelope(auditOpenResult({ launched: true, runningCount: 1 })));
+
+    const existing = await openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl");
+    const launched = await openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "identity_audit_open", {
+      profileId: AUDIT_PROFILE_ID,
+      pageId: "browserleaks-webgl",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "identity_audit_open", {
+      profileId: AUDIT_PROFILE_ID,
+      pageId: "browserleaks-webgl",
+    });
+    expect(existing).toMatchObject({
+      auditVersion: 1,
+      profileId: AUDIT_PROFILE_ID,
+      pageId: "browserleaks-webgl",
+      status: "opened",
+      openedAt: "2026-05-04T18:07:00.000Z",
+      launched: false,
+      runningCount: 1,
+    });
+    expect(launched.launched).toBe(true);
+    expect(existing.page.url).toBe("https://browserleaks.com/webgl");
+    expect(JSON.stringify(existing)).not.toMatch(/pid|userDataDir|targetId|debugPort|webSocketDebuggerUrl|storeRoot|command|extensionDir|ws:\/\//i);
+  });
+
+  it.each([
+    ["empty profile id", null, () => getIdentityAuditPlan(" ")],
+    ["empty page id", null, () => openIdentityAuditPage(AUDIT_PROFILE_ID, "")],
+    ["mismatched open profile id", () => auditEnvelope(auditOpenResult({ profileId: "22222222-2222-2222-2222-222222222222" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+    ["mismatched open page id", () => auditEnvelope(auditOpenResult({ pageId: "browserleaks-canvas" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+    ["plan page count mismatch", () => auditEnvelope(auditPlanResult({ pages: (auditPlanResult().pages as unknown[]).slice(0, 8) })), () => getIdentityAuditPlan(AUDIT_PROFILE_ID)],
+    ["duplicate catalog ids", () => {
+      const plan = cloneJson(auditPlanResult()) as unknown as { pages: Array<Record<string, unknown>> };
+      plan.pages[1].id = plan.pages[0].id;
+      return auditEnvelope(plan);
+    }, () => getIdentityAuditPlan(AUDIT_PROFILE_ID)],
+    ["invalid audit URL protocol", () => {
+      const plan = cloneJson(auditPlanResult()) as unknown as { pages: Array<Record<string, unknown>> };
+      plan.pages[3].url = "http://browserleaks.com/webgl";
+      return auditEnvelope(plan);
+    }, () => getIdentityAuditPlan(AUDIT_PROFILE_ID)],
+    ["unknown audit page field", () => auditEnvelope(auditOpenResult({ targetId: "page-target" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+    ["unsafe audit guidance string", () => {
+      const result = cloneJson(auditOpenResult()) as { page: { expectedRows: Array<Record<string, unknown>> } };
+      result.page.expectedRows[0].guidance = "Open ws://127.0.0.1:9222/json for details.";
+      return auditEnvelope(result);
+    }, () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+    ["negative running count", () => auditEnvelope(auditOpenResult({ runningCount: -1 })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+  ] as Array<[string, null | (() => unknown), () => Promise<unknown>]>)("maps malformed audit payloads to protocol errors: %s", async (_caseName, envelopeFactory, callClient) => {
+    if (envelopeFactory) {
+      mockInvoke.mockResolvedValueOnce(envelopeFactory());
+    }
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+
+    if (!envelopeFactory) {
+      expect(mockInvoke).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["targetId", "debugPort", "webSocketDebuggerUrl", "storeRoot", "command", "extensionDir"])(
+    "rejects forbidden raw audit runtime field %s before UI state sees it",
+    async (field) => {
+      mockInvoke.mockResolvedValueOnce(auditEnvelope(auditOpenResult({ [field]: "unsafe-runtime-detail" })));
+
+      await expect(openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")).rejects.toMatchObject({
+        code: SIDECAR_PROTOCOL_ERROR,
+        source: "protocol",
+        phase: "bridge-error",
+      });
+    },
+  );
+
+  it("preserves typed sidecar and bridge errors for identity audit wrappers", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "IDENTITY_AUDIT_PAGE_NOT_FOUND",
+        message: "Audit page was not found.",
+        recoverable: true,
+        detailRef: "sidecar-audit-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "SIDECAR_TIMEOUT",
+        message: "The Python sidecar did not respond before the bridge timeout.",
+        recoverable: true,
+        detailRef: "bridge-audit-timeout",
+      });
+
+    await expect(openIdentityAuditPage(AUDIT_PROFILE_ID, "missing-page")).rejects.toMatchObject({
+      code: "IDENTITY_AUDIT_PAGE_NOT_FOUND",
+      message: "Audit page was not found.",
+      recoverable: true,
+      detailRef: "sidecar-audit-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(getIdentityAuditPlan(AUDIT_PROFILE_ID)).rejects.toMatchObject({
+      code: "SIDECAR_TIMEOUT",
+      source: "bridge",
+      phase: "bridge-error",
+      detailRef: "bridge-audit-timeout",
     });
   });
 

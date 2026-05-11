@@ -33,6 +33,8 @@ pub fn run() {
             sidecar::sidecar_diagnostic_failure,
             sidecar::identity_presets_list,
             sidecar::identity_validate,
+            sidecar::identity_audit_plan,
+            sidecar::identity_audit_open,
             sidecar::profiles_identity_apply_preset,
             sidecar::profiles_identity_update,
             sidecar::profiles_list,

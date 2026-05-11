@@ -21,6 +21,15 @@ import type {
   JsonObject,
   JsonValue,
   BrowserClientHints,
+  IdentityAuditCategory,
+  IdentityAuditExpectedRow,
+  IdentityAuditOpenResult,
+  IdentityAuditOpenSnapshot,
+  IdentityAuditPage,
+  IdentityAuditPlanCopy,
+  IdentityAuditPlanResult,
+  IdentityAuditPlanSnapshot,
+  IdentityAuditSurface,
   IdentityMaskingMode,
   IdentityNoiseMode,
   IdentityPresetListResult,
@@ -66,6 +75,95 @@ const BRIDGE_ERROR_CODES = new Set([
   "SIDECAR_PROTOCOL_ERROR",
   "SIDECAR_TIMEOUT",
   "SIDECAR_UNAVAILABLE",
+]);
+
+const IDENTITY_AUDIT_CATALOG = [
+  {
+    id: "browserleaks-client-hints",
+    category: "browserleaks",
+    url: "https://browserleaks.com/client-hints",
+    surfaces: ["browser", "clientHints"],
+    requiresUserAction: false,
+  },
+  {
+    id: "browserleaks-javascript",
+    category: "browserleaks",
+    url: "https://browserleaks.com/javascript",
+    surfaces: ["browser", "navigator", "screen", "locale"],
+    requiresUserAction: false,
+  },
+  {
+    id: "browserleaks-canvas",
+    category: "browserleaks",
+    url: "https://browserleaks.com/canvas",
+    surfaces: ["canvas"],
+    requiresUserAction: false,
+  },
+  {
+    id: "browserleaks-webgl",
+    category: "browserleaks",
+    url: "https://browserleaks.com/webgl",
+    surfaces: ["webgl"],
+    requiresUserAction: false,
+  },
+  {
+    id: "browserleaks-webrtc",
+    category: "browserleaks",
+    url: "https://browserleaks.com/webrtc",
+    surfaces: ["webrtc"],
+    requiresUserAction: false,
+  },
+  {
+    id: "pixelscan-fingerprint-check",
+    category: "consistency",
+    url: "https://pixelscan.net/fingerprint-check",
+    surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+    requiresUserAction: false,
+  },
+  {
+    id: "browserscan-browser-checker",
+    category: "consistency",
+    url: "https://www.browserscan.net/browser-checker",
+    surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "webrtc"],
+    requiresUserAction: false,
+  },
+  {
+    id: "amiunique-fingerprint",
+    category: "privacy",
+    url: "https://amiunique.org/fingerprint",
+    surfaces: ["browser", "clientHints", "navigator", "screen", "locale", "canvas", "webgl", "audio", "webrtc"],
+    requiresUserAction: false,
+  },
+  {
+    id: "cover-your-tracks",
+    category: "privacy",
+    url: "https://coveryourtracks.eff.org/",
+    surfaces: ["browser", "clientHints", "navigator", "canvas", "webgl", "audio", "webrtc"],
+    requiresUserAction: true,
+  },
+] as const;
+
+const IDENTITY_AUDIT_CATALOG_BY_ID = new Map<string, (typeof IDENTITY_AUDIT_CATALOG)[number]>(
+  IDENTITY_AUDIT_CATALOG.map((page) => [page.id, page]),
+);
+
+const FORBIDDEN_AUDIT_FIELDS = new Set([
+  "pid",
+  "userDataDir",
+  "targetId",
+  "targetID",
+  "debugPort",
+  "webSocketDebuggerUrl",
+  "websocketDebuggerUrl",
+  "storeRoot",
+  "command",
+  "args",
+  "argv",
+  "extensionDir",
+  "configPath",
+  "configBody",
+  "devToolsActivePort",
+  "DevToolsActivePort",
 ]);
 
 let detailCounter = 0;
@@ -168,6 +266,33 @@ export async function validateIdentity(identity: ProfileIdentity): Promise<Ident
     const envelope = await invoke<unknown>("identity_validate", { identity });
     return parseIdentityValidationEnvelope(envelope, new Date().toISOString());
   } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function getIdentityAuditPlan(profileId: string): Promise<IdentityAuditPlanSnapshot> {
+  try {
+    const safeProfileId = requireAuditClientId(profileId, "profileId");
+    const envelope = await invoke<unknown>("identity_audit_plan", { profileId: safeProfileId });
+    return parseIdentityAuditPlanEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function openIdentityAuditPage(profileId: string, pageId: string): Promise<IdentityAuditOpenSnapshot> {
+  try {
+    const safeProfileId = requireAuditClientId(profileId, "profileId");
+    const safePageId = requireAuditClientId(pageId, "pageId");
+    const envelope = await invoke<unknown>("identity_audit_open", { profileId: safeProfileId, pageId: safePageId });
+    return parseIdentityAuditOpenEnvelope(envelope, new Date().toISOString(), safeProfileId, safePageId);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
     throw normalizeSidecarError(error);
   }
 }
@@ -500,6 +625,39 @@ function parseIdentityValidationEnvelope(value: unknown, receivedAt: string): Id
   };
 }
 
+function parseIdentityAuditPlanEnvelope(value: unknown, receivedAt: string): IdentityAuditPlanSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentityAuditPlanResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseIdentityAuditOpenEnvelope(
+  value: unknown,
+  receivedAt: string,
+  requestedProfileId: string,
+  requestedPageId: string,
+): IdentityAuditOpenSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentityAuditOpenResult(envelope.result, requestedProfileId, requestedPageId);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseLegacyScanEnvelope(value: unknown, receivedAt: string): LegacyScanSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseLegacyScanResult(envelope.result);
@@ -723,6 +881,165 @@ function parseIdentityValidationResult(value: unknown): IdentityValidationResult
     identity: parseProfileIdentity(record.identity, "identity"),
     warnings: parseIdentityWarningArray(record.warnings, "warnings"),
   };
+}
+
+function parseIdentityAuditPlanResult(value: unknown): IdentityAuditPlanResult {
+  const record = requireRecord(value, "The sidecar identity audit plan result must be an object.");
+  assertNoForbiddenAuditFields(record, "identityAuditPlan");
+  requireExactAuditKeys(record, ["auditVersion", "copy", "pages"], "identityAuditPlan");
+  requireLiteralNumber(record.auditVersion, "auditVersion", 1);
+
+  return {
+    auditVersion: 1,
+    copy: parseIdentityAuditCopy(record.copy),
+    pages: parseIdentityAuditPages(record.pages),
+  };
+}
+
+function parseIdentityAuditOpenResult(value: unknown, requestedProfileId: string, requestedPageId: string): IdentityAuditOpenResult {
+  const record = requireRecord(value, "The sidecar identity audit open result must be an object.");
+  assertNoForbiddenAuditFields(record, "identityAuditOpen");
+  requireExactAuditKeys(
+    record,
+    ["auditVersion", "profileId", "pageId", "status", "openedAt", "launched", "runningCount", "page"],
+    "identityAuditOpen",
+  );
+  requireLiteralNumber(record.auditVersion, "auditVersion", 1);
+  const profileId = requireAuditClientId(record.profileId, "profileId");
+  const pageId = requireAuditClientId(record.pageId, "pageId");
+  requireLiteral(record.status, "status", "opened");
+  const page = parseIdentityAuditPage(record.page, "page");
+
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar identity audit open profileId did not match the request.");
+  }
+  if (pageId !== requestedPageId || page.id !== requestedPageId) {
+    throw makeProtocolError("The sidecar identity audit open pageId did not match the request.");
+  }
+
+  return {
+    auditVersion: 1,
+    profileId,
+    pageId,
+    status: "opened",
+    openedAt: requireIsoTimestamp(record.openedAt, "openedAt"),
+    launched: requireBoolean(record.launched, "launched"),
+    runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
+    page,
+  };
+}
+
+function parseIdentityAuditCopy(value: unknown): IdentityAuditPlanCopy {
+  const record = requireRecord(value, "The sidecar identity audit copy result must be an object.");
+  assertNoForbiddenAuditFields(record, "copy");
+  requireExactAuditKeys(record, ["advisory", "localProof", "publicCheckerInstability"], "copy");
+  return {
+    advisory: requireAuditSafeText(record.advisory, "copy.advisory", { maxLength: 256 }),
+    localProof: requireAuditSafeText(record.localProof, "copy.localProof", { maxLength: 256 }),
+    publicCheckerInstability: requireAuditSafeText(record.publicCheckerInstability, "copy.publicCheckerInstability", { maxLength: 256 }),
+  };
+}
+
+function parseIdentityAuditPages(value: unknown): IdentityAuditPage[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar identity audit pages field must be an array.");
+  }
+  if (value.length !== IDENTITY_AUDIT_CATALOG.length) {
+    throw makeProtocolError("The sidecar identity audit page count does not match the fixed catalog.");
+  }
+
+  const seen = new Set<string>();
+  const pages = value.map((item, index) => {
+    const page = parseIdentityAuditPage(item, `pages[${index}]`);
+    if (seen.has(page.id)) {
+      throw makeProtocolError("The sidecar identity audit catalog contains duplicate page ids.");
+    }
+    seen.add(page.id);
+    return page;
+  });
+
+  for (const expected of IDENTITY_AUDIT_CATALOG) {
+    if (!seen.has(expected.id)) {
+      throw makeProtocolError("The sidecar identity audit catalog is missing a fixed page id.");
+    }
+  }
+
+  return pages;
+}
+
+function parseIdentityAuditPage(value: unknown, field: string): IdentityAuditPage {
+  const record = requireRecord(value, `The sidecar identity audit field ${field} must be an object.`);
+  assertNoForbiddenAuditFields(record, field);
+  requireExactAuditKeys(
+    record,
+    ["id", "label", "category", "url", "surfaces", "comparisonNote", "requiresUserAction", "expectedRows"],
+    field,
+  );
+  const id = requireAuditClientId(record.id, `${field}.id`);
+  const expected = IDENTITY_AUDIT_CATALOG_BY_ID.get(id);
+  if (!expected) {
+    throw makeProtocolError(`The sidecar identity audit field ${field}.id is not in the fixed catalog.`);
+  }
+  const category = requireIdentityAuditCategory(record.category, `${field}.category`);
+  const surfaces = parseIdentityAuditSurfaces(record.surfaces, `${field}.surfaces`);
+  const url = requireIdentityAuditUrl(record.url, expected.url, `${field}.url`);
+
+  if (category !== expected.category || record.requiresUserAction !== expected.requiresUserAction) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} does not match fixed catalog metadata.`);
+  }
+  if (!sameStringArray(surfaces, [...expected.surfaces])) {
+    throw makeProtocolError(`The sidecar identity audit field ${field}.surfaces does not match the fixed catalog.`);
+  }
+
+  return {
+    id,
+    label: requireAuditSafeText(record.label, `${field}.label`, { maxLength: 128 }),
+    category,
+    url,
+    surfaces,
+    comparisonNote: requireAuditSafeText(record.comparisonNote, `${field}.comparisonNote`, { maxLength: 512 }),
+    requiresUserAction: requireBoolean(record.requiresUserAction, `${field}.requiresUserAction`),
+    expectedRows: parseIdentityAuditExpectedRows(record.expectedRows, surfaces, `${field}.expectedRows`),
+  };
+}
+
+function parseIdentityAuditExpectedRows(value: unknown, pageSurfaces: IdentityAuditSurface[], field: string): IdentityAuditExpectedRow[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 40) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be a bounded non-empty array.`);
+  }
+
+  const pageSurfaceSet = new Set(pageSurfaces);
+  return value.map((item, index) => {
+    const rowField = `${field}[${index}]`;
+    const record = requireRecord(item, `The sidecar identity audit field ${rowField} must be an object.`);
+    assertNoForbiddenAuditFields(record, rowField);
+    requireExactAuditKeys(record, ["surface", "label", "expected", "guidance"], rowField);
+    const surface = requireIdentityAuditSurface(record.surface, `${rowField}.surface`);
+    if (!pageSurfaceSet.has(surface)) {
+      throw makeProtocolError(`The sidecar identity audit field ${rowField}.surface must belong to the page surfaces.`);
+    }
+    return {
+      surface,
+      label: requireAuditSafeText(record.label, `${rowField}.label`, { maxLength: 128 }),
+      expected: requireAuditSafeText(record.expected, `${rowField}.expected`, { maxLength: 512 }),
+      guidance: requireAuditSafeText(record.guidance, `${rowField}.guidance`, { maxLength: 512 }),
+    };
+  });
+}
+
+function parseIdentityAuditSurfaces(value: unknown, field: string): IdentityAuditSurface[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be a bounded non-empty array.`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const surface = requireIdentityAuditSurface(item, `${field}[${index}]`);
+    if (seen.has(surface)) {
+      throw makeProtocolError(`The sidecar identity audit field ${field} contains duplicate surfaces.`);
+    }
+    seen.add(surface);
+    return surface;
+  });
 }
 
 function parseLegacyScanResult(value: unknown): LegacyScanResult {
@@ -1325,6 +1642,127 @@ function requireIdentitySurfaceName(value: unknown, field: string): IdentitySurf
     return value;
   }
   throw makeProtocolError(`The sidecar identity warning field ${field} must be a known surface.`);
+}
+
+function requireIdentityAuditSurface(value: unknown, field: string): IdentityAuditSurface {
+  if (value === "clientHints") {
+    return value;
+  }
+  return requireIdentitySurfaceName(value, field);
+}
+
+function requireIdentityAuditCategory(value: unknown, field: string): IdentityAuditCategory {
+  if (value === "browserleaks" || value === "consistency" || value === "privacy") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity audit field ${field} must be a known category.`);
+}
+
+function requireIdentityAuditUrl(value: unknown, expectedUrl: string, field: string): string {
+  const url = requireString(value, field);
+  if (url !== expectedUrl) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must match the fixed HTTPS catalog URL.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be a valid URL.`);
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be a safe public HTTPS URL.`);
+  }
+  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "0.0.0.0") {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must not target loopback.`);
+  }
+  return url;
+}
+
+function requireAuditClientId(value: unknown, field: string): string {
+  const id = requireNonBlankString(value, field);
+  if (id.length > 128 || isPathLikeOrUrl(id) || containsControlCharacters(id) || !/^[A-Za-z0-9_.:-]+$/.test(id)) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be an opaque safe id.`);
+  }
+  return id;
+}
+
+function requireAuditSafeText(value: unknown, field: string, options: { maxLength: number }): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > options.maxLength || containsControlCharacters(text) || containsUnsafeAuditText(text)) {
+    throw makeProtocolError(`The sidecar identity audit field ${field} must be safe UI copy.`);
+  }
+  return text;
+}
+
+function containsUnsafeAuditText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (
+    [
+      "devtoolsactiveport",
+      "remote-debugging-port",
+      "debug port",
+      "websocket",
+      "ws://",
+      "wss://",
+      "target id",
+      "targetid",
+      "raw argv",
+      "user-data-dir",
+      "profile-store",
+      "traceback",
+      "proxy_user",
+      "proxy_pass",
+      "token=",
+      "password=",
+      "secret=",
+      "guaranteed undetectability",
+      "guaranteed green",
+      "guaranteed pass",
+    ].some((marker) => lowered.includes(marker))
+  ) {
+    return true;
+  }
+  if (/\b(?:file|ws|wss):\/\//i.test(value)) {
+    return true;
+  }
+  if (/(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /[A-Za-z]:[\\/][^\s]+/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function requireExactAuditKeys(record: Record<string, unknown>, keys: string[], field: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      throw makeProtocolError(`The sidecar identity audit field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of keys) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar identity audit field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function assertNoForbiddenAuditFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenAuditFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_AUDIT_FIELDS.has(key)) {
+      throw makeProtocolError(`The sidecar identity audit field ${field}.${key} must not expose runtime/debug details.`);
+    }
+    assertNoForbiddenAuditFields(item, `${field}.${key}`);
+  }
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 function requireIdentityWarningPath(value: unknown, field: string, surface: IdentitySurface): string {
