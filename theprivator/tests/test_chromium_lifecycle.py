@@ -186,11 +186,16 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
     argv_capture = tmp_path / "argv.json"
     monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
     monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    user_data_path = tmp_path / profile["storage"]["userDataDir"]
+    user_data_path.mkdir(parents=True, exist_ok=True)
+    stale_active_port = user_data_path / "DevToolsActivePort"
+    stale_active_port.write_text("65535\n/devtools/browser/stale\n", encoding="utf-8")
 
     calls = []
 
     def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
-        assert Path(user_data_dir) == tmp_path / profile["storage"]["userDataDir"]
+        assert Path(user_data_dir) == user_data_path
+        assert not stale_active_port.exists()
         assert chromium.RuntimeRegistry(tmp_path).read() == {}
         calls.append(("discover", kwargs))
         return "ws://127.0.0.1:1/devtools/browser/test"
@@ -263,10 +268,15 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
     argv_capture = tmp_path / "argv.json"
     monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
     monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    user_data_path = tmp_path / profile["storage"]["userDataDir"]
+    user_data_path.mkdir(parents=True, exist_ok=True)
+    stale_active_port = user_data_path / "DevToolsActivePort"
+    stale_active_port.write_text("65535\n/devtools/browser/stale\n", encoding="utf-8")
     calls = []
 
     def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
-        assert Path(user_data_dir) == tmp_path / profile["storage"]["userDataDir"]
+        assert Path(user_data_dir) == user_data_path
+        assert not stale_active_port.exists()
         assert chromium.RuntimeRegistry(tmp_path).read() == {}
         calls.append(("discover", kwargs))
         return "ws://127.0.0.1:1/devtools/browser/test"

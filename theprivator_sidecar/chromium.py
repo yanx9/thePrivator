@@ -91,6 +91,7 @@ IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
 AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 AUDIT_TARGET_OPEN_TIMEOUT_SECONDS = 5.0
+_DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort"
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,8 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         "about:blank",
         extra_args=_identity_launch_args(identity_plan, extension_artifact),
     )
+    if identity_plan.requires_cdp:
+        _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
     process = _spawn_chromium(args, owner_token=owner_token)
     try:
         time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
@@ -593,6 +596,7 @@ def _launch_and_open_identity_audit_page(
             force_remote_debugging=True,
         ),
     )
+    _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
     process = _spawn_chromium(args, owner_token=owner_token)
     try:
         time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
@@ -707,6 +711,20 @@ def _json_safe_page_metadata(page: Mapping[str, Any]) -> JsonObject:
     if not isinstance(copied, dict):
         raise _audit_error()
     return copied
+
+
+def _remove_stale_devtools_active_port(user_data_path: Path, *, error_code: str) -> None:
+    active_port_path = user_data_path / _DEVTOOLS_ACTIVE_PORT_FILE
+    try:
+        active_port_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SidecarError(
+            code=error_code,
+            message="Chromium internal browser-control startup state could not be prepared.",
+        ) from exc
+
 
 
 def _audit_error() -> SidecarError:

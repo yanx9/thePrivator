@@ -637,7 +637,7 @@ fn safe_method(value: Option<&str>) -> Option<String> {
     if segments.all(|segment| {
         let mut chars = segment.chars();
         matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
-            && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '_')
+            && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
     }) {
         Some(value.to_string())
     } else {
@@ -814,6 +814,26 @@ mod tests {
         assert_eq!(lookup.entries[0]["context"]["legacyId"], "legacy-safe-id");
         assert!(lookup.entries[0]["context"].get("rawPath").is_none());
         assert!(!log_text.contains("/secret"));
+    }
+
+    #[test]
+    fn fixed_command_methods_keep_safe_camel_case_segments() {
+        let store = temp_store();
+        let outcome = store.append_event(json!({
+            "event": "sidecar.request",
+            "requestId": "bridge-apply-preset",
+            "method": "profiles.identity.applyPreset",
+            "status": "ok",
+            "durationMs": 4,
+            "errorCode": null,
+            "detailRef": null
+        }));
+        let log_text = read_log_text(&store);
+        let row: Value = serde_json::from_str(log_text.trim()).expect("diagnostic row is json");
+
+        assert_eq!(outcome.written, 1);
+        assert_eq!(row["method"], "profiles.identity.applyPreset");
+        assert!(!log_text.contains("params"));
     }
 
     #[test]

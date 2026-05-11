@@ -6,6 +6,7 @@ import {
   FORBIDDEN_PROFILE_RUNTIME_FIELDS,
   PACKAGED_SMOKE_AUDIT_PAGE_ID,
   PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+  PACKAGED_SMOKE_AUDIT_PAGE_COUNT,
   PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
   PACKAGED_SMOKE_PRESET_ID,
   PACKAGED_SMOKE_PRESET_LABEL,
@@ -144,6 +145,7 @@ describe("verify-s06 guard helpers", () => {
     });
     expect(PACKAGED_SMOKE_AUDIT_PAGE_ID).toBe("browserleaks-webgl");
     expect(PACKAGED_SMOKE_AUDIT_PAGE_LABEL).toBe("BrowserLeaks WebGL");
+    expect(PACKAGED_SMOKE_AUDIT_PAGE_COUNT).toBe(9);
     expect(REQUIRED_DIAGNOSTIC_METHODS).toEqual([
       "profiles.create",
       "profiles.identity.applyPreset",
@@ -278,11 +280,11 @@ describe("verify-s06 guard helpers", () => {
     });
   });
 
-  it("redacts absolute roots, env values, Chromium user-data flags, and sensitive output tails", () => {
+  it("redacts absolute roots, public URLs, env values, Chromium user-data flags, and sensitive output tails", () => {
     const root = makeRoot();
     const appDataRoot = join(root, "app-data-root-should-not-leak");
     const value = redact({
-      stderrTail: `launch --user-data-dir=${appDataRoot} THEPRIVATOR_CHROMIUM_PATH=${join(root, "bin", "chromium")} copied-browser-data-should-not-leak`,
+      stderrTail: `launch --user-data-dir=${appDataRoot} THEPRIVATOR_CHROMIUM_PATH=${join(root, "bin", "chromium")} copied-browser-data-should-not-leak https://browserleaks.com/webgl`,
       artifact: join(root, "src-tauri", "target", "release", "theprivator"),
     }, { rootDir: root, sensitiveValues: [appDataRoot, "copied-browser-data-should-not-leak"] });
 
@@ -292,7 +294,9 @@ describe("verify-s06 guard helpers", () => {
     expect(text).not.toContain("copied-browser-data-should-not-leak");
     expect(text).not.toMatch(/--user-data-dir=\S+/);
     expect(text).not.toMatch(/THEPRIVATOR_CHROMIUM_PATH=\S+/);
+    expect(text).not.toMatch(/https?:\/\//i);
     expect(text).toContain("<repo>");
+    expect(text).toContain("<url redacted>");
   });
 
   it("creates a retained isolated S06 smoke root with a unique visible profile name and XDG app environment", () => {

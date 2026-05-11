@@ -82,6 +82,7 @@ export const PACKAGED_SMOKE_EXPECTED_SURFACE_MODES = Object.freeze({
 });
 export const PACKAGED_SMOKE_AUDIT_PAGE_ID = "browserleaks-webgl";
 export const PACKAGED_SMOKE_AUDIT_PAGE_LABEL = "BrowserLeaks WebGL";
+export const PACKAGED_SMOKE_AUDIT_PAGE_COUNT = 9;
 export const REQUIRED_DIAGNOSTIC_METHODS = Object.freeze([
   "profiles.create",
   "profiles.identity.applyPreset",
@@ -294,6 +295,7 @@ export function redact(value, options = {}) {
     output = output.replace(/THEPRIVATOR_CHROMIUM_PATH=(?:"[^"]+"|'[^']+'|\S+)/g, "<chromium-path redacted>");
     output = output.replace(/(proxy[_-]?(?:user|pass)(?:word)?)(=|:)(?:"[^"]+"|'[^']+'|\S+)/gi, "$1$2<redacted>");
     output = output.replace(/Traceback(?:[^\n]*(?:\n\s+[^\n]*)*)?/g, "<traceback redacted>");
+    output = output.replace(/https?:\/\/[^\s"')]+/gi, "<url redacted>");
     return output;
   }
 
@@ -1404,8 +1406,16 @@ async function waitForVisibleText(driver, expectedText, runtime, options = {}) {
   }, { ...options, step: options.step ?? "visible-text" });
 }
 
+function profileCardXPath(name) {
+  return `//article[contains(concat(' ', normalize-space(@class), ' '), ' profile-card ')][.//h3[normalize-space()=${xpathLiteral(name)}]]`;
+}
+
 function profileCardByName(name) {
-  return By.xpath(`//article[contains(concat(' ', normalize-space(@class), ' '), ' profile-card ')][.//h3[normalize-space()=${xpathLiteral(name)}]]`);
+  return By.xpath(profileCardXPath(name));
+}
+
+function profileSectionByAriaLabel(profileName, ariaLabel) {
+  return By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(ariaLabel)}]`);
 }
 
 async function waitForProfileCard(driver, profileName, runtime, options = {}) {
@@ -1434,7 +1444,7 @@ async function waitForProfileButton(driver, profileName, buttonText, runtime, op
 }
 
 async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedValue, runtime, options = {}) {
-  const selector = By.xpath(`//section[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1][normalize-space()=${xpathLiteral(String(expectedValue))}]`);
+  const selector = By.xpath(`//*[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1][normalize-space()=${xpathLiteral(String(expectedValue))}]`);
   return waitForVisibleElement(driver, selector, runtime, `${sectionLabel} metric ${metricLabel}=${expectedValue}`, {
     ...options,
     step: options.step ?? "metric-value",
@@ -1493,6 +1503,240 @@ async function createSmokeProfile(driver, runtime) {
   };
 }
 
+async function waitForProfileSectionText(driver, profileName, ariaLabel, expectedText, runtime, options = {}) {
+  const selector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(ariaLabel)}][contains(normalize-space(.), ${xpathLiteral(expectedText)})]`);
+  await waitForVisibleElement(driver, selector, runtime, `${ariaLabel} text ${expectedText}`, {
+    ...options,
+    step: options.step ?? "profile-section-text",
+  });
+  return { ariaLabel, text: expectedText };
+}
+
+async function waitForProfileSectionTexts(driver, profileName, ariaLabel, expectedTexts, runtime, options = {}) {
+  for (const expectedText of expectedTexts) {
+    await waitForProfileSectionText(driver, profileName, ariaLabel, expectedText, runtime, options);
+  }
+  return {
+    ariaLabel,
+    observedText: expectedTexts,
+  };
+}
+
+async function waitForSmokeIdentityPresetControls(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const panelSelector = profileSectionByAriaLabel(profileName, `Configure identity for ${profileName}`);
+  return pollForValue(driver, runtime, PACKAGED_SMOKE_PRESET_LABEL, async () => {
+    const panels = await driver.findElements(panelSelector);
+    for (const panel of panels) {
+      if (!(await panel.isDisplayed())) {
+        continue;
+      }
+      const selects = await panel.findElements(By.xpath(".//label[normalize-space()='Curated preset']/following-sibling::select[1]"));
+      for (const select of selects) {
+        if (!(await select.isDisplayed())) {
+          continue;
+        }
+        const matchingOptions = await select.findElements(By.xpath(`.//option[@value=${xpathLiteral(PACKAGED_SMOKE_PRESET_ID)} and contains(normalize-space(.), ${xpathLiteral(PACKAGED_SMOKE_PRESET_LABEL)})]`));
+        const presetOptions = await select.findElements(By.xpath(".//option[string-length(normalize-space(@value)) > 0]"));
+        if (matchingOptions.length > 0 && await select.isEnabled()) {
+          return {
+            select,
+            option: matchingOptions[0],
+            presetCount: presetOptions.length,
+          };
+        }
+      }
+    }
+    return null;
+  }, { ...options, step: options.step ?? "packaged-identity-config" });
+}
+
+async function assertSmokeIdentitySummary(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  await waitForProfileSectionTexts(driver, profileName, `${profileName} saved identity summary`, [
+    PACKAGED_SMOKE_PRESET_LABEL,
+    `Preset ${PACKAGED_SMOKE_PRESET_ID}`,
+    "Browser masked",
+    "Canvas noise",
+    "WebGL masked",
+  ], runtime, { ...options, step: options.step ?? "packaged-identity-summary" });
+  return {
+    label: PACKAGED_SMOKE_PRESET_LABEL,
+    presetId: PACKAGED_SMOKE_PRESET_ID,
+    surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
+    summary: "visible",
+  };
+}
+
+async function openSmokeIdentityConfig(driver, runtime) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const configureButton = await waitForProfileButton(driver, profileName, "Configure identity", runtime, {
+    step: "packaged-identity-config",
+  });
+  try {
+    await configureButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Configure identity button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-identity-config",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForVisibleElement(driver, profileSectionByAriaLabel(profileName, `Configure identity for ${profileName}`), runtime, `Configure identity for ${profileName}`, {
+    step: "packaged-identity-config",
+  });
+  const controls = await waitForSmokeIdentityPresetControls(driver, runtime, { step: "packaged-identity-config" });
+  await waitForMetricValue(driver, `${profileName} identity observability`, "Preset count", String(controls.presetCount), runtime, {
+    step: "packaged-identity-config",
+  });
+  await waitForProfileSectionTexts(driver, profileName, `Configure identity for ${profileName}`, [
+    "Profile identity configuration",
+    "Apply a curated preset",
+    PACKAGED_SMOKE_PRESET_LABEL,
+  ], runtime, { step: "packaged-identity-config" });
+
+  return {
+    smokeProfileName: profileName,
+    identityPanel: "visible",
+    presetId: PACKAGED_SMOKE_PRESET_ID,
+    presetLabel: PACKAGED_SMOKE_PRESET_LABEL,
+    presetCount: controls.presetCount,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function applySmokeIdentityPreset(driver, runtime) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const controls = await waitForSmokeIdentityPresetControls(driver, runtime, { step: "packaged-identity-apply" });
+  try {
+    await controls.select.click();
+    await controls.option.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to select the curated identity preset through the visible select control.", {
+      code: "S06_UI_SELECT_FAILED",
+      step: "packaged-identity-apply",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const applyButton = await waitForProfileButton(driver, profileName, "Apply preset", runtime, {
+    step: "packaged-identity-apply",
+  });
+  try {
+    await applyButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Apply preset button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-identity-apply",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForVisibleText(driver, "Preset applied for next launch.", runtime, { step: "packaged-identity-apply" });
+  await waitForVisibleText(driver, "Preset applied with 0 sidecar warnings.", runtime, { step: "packaged-identity-apply" });
+  const summary = await assertSmokeIdentitySummary(driver, runtime, { step: "packaged-identity-apply" });
+  return {
+    smokeProfileName: profileName,
+    presetId: PACKAGED_SMOKE_PRESET_ID,
+    presetLabel: PACKAGED_SMOKE_PRESET_LABEL,
+    presetCount: controls.presetCount,
+    successCopy: "visible",
+    ...summary,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function openSmokeAuditGuide(driver, runtime) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const openButton = await waitForProfileButton(driver, profileName, "Open audit guide", runtime, {
+    step: "packaged-audit-plan",
+  });
+  try {
+    await openButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Open audit guide button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-audit-plan",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForVisibleElement(driver, profileSectionByAriaLabel(profileName, `Audit guide for ${profileName}`), runtime, `Audit guide for ${profileName}`, {
+    step: "packaged-audit-plan",
+  });
+  await waitForProfileSectionTexts(driver, profileName, `Audit guide for ${profileName}`, [
+    `${PACKAGED_SMOKE_AUDIT_PAGE_COUNT} curated checker pages`,
+    "Compare manually; do not treat one public checker as authoritative.",
+    "Public checker pages can change",
+    "Checker, page, or network issues are external instability",
+    PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+    PACKAGED_SMOKE_AUDIT_PAGE_ID,
+    "The app sends only the fixed pageId to the typed audit-open wrapper",
+  ], runtime, { step: "packaged-audit-plan" });
+
+  return {
+    smokeProfileName: profileName,
+    pageCount: PACKAGED_SMOKE_AUDIT_PAGE_COUNT,
+    pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+    pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+    checkerContent: "not-inspected",
+    authority: "page-id-only",
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function waitForAuditPageOpenButton(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const selector = By.xpath(`${profileCardXPath(profileName)}//article[contains(concat(' ', normalize-space(@class), ' '), ' identity-audit-page-card ')][.//h5[normalize-space()=${xpathLiteral(PACKAGED_SMOKE_AUDIT_PAGE_LABEL)}] and .//dt[normalize-space()='Page ID']/following-sibling::dd[1][normalize-space()=${xpathLiteral(PACKAGED_SMOKE_AUDIT_PAGE_ID)}]]//button[normalize-space()='Open in profile']`);
+  return pollForValue(driver, runtime, `${PACKAGED_SMOKE_AUDIT_PAGE_LABEL} Open in profile button`, async () => {
+    const buttons = await driver.findElements(selector);
+    for (const button of buttons) {
+      if ((await button.isDisplayed()) && (await button.isEnabled())) {
+        return button;
+      }
+    }
+    return null;
+  }, { ...options, step: options.step ?? "packaged-audit-open" });
+}
+
+async function openSmokeAuditPage(driver, runtime) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const openButton = await waitForAuditPageOpenButton(driver, runtime, { step: "packaged-audit-open" });
+  try {
+    await openButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click BrowserLeaks WebGL Open in profile through the visible audit guide.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-audit-open",
+      pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForProfileSectionTexts(driver, profileName, `Audit guide for ${profileName}`, [
+    `${PACKAGED_SMOKE_AUDIT_PAGE_LABEL} opened in the configured profile.`,
+    "The sidecar launched an audit-capable Chromium session before opening the curated page.",
+    "The app does not read public page content or checker scores.",
+    "Page ID",
+    PACKAGED_SMOKE_AUDIT_PAGE_ID,
+    "Launched by audit-open",
+    "launched · 1 running",
+  ], runtime, { step: "packaged-audit-open" });
+
+  return {
+    smokeProfileName: profileName,
+    pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+    pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+    openSuccess: "visible",
+    launchMetadata: "launched",
+    runningCount: 1,
+    checkerContent: "not-inspected",
+    authority: "page-id-only",
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
 async function launchSmokeChromium(driver, runtime) {
   const launchButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Launch Chromium", runtime, {
     step: "packaged-chromium-launch",
@@ -1517,24 +1761,25 @@ async function launchSmokeChromium(driver, runtime) {
   };
 }
 
-async function stopSmokeChromium(driver, runtime) {
+async function stopSmokeChromium(driver, runtime, options = {}) {
+  const step = options.step ?? "packaged-chromium-stop";
   const stopButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Stop Chromium", runtime, {
-    step: "packaged-chromium-stop",
+    step,
   });
   try {
     await stopButton.click();
   } catch (error) {
     await failUi(driver, runtime, "Failed to click the visible Stop Chromium button.", {
       code: "S06_UI_CLICK_FAILED",
-      step: "packaged-chromium-stop",
+      step,
       message: error instanceof Error ? error.message : String(error),
     });
   }
 
   await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Launch Chromium", runtime, {
-    step: "packaged-chromium-stop",
+    step,
   });
-  await waitForMetricValue(driver, "Profile observability", "Running count", "0", runtime, { step: "packaged-chromium-stop" });
+  await waitForMetricValue(driver, "Profile observability", "Running count", "0", runtime, { step });
   return {
     smokeProfileName: runtime.smokeContext.smokeProfileName,
     lifecycle: "stopped",
@@ -1546,9 +1791,11 @@ async function stopSmokeChromium(driver, runtime) {
 async function assertRestartPersistence(driver, runtime) {
   await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-restart-persistence" });
   await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "packaged-restart-persistence" });
+  const identitySummary = await assertSmokeIdentitySummary(driver, runtime, { step: "packaged-restart-persistence" });
   return {
     smokeProfileName: runtime.smokeContext.smokeProfileName,
     profileCard: "visible-after-restart",
+    identitySummary,
     smokeRoot: runtime.smokeContext.smokeRootRelative,
   };
 }
@@ -2282,9 +2529,11 @@ async function runPackagedUiSmoke(proof, options = {}) {
 
     await runStepAsync("packaged-ui-initial", async () => assertInitialPackagedUi(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     await runStepAsync("packaged-profile-create", async () => createSmokeProfile(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const identityConfig = await runStepAsync("packaged-identity-config", async () => openSmokeIdentityConfig(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const identityApply = await runStepAsync("packaged-identity-apply", async () => applySmokeIdentityPreset(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     await runStepAsync("packaged-chromium-launch", async () => launchSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     runningObserved = true;
-    await runStepAsync("packaged-chromium-stop", async () => stopSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const firstStop = await runStepAsync("packaged-chromium-stop", async () => stopSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     runningObserved = false;
 
     await runStepAsync("webdriver-session-quit", async () => quitDriverSession(driver), redactionOptionsForSmoke(rootDir, smokeContext));
@@ -2297,6 +2546,11 @@ async function runPackagedUiSmoke(proof, options = {}) {
       smokeContext,
     }), redactionOptionsForSmoke(rootDir, smokeContext));
     const restartProof = await runStepAsync("packaged-restart-persistence", async () => assertRestartPersistence(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const auditPlan = await runStepAsync("packaged-audit-plan", async () => openSmokeAuditGuide(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const auditOpen = await runStepAsync("packaged-audit-open", async () => openSmokeAuditPage(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    runningObserved = true;
+    const auditStop = await runStepAsync("packaged-audit-cleanup-stop", async () => stopSmokeChromium(driver, runtime, { step: "packaged-audit-cleanup-stop" }), redactionOptionsForSmoke(rootDir, smokeContext));
+    runningObserved = false;
     const profileStore = runStep("profile-store-persistence", () => assertPostSmokeProfileStore({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
     const diagnostics = runStep("diagnostics-correlation", () => assertPostSmokeDiagnostics({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
 
@@ -2304,12 +2558,58 @@ async function runPackagedUiSmoke(proof, options = {}) {
       application: proof.releaseExecutable,
       smokeProfileName: smokeContext.smokeProfileName,
       smokeRoot: smokeContext.smokeRootRelative,
-      lifecycle: "created-launched-stopped-restarted",
+      lifecycle: "created-identity-launched-stopped-restarted-audit-opened-stopped",
       legacyImportSurface: "visible",
       retainedSmokeRoot: true,
+      identity: {
+        ...profileStore.identity,
+        persistence: "profile-store",
+        configuredVia: "visible-ui",
+      },
+      audit: {
+        pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+        pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+        pageCount: auditPlan.pageCount,
+        planDiagnostic: diagnostics.required["identity.audit.plan"] ? "observed" : "missing",
+        openDiagnostic: diagnostics.required["identity.audit.open"] ? "observed" : "missing",
+        checkerContent: "not-inspected",
+        authority: "page-id-only",
+        openSuccess: auditOpen.openSuccess,
+        launchMetadata: auditOpen.launchMetadata,
+      },
       observations: {
-        running: { lifecycle: "running", runningCount: 1 },
-        stopped: { lifecycle: "stopped", runningCount: 0 },
+        identityConfig: {
+          presetId: identityConfig.presetId,
+          presetCount: identityConfig.presetCount,
+          panel: identityConfig.identityPanel,
+        },
+        identityApply: {
+          presetId: identityApply.presetId,
+          presetLabel: identityApply.presetLabel,
+          successCopy: identityApply.successCopy,
+          summary: identityApply.summary,
+        },
+        running: { lifecycle: "running", runningCount: 1, identity: "configured" },
+        stopped: { lifecycle: firstStop.lifecycle, runningCount: firstStop.runningCount },
+        restart: {
+          profileCard: restartProof.profileCard,
+          identitySummary: restartProof.identitySummary.summary,
+          presetId: restartProof.identitySummary.presetId,
+        },
+        auditPlan: {
+          pageCount: auditPlan.pageCount,
+          pageId: auditPlan.pageId,
+          checkerContent: auditPlan.checkerContent,
+        },
+        auditOpen: {
+          pageId: auditOpen.pageId,
+          pageLabel: auditOpen.pageLabel,
+          openSuccess: auditOpen.openSuccess,
+          launchMetadata: auditOpen.launchMetadata,
+          runningCount: auditOpen.runningCount,
+          checkerContent: auditOpen.checkerContent,
+        },
+        auditCleanup: { lifecycle: auditStop.lifecycle, runningCount: auditStop.runningCount },
       },
       restartPersistence: restartProof.profileCard,
       profileStore,

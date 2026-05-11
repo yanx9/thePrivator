@@ -30,7 +30,7 @@ _REQUEST_STATUSES = {"ok", "error"}
 _LEGACY_OUTCOME_STATUSES = {"partial", "failed"}
 _SAFE_CONTEXT_KEYS = {"legacyId"}
 _DETAIL_REF_PATTERN = re.compile(r"^(?:sidecar|bridge|ui)-[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_METHOD_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_METHOD_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 _ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{1,95}$")
 _LEGACY_ID_PATTERN = re.compile(r"^legacy-[A-Za-z0-9_.:-]{1,96}$")
 
