@@ -191,6 +191,8 @@ label {
 .create-card,
 .profile-feedback,
 .legacy-import-panel,
+.identity-summary-panel,
+.identity-config-panel,
 .profile-card,
 .empty-state {
   border: 1px solid var(--line);
@@ -915,6 +917,139 @@ p {
   line-height: 1.35;
 }
 
+.identity-summary-panel,
+.identity-config-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(212, 135, 75, 0.11), rgba(154, 178, 111, 0.06)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.identity-summary-panel {
+  border-color: rgba(154, 178, 111, 0.34);
+}
+
+.identity-summary-panel__header,
+.identity-config-panel__header,
+.identity-panel-subhead {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.identity-summary-panel h4,
+.identity-config-panel h4 {
+  margin-bottom: 0;
+}
+
+.identity-summary-panel p,
+.identity-config-panel p,
+.identity-muted-copy,
+.identity-mode-option small,
+.identity-warning-card p,
+.identity-error-feedback p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.identity-config-panel {
+  border-color: rgba(240, 198, 109, 0.32);
+}
+
+.identity-config-observability,
+.identity-status,
+.identity-preset-list,
+.identity-warning-list,
+.identity-surface-controls,
+.identity-error-feedback {
+  padding: 14px;
+  border: 1px solid rgba(242, 234, 219, 0.12);
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.identity-status {
+  border-color: rgba(240, 198, 109, 0.42);
+  color: #ffe6a6;
+  background: var(--warning-soft);
+}
+
+.identity-error-feedback {
+  border-color: rgba(230, 120, 95, 0.46);
+  background:
+    linear-gradient(180deg, rgba(230, 120, 95, 0.14), rgba(230, 120, 95, 0.055)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.identity-error-feedback > strong {
+  color: #ffe0d7;
+}
+
+.identity-panel-subhead span {
+  color: var(--muted-strong);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.identity-preset-list__items,
+.identity-warning-list__items,
+.identity-surface-controls__items {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.identity-preset-card,
+.identity-warning-card,
+.identity-mode-group {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(242, 234, 219, 0.11);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.13);
+}
+
+.identity-warning-card {
+  border-color: rgba(240, 198, 109, 0.34);
+  background: rgba(240, 198, 109, 0.075);
+}
+
+.identity-warning-card strong {
+  color: #ffe6a6;
+}
+
+.identity-mode-group {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.identity-mode-group legend {
+  padding: 0 4px;
+  color: var(--ink);
+  font-weight: 850;
+}
+
+.identity-mode-option {
+  display: grid;
+  grid-template-columns: auto minmax(72px, 0.24fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.identity-mode-option input {
+  width: 20px;
+  min-height: 20px;
+  accent-color: var(--sage);
+}
+
 .runtime-panel {
   display: grid;
   gap: 14px;
@@ -1244,6 +1379,9 @@ p {
   .create-controls,
   .legacy-scan-controls,
   .legacy-import-panel__header,
+  .identity-summary-panel__header,
+  .identity-config-panel__header,
+  .identity-panel-subhead,
   .legacy-selection-bar,
   .legacy-import-actions,
   .legacy-outcome-panel__summary,
@@ -1261,6 +1399,8 @@ p {
   .create-controls button,
   .legacy-scan-controls button,
   .legacy-import-actions button,
+  .identity-summary-panel__header button,
+  .identity-config-panel__header button,
   .runtime-panel__header button,
   .system-actions button,
   .diagnostic-reference__button,
@@ -1271,6 +1411,7 @@ p {
   .profile-metadata,
   .defaults-grid,
   .runtime-proof-grid,
+  .identity-mode-option,
   .legacy-chip-list {
     grid-template-columns: 1fr;
   }

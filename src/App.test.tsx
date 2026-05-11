@@ -94,6 +94,51 @@ function profileEnvelope(result: unknown, overrides: Record<string, unknown> = {
   };
 }
 
+function identityPreset(label: string, presetId: string, overrides: Record<string, unknown> = {}) {
+  return defaultIdentity({ label, presetId, ...overrides });
+}
+
+function identityPresetResult(presets: unknown[] = [
+  identityPreset("Real identity", "real"),
+  identityPreset("Balanced desktop", "balanced-desktop"),
+  identityPreset("Travel laptop", "travel-laptop"),
+  identityPreset("Strict privacy", "strict-privacy"),
+]) {
+  return {
+    identityVersion: 1,
+    presets,
+    count: presets.length,
+  };
+}
+
+function identityWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "IDENTITY_TIMEZONE_MISMATCH",
+    message: "Locale timezone does not match the selected browser region.",
+    surface: "locale",
+    path: "locale.timezoneId",
+    ...overrides,
+  };
+}
+
+function identityValidationResult(identity: unknown, warnings: unknown[] = [identityWarning()]) {
+  return {
+    identityVersion: 1,
+    identity,
+    warnings,
+  };
+}
+
+function identityEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-identity-1",
+    protocolVersion: "1.0.0",
+    durationMs: 5.25,
+    result,
+    ...overrides,
+  };
+}
+
 function profileError(code: string, message: string, detailRef = "profile-detail-ref") {
   return {
     code,
@@ -352,6 +397,130 @@ describe("ThePrivator profile library UI", () => {
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Current count1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/List requestbridge-profiles-1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Running count0/i);
+  });
+
+  it("renders saved identity as profile truth without lazy identity startup calls", async () => {
+    const savedIdentity = defaultIdentity({
+      label: "Banking desktop",
+      presetId: "balanced-desktop",
+      browser: { mode: "masked", userAgent: "Mozilla/5.0 Banking" },
+      canvas: { mode: "noise", noiseSeed: 444 },
+      webgl: { mode: "custom", vendor: "Intel Inc.", renderer: "Mesa Intel" },
+    });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const identityPanel = within(card).getByLabelText(/research saved identity summary/i);
+    expect(identityPanel).toHaveTextContent(/M002 saved identity/i);
+    expect(identityPanel).toHaveTextContent(/Banking desktop/i);
+    expect(identityPanel).toHaveTextContent(/Preset balanced-desktop/i);
+    expect(identityPanel).toHaveTextContent(/Browser masked/i);
+    expect(identityPanel).toHaveTextContent(/Canvas noise/i);
+    expect(identityPanel).toHaveTextContent(/WebGL custom/i);
+    expect(commandCalls("identity_presets_list")).toHaveLength(0);
+    expect(commandCalls("identity_validate")).toHaveLength(0);
+  });
+
+  it("lazy-loads curated presets and saved validation warnings when Configure identity opens", async () => {
+    const savedIdentity = defaultIdentity({ label: "Research laptop", presetId: "balanced-desktop" });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [identityWarning()])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    expect(panel).toHaveTextContent(/Identity configuration phase/i);
+    expect(panel).toHaveTextContent(/Balanced desktop/i);
+    expect(panel).toHaveTextContent(/Travel laptop/i);
+    expect(panel).toHaveTextContent(/Strict privacy/i);
+    expect(panel).toHaveTextContent(/Real identity/i);
+    expect(panel).toHaveTextContent(/Saved warnings1/i);
+    expect(panel).toHaveTextContent(/IDENTITY_TIMEZONE_MISMATCH/i);
+    expect(panel).toHaveTextContent(/Locale timezone does not match/i);
+    expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list");
+    expect(mockInvoke).toHaveBeenCalledWith("identity_validate", { identity: savedIdentity });
+    expect(commandCalls("identity_presets_list")).toHaveLength(1);
+    expect(commandCalls("identity_validate")).toHaveLength(1);
+  });
+
+  it("renders saved-validation failures safely without mutating the profile list", async () => {
+    const savedIdentity = defaultIdentity({ label: "Warning profile", presetId: null });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockRejectedValueOnce(profileError("IDENTITY_VALIDATION_FAILED", "Saved identity validation failed.", "sidecar-validation-detail"));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_VALIDATION_FAILED/i));
+    expect(panel).toHaveTextContent(/Saved identity validation failed/i);
+    expect(panel).toHaveTextContent(/sidecar-validation-detail/i);
+    expect(panel).toHaveTextContent(/Warning profile/i);
+    expect(panel).toHaveTextContent(/No preset/i);
+    expect(screen.getByRole("listitem", { name: /research/i })).toBeInTheDocument();
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
+  it("renders preset-loading failures safely while preserving the saved identity draft", async () => {
+    const savedIdentity = defaultIdentity({ label: "Preset failure profile", presetId: "balanced-desktop" });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockRejectedValueOnce(profileError("IDENTITY_PRESETS_UNAVAILABLE", "Identity preset list could not be loaded.", "sidecar-preset-detail"))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+
+    const panel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(panel).toHaveTextContent(/IDENTITY_PRESETS_UNAVAILABLE/i));
+    expect(panel).toHaveTextContent(/Identity preset list could not be loaded/i);
+    expect(panel).toHaveTextContent(/sidecar-preset-detail/i);
+    expect(panel).toHaveTextContent(/Preset failure profile/i);
+    expect(panel).toHaveTextContent(/Preset balanced-desktop/i);
+    expect(commandCalls("identity_presets_list")).toHaveLength(1);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
+  it("reuses cached presets when reopening the same identity panel", async () => {
+    const savedIdentity = defaultIdentity({ label: "Cached profile", presetId: "balanced-desktop" });
+    const profile = profileRecord({ name: "Research", identity: savedIdentity });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope(identityPresetResult()))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])))
+      .mockResolvedValueOnce(identityEnvelope(identityValidationResult(savedIdentity, [])));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const firstPanel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(firstPanel).toHaveTextContent(/Preset count4/i));
+    fireEvent.click(within(firstPanel).getByRole("button", { name: /close identity configuration/i }));
+    expect(within(card).queryByRole("region", { name: /configure identity for research/i })).not.toBeInTheDocument();
+
+    fireEvent.click(within(card).getByRole("button", { name: /configure identity for research/i }));
+    const reopenedPanel = await within(card).findByRole("region", { name: /configure identity for research/i });
+    await waitFor(() => expect(reopenedPanel).toHaveTextContent(/Preset count4/i));
+    expect(commandCalls("identity_presets_list")).toHaveLength(1);
+    expect(commandCalls("identity_validate")).toHaveLength(2);
   });
 
   it("renders startup profile load failures as actionable recovery without claiming an empty store", async () => {
@@ -1108,8 +1277,11 @@ describe("ThePrivator profile library UI", () => {
 
     expect(source).toContain("scanLegacyProfiles");
     expect(source).toContain("importLegacyProfiles");
+    expect(source).toContain("listIdentityPresets");
+    expect(source).toContain("validateIdentity");
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs)/);
-    expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage/);
+    expect(source).not.toMatch(/\binvoke\s*\(/);
+    expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
     expect(source).not.toMatch(/type=\"file\"|type='file'/);
   });
 
