@@ -168,6 +168,22 @@ def test_malformed_inputs_raise_typed_recoverable_errors(identity, code):
     assert_identity_error(exc_info, code)
 
 
+@pytest.mark.parametrize(
+    ("identity", "code"),
+    [
+        (with_change(curated_preset("windows-10-chrome-120"), ["browser", "mode"], "noise"), IDENTITY_UNSUPPORTED_MODE),
+        (with_change(curated_preset("windows-10-chrome-120"), ["browser", "clientHints", "mobile"], "false"), IDENTITY_INVALID),
+        (with_change(curated_preset("windows-10-chrome-120"), ["locale", "languages"], ["bad language"]), IDENTITY_INVALID),
+        (with_change(curated_preset("windows-10-chrome-120"), ["webgl", "renderer"], ""), IDENTITY_INVALID),
+    ],
+)
+def test_warning_generation_propagates_typed_errors_for_malformed_identities(identity, code):
+    with pytest.raises(SidecarError) as exc_info:
+        warnings_for_identity(identity)
+
+    assert_identity_error(exc_info, code)
+
+
 def test_malformed_built_in_preset_table_fails_validation_with_detail_ref():
     malformed = {
         "broken-preset": with_change(DEFAULT_REAL_IDENTITY, ["browser", "mode"], "noise")
@@ -245,6 +261,46 @@ def test_oversized_language_lists_are_rejected_before_persistence():
             ),
             {"IDENTITY_UNUSUAL_CPU", "IDENTITY_UNUSUAL_DEVICE_MEMORY"},
         ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["browser", "clientHints", "platform"], "macOS"),
+            {"IDENTITY_CLIENT_HINT_PLATFORM_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["browser", "clientHints", "platformVersion"], "13.6.0"),
+            {"IDENTITY_CLIENT_HINT_VERSION_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["browser", "clientHints", "architecture"], "arm"),
+            {"IDENTITY_CLIENT_HINT_ARCHITECTURE_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["browser", "clientHints", "mobile"], True),
+            {"IDENTITY_CLIENT_HINT_MOBILE_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["locale", "languages"], ["fr-FR", "fr"]),
+            {"IDENTITY_LOCALE_LANGUAGE_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["locale", "timezoneId"], "Europe/Berlin"),
+            {"IDENTITY_TIMEZONE_REGION_MISMATCH"},
+        ),
+        (
+            with_change(curated_preset("windows-10-chrome-120"), ["audio", "noiseSeed"], 120010),
+            {"IDENTITY_REUSED_NOISE_SEED"},
+        ),
+        (
+            with_change(
+                with_change(
+                    curated_preset("windows-10-chrome-120"),
+                    ["webgl", "vendor"],
+                    "Google Inc. (Apple)",
+                ),
+                ["webgl", "renderer"],
+                "ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)",
+            ),
+            {"IDENTITY_WEBGL_OS_MISMATCH"},
+        ),
     ],
 )
 def test_suspicious_but_possible_overrides_return_warnings_without_hard_error(identity, expected_codes):
@@ -252,3 +308,11 @@ def test_suspicious_but_possible_overrides_return_warnings_without_hard_error(id
 
     assert expected_codes <= warning_codes(normalized)
     assert validate_identity(identity) == normalized
+
+
+def test_validate_curated_presets_returns_warning_free_normalized_table():
+    normalized = validate_curated_presets()
+
+    assert normalized == CURATED_PRESETS
+    for preset in normalized.values():
+        assert warning_codes(preset) == set()

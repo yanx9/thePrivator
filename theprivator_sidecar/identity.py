@@ -545,6 +545,8 @@ def _warnings_for_normalized_identity(identity: Mapping[str, Any]) -> list[Ident
     browser = identity.get("browser", {})
     navigator = identity.get("navigator", {})
     screen = identity.get("screen", {})
+    locale = identity.get("locale", {})
+    webgl = identity.get("webgl", {})
 
     if screen.get("mode") != "real" and _is_desktop_platform(navigator) and screen.get("width", 0) < screen.get("height", 0):
         warnings.append(
@@ -618,7 +620,150 @@ def _warnings_for_normalized_identity(identity: Mapping[str, Any]) -> list[Ident
                 )
             )
 
+    _append_client_hint_warnings(warnings, browser, navigator)
+    _append_locale_warnings(warnings, locale)
+    _append_noise_seed_warnings(warnings, identity)
+    _append_webgl_os_warning(warnings, browser, navigator, webgl)
+
     return warnings
+
+
+def _append_client_hint_warnings(
+    warnings: list[IdentityWarning],
+    browser: Mapping[str, Any],
+    navigator: Mapping[str, Any],
+) -> None:
+    hints = browser.get("clientHints")
+    if not isinstance(hints, Mapping) or navigator.get("mode") == "real":
+        return
+
+    hint_platform_family = _platform_family_from_value(hints.get("platform"))
+    navigator_platform_family = _platform_family_from_value(navigator.get("uaPlatform")) or _platform_family_from_value(navigator.get("platform"))
+    if hint_platform_family is not None and navigator_platform_family is not None and hint_platform_family != navigator_platform_family:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_CLIENT_HINT_PLATFORM_MISMATCH",
+                message="Browser Client Hint platform does not match navigator platform metadata.",
+                surface="browser",
+                path="browser.clientHints.platform",
+            )
+        )
+
+    hint_platform_version = hints.get("platformVersion")
+    navigator_platform_version = navigator.get("uaPlatformVersion")
+    if _non_empty_string(hint_platform_version) and _non_empty_string(navigator_platform_version) and hint_platform_version != navigator_platform_version:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_CLIENT_HINT_VERSION_MISMATCH",
+                message="Browser Client Hint platform version does not match navigator platform version metadata.",
+                surface="browser",
+                path="browser.clientHints.platformVersion",
+            )
+        )
+
+    hint_architecture = _architecture_family(hints.get("architecture"))
+    navigator_architecture = _architecture_family(navigator.get("uaArchitecture"))
+    if hint_architecture is not None and navigator_architecture is not None and hint_architecture != navigator_architecture:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_CLIENT_HINT_ARCHITECTURE_MISMATCH",
+                message="Browser Client Hint architecture does not match navigator architecture metadata.",
+                surface="browser",
+                path="browser.clientHints.architecture",
+            )
+        )
+
+    hint_mobile = hints.get("mobile")
+    navigator_mobile = navigator.get("uaMobile")
+    if isinstance(hint_mobile, bool) and isinstance(navigator_mobile, bool) and hint_mobile != navigator_mobile:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_CLIENT_HINT_MOBILE_MISMATCH",
+                message="Browser Client Hint mobile flag does not match navigator mobile metadata.",
+                surface="browser",
+                path="browser.clientHints.mobile",
+            )
+        )
+
+
+def _append_locale_warnings(warnings: list[IdentityWarning], locale: Mapping[str, Any]) -> None:
+    if locale.get("mode") == "real":
+        return
+
+    locale_tag = locale.get("locale")
+    languages = locale.get("languages")
+    first_language = languages[0] if isinstance(languages, Sequence) and not isinstance(languages, (str, bytes)) and languages else None
+    if _language_primary(locale_tag) is not None and _language_primary(first_language) is not None and _language_primary(locale_tag) != _language_primary(first_language):
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_LOCALE_LANGUAGE_MISMATCH",
+                message="Locale primary language does not match the first navigator language.",
+                surface="locale",
+                path="locale.languages[0]",
+            )
+        )
+
+    locale_region = _language_region(locale_tag)
+    timezone_region = _timezone_region(locale.get("timezoneId"))
+    expected_timezone_regions = _timezone_regions_for_locale_region(locale_region)
+    if expected_timezone_regions and timezone_region is not None and timezone_region not in expected_timezone_regions:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_TIMEZONE_REGION_MISMATCH",
+                message="Timezone region is unusual for the locale region.",
+                surface="locale",
+                path="locale.timezoneId",
+            )
+        )
+
+
+def _append_noise_seed_warnings(warnings: list[IdentityWarning], identity: Mapping[str, Any]) -> None:
+    seen: dict[int, str] = {}
+    for surface in ("canvas", "audio", "webgl"):
+        surface_payload = identity.get(surface, {})
+        if not isinstance(surface_payload, Mapping) or surface_payload.get("mode") == "real":
+            continue
+        seed = surface_payload.get("noiseSeed")
+        if not isinstance(seed, int):
+            continue
+        if seed in seen:
+            warnings.append(
+                IdentityWarning(
+                    code="IDENTITY_REUSED_NOISE_SEED",
+                    message="Multiple fingerprinting surfaces reuse the same noise seed.",
+                    surface=surface,
+                    path=f"{surface}.noiseSeed",
+                )
+            )
+            return
+        seen[seed] = surface
+
+
+def _append_webgl_os_warning(
+    warnings: list[IdentityWarning],
+    browser: Mapping[str, Any],
+    navigator: Mapping[str, Any],
+    webgl: Mapping[str, Any],
+) -> None:
+    if webgl.get("mode") == "real":
+        return
+
+    expected_family = (
+        _user_agent_family(browser.get("userAgent"))
+        or _platform_family_from_value(navigator.get("uaPlatform"))
+        or _platform_family_from_value(navigator.get("platform"))
+    )
+    observed_family = _webgl_os_family(webgl)
+    comparable_families = {"Windows", "macOS", "Linux"}
+    if expected_family in comparable_families and observed_family in comparable_families and expected_family != observed_family:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_WEBGL_OS_MISMATCH",
+                message="WebGL vendor or renderer indicates a different OS family than browser and navigator metadata.",
+                surface="webgl",
+                path="webgl.renderer",
+            )
+        )
 
 
 def _is_desktop_platform(navigator: Mapping[str, Any]) -> bool:
@@ -665,6 +810,123 @@ def _navigator_matches_ua_family(family: str, platform: str, ua_platform: str) -
     if family == "Android":
         return platform.startswith("Linux") and ua_platform == "Android"
     return True
+
+
+def _platform_family_from_value(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if "android" in normalized:
+        return "Android"
+    if normalized in {"windows", "win32", "win64"} or normalized.startswith("win"):
+        return "Windows"
+    if normalized in {"macos", "macintel"} or "mac" in normalized:
+        return "macOS"
+    if normalized == "linux" or normalized.startswith("linux") or normalized == "x11":
+        return "Linux"
+    return None
+
+
+def _architecture_family(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {"x86", "x86_64", "x64", "amd64", "ia32"}:
+        return "x86"
+    if normalized in {"arm", "arm64", "aarch64"}:
+        return "arm"
+    return normalized or None
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _language_primary(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return value.split("-", 1)[0].lower()
+
+
+def _language_region(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    parts = value.split("-")
+    if len(parts) < 2:
+        return None
+    region = parts[1]
+    if len(region) == 2 and region.isalpha():
+        return region.upper()
+    if len(region) == 3 and region.isdigit():
+        return region
+    return None
+
+
+def _timezone_region(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or value == "UTC":
+        return None
+    return value.split("/", 1)[0]
+
+
+def _timezone_regions_for_locale_region(region: Optional[str]) -> set[str]:
+    if region is None:
+        return set()
+    america = {"AR", "BR", "CA", "CL", "CO", "MX", "PE", "US", "VE"}
+    europe = {
+        "AT",
+        "BE",
+        "CH",
+        "CZ",
+        "DE",
+        "DK",
+        "ES",
+        "FI",
+        "FR",
+        "GB",
+        "GR",
+        "HU",
+        "IE",
+        "IT",
+        "NL",
+        "NO",
+        "PL",
+        "PT",
+        "RO",
+        "SE",
+        "UA",
+    }
+    asia = {"CN", "HK", "ID", "IN", "JP", "KR", "MY", "PH", "SG", "TH", "TW", "VN"}
+    africa = {"EG", "KE", "MA", "NG", "ZA"}
+    if region in america:
+        return {"America"}
+    if region in europe:
+        return {"Europe"}
+    if region in asia:
+        return {"Asia"}
+    if region == "AU":
+        return {"Australia"}
+    if region == "NZ":
+        return {"Pacific"}
+    if region in africa:
+        return {"Africa"}
+    return set()
+
+
+def _webgl_os_family(webgl: Mapping[str, Any]) -> Optional[str]:
+    vendor = webgl.get("vendor")
+    renderer = webgl.get("renderer")
+    combined = " ".join(part for part in (vendor, renderer) if isinstance(part, str)).lower()
+    if not combined:
+        return None
+    if "direct3d" in combined or "directx" in combined or " d3d" in combined:
+        return "Windows"
+    if "apple" in combined or "metal" in combined:
+        return "macOS"
+    if "mesa" in combined:
+        return "Linux"
+    return None
 
 
 def _ensure_keys(
