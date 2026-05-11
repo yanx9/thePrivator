@@ -70,6 +70,20 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
                 "platformVersion": "",
                 "architecture": "x86",
                 "mobile": False,
+                "model": "",
+                "bitness": "64",
+                "brands": [
+                    {"brand": "Chromium", "version": "120"},
+                    {"brand": "Google Chrome", "version": "120"},
+                    {"brand": "Not=A?Brand", "version": "99"},
+                ],
+                "fullVersionList": [
+                    {"brand": "Chromium", "version": "120.0.0.0"},
+                    {"brand": "Google Chrome", "version": "120.0.0.0"},
+                    {"brand": "Not=A?Brand", "version": "99.0.0.0"},
+                ],
+                "fullVersion": "120.0.0.0",
+                "wow64": False,
             },
         },
         "locale": {
@@ -120,6 +134,7 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
             "wow64": False,
         },
     }
+    assert plan.extension_config["navigator"]["userAgentData"] == plan.cdp_overrides["userAgent"]["userAgentMetadata"]
     assert plan.cdp_overrides["locale"] == {"locale": "en-US"}
     assert plan.cdp_overrides["timezone"] == {"timezoneId": "America/New_York"}
     assert plan.cdp_overrides["deviceMetrics"] == {
@@ -139,6 +154,41 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
     ]
     assert "label" not in plan.to_dict()
     assert_json_safe(plan.to_dict())
+
+
+def test_user_agent_metadata_prefers_browser_client_hints_and_falls_back_to_navigator_fields():
+    identity = curated_preset("windows-10-chrome-120")
+    identity["browser"]["clientHints"] = {
+        "platform": "Windows",
+        "platformVersion": "11.0.0",
+        "mobile": False,
+        "model": "",
+    }
+
+    plan = build_identity_runtime_plan(identity)
+
+    expected_metadata = {
+        "platform": "Windows",
+        "platformVersion": "11.0.0",
+        "architecture": "x86",
+        "mobile": False,
+        "model": "",
+        "bitness": "64",
+        "brands": [
+            {"brand": "Chromium", "version": "120"},
+            {"brand": "Google Chrome", "version": "120"},
+            {"brand": "Not=A?Brand", "version": "99"},
+        ],
+        "fullVersionList": [
+            {"brand": "Chromium", "version": "120.0.0.0"},
+            {"brand": "Google Chrome", "version": "120.0.0.0"},
+            {"brand": "Not=A?Brand", "version": "99.0.0.0"},
+        ],
+        "fullVersion": "120.0.0.0",
+        "wow64": False,
+    }
+    assert plan.extension_config["navigator"]["userAgentData"] == expected_metadata
+    assert plan.cdp_overrides["userAgent"]["userAgentMetadata"] == expected_metadata
 
 
 def test_default_real_identity_maps_to_noop_runtime_plan():
@@ -186,6 +236,11 @@ def test_extension_generation_writes_main_world_document_start_config_before_pro
     assert "Navigator.prototype" in generated[PROTECTOR_SCRIPT_NAME]
     assert "Screen.prototype" in generated[PROTECTOR_SCRIPT_NAME]
     assert "RTCPeerConnection" in generated[PROTECTOR_SCRIPT_NAME]
+    assert "getHighEntropyValues" in generated[PROTECTOR_SCRIPT_NAME]
+    assert "fullVersionList" in generated[PROTECTOR_SCRIPT_NAME]
+    assert "uaFullVersion" in generated[PROTECTOR_SCRIPT_NAME]
+    assert "getFloatFrequencyData" in generated[PROTECTOR_SCRIPT_NAME]
+    assert "Number.isFinite(array[i])" in generated[PROTECTOR_SCRIPT_NAME]
     combined = "\n".join(generated.values())
     for forbidden in FORBIDDEN_GENERATED_TEXT:
         assert forbidden not in combined
@@ -237,6 +292,24 @@ def test_extension_validation_rejects_missing_files_invalid_manifest_and_unsafe_
     error = assert_sidecar_error(unsafe_exc, IDENTITY_EXTENSION_FAILED)
     assert "debugPort" not in error.message
     assert "9222" not in error.message
+
+    invalid_seed = copy.deepcopy(plan.extension_config)
+    invalid_seed["audio"]["noiseSeed"] = "not-a-number"
+    with pytest.raises(SidecarError) as seed_exc:
+        generate_identity_extension(tmp_path, "profile-id", invalid_seed)
+    assert_sidecar_error(seed_exc, IDENTITY_EXTENSION_FAILED)
+
+    invalid_webrtc = copy.deepcopy(plan.extension_config)
+    invalid_webrtc["webrtc"]["policy"] = "leakLocalIps"
+    with pytest.raises(SidecarError) as webrtc_exc:
+        generate_identity_extension(tmp_path, "profile-id", invalid_webrtc)
+    assert_sidecar_error(webrtc_exc, IDENTITY_EXTENSION_FAILED)
+
+    invalid_uadata = copy.deepcopy(plan.extension_config)
+    invalid_uadata["navigator"]["userAgentData"]["brands"] = [{"brand": "Chromium"}]
+    with pytest.raises(SidecarError) as uadata_exc:
+        generate_identity_extension(tmp_path, "profile-id", invalid_uadata)
+    assert_sidecar_error(uadata_exc, IDENTITY_EXTENSION_FAILED)
 
 
 def test_runtime_mapping_rejects_invalid_identity_before_artifact_planning():

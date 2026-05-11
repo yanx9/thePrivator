@@ -31,7 +31,19 @@ _ALLOWED_TOP_LEVEL = {
     "webrtc",
 }
 _ALLOWED_NAVIGATOR = {"platform", "hardwareConcurrency", "deviceMemory", "userAgentData"}
-_ALLOWED_USER_AGENT_DATA = {"platform", "platformVersion", "architecture", "mobile", "bitness", "model"}
+_ALLOWED_USER_AGENT_DATA = {
+    "platform",
+    "platformVersion",
+    "architecture",
+    "mobile",
+    "bitness",
+    "model",
+    "brands",
+    "fullVersionList",
+    "fullVersion",
+    "wow64",
+}
+_REQUIRED_USER_AGENT_DATA = set(_ALLOWED_USER_AGENT_DATA)
 _ALLOWED_LOCALE = {"locale", "languages", "timezoneId"}
 _ALLOWED_SCREEN = {"width", "height", "viewportWidth", "viewportHeight", "colorDepth", "pixelRatio"}
 _ALLOWED_NOISE = {"enabled", "noiseSeed"}
@@ -163,16 +175,16 @@ def _validate_extension_config(config: Mapping[str, Any]) -> None:
     if "navigator" in config:
         navigator = _require_object(config["navigator"])
         _ensure_keys(navigator, _ALLOWED_NAVIGATOR)
-        _require_string(navigator.get("platform"))
-        _require_int(navigator.get("hardwareConcurrency"), minimum=1, maximum=128)
-        _require_number(navigator.get("deviceMemory"), minimum=0.25, maximum=128)
-        user_agent_data = _require_object(navigator.get("userAgentData"))
-        _ensure_keys(user_agent_data, _ALLOWED_USER_AGENT_DATA)
-        for key in ("platform", "platformVersion", "architecture", "bitness", "model"):
-            if key in user_agent_data:
-                _require_string(user_agent_data[key], allow_empty=key in {"platformVersion", "model"})
-        if not isinstance(user_agent_data.get("mobile"), bool):
+        if not navigator:
             raise _extension_error()
+        if "platform" in navigator:
+            _require_string(navigator.get("platform"))
+        if "hardwareConcurrency" in navigator:
+            _require_int(navigator.get("hardwareConcurrency"), minimum=1, maximum=128)
+        if "deviceMemory" in navigator:
+            _require_number(navigator.get("deviceMemory"), minimum=0.25, maximum=128)
+        if "userAgentData" in navigator:
+            _validate_user_agent_data(_require_object(navigator.get("userAgentData")))
 
     if "locale" in config:
         locale = _require_object(config["locale"])
@@ -217,6 +229,30 @@ def _validate_extension_config(config: Mapping[str, Any]) -> None:
             raise _extension_error()
 
     _assert_no_forbidden_text(json.dumps(config, ensure_ascii=True, allow_nan=False, sort_keys=True))
+
+
+def _validate_user_agent_data(user_agent_data: Mapping[str, Any]) -> None:
+    _ensure_keys(user_agent_data, _ALLOWED_USER_AGENT_DATA)
+    if not _REQUIRED_USER_AGENT_DATA.issubset(set(user_agent_data)):
+        raise _extension_error()
+    for key in ("platform", "platformVersion", "architecture", "bitness", "model", "fullVersion"):
+        _require_string(user_agent_data[key], allow_empty=True)
+    if not isinstance(user_agent_data.get("mobile"), bool):
+        raise _extension_error()
+    if not isinstance(user_agent_data.get("wow64"), bool):
+        raise _extension_error()
+    _validate_brand_list(user_agent_data.get("brands"))
+    _validate_brand_list(user_agent_data.get("fullVersionList"))
+
+
+def _validate_brand_list(value: Any) -> None:
+    if not isinstance(value, list) or not value or len(value) > 8:
+        raise _extension_error()
+    for item in value:
+        brand = _require_object(item)
+        _ensure_keys(brand, {"brand", "version"})
+        _require_string(brand.get("brand"))
+        _require_string(brand.get("version"))
 
 
 def _validate_manifest(manifest: Mapping[str, Any]) -> None:
@@ -292,9 +328,10 @@ def _protector_script() -> str:
     return x - Math.floor(x);
   };
   const maskFunction = (replacement, original) => {
+    const nativeLike = typeof original === 'function' ? original : function () {};
     try {
       Object.defineProperty(replacement, 'toString', {
-        value: () => Function.prototype.toString.call(original),
+        value: () => Function.prototype.toString.call(nativeLike),
         configurable: true,
       });
     } catch (_) {}
@@ -312,59 +349,77 @@ def _protector_script() -> str:
       });
     } catch (_) {}
   };
+  const copyBrands = (brands) => Object.freeze((Array.isArray(brands) ? brands : []).map((brand) => Object.freeze({
+    brand: String((brand && brand.brand) || ''),
+    version: String((brand && brand.version) || ''),
+  })));
 
   const navigatorConfig = config.navigator || {};
-  overrideGetter(Navigator.prototype, 'platform', navigatorConfig.platform);
-  overrideGetter(Navigator.prototype, 'hardwareConcurrency', navigatorConfig.hardwareConcurrency);
-  overrideGetter(Navigator.prototype, 'deviceMemory', navigatorConfig.deviceMemory);
+  const navigatorPrototype = globalThis.Navigator && globalThis.Navigator.prototype;
+  overrideGetter(navigatorPrototype, 'platform', navigatorConfig.platform);
+  overrideGetter(navigatorPrototype, 'hardwareConcurrency', navigatorConfig.hardwareConcurrency);
+  overrideGetter(navigatorPrototype, 'deviceMemory', navigatorConfig.deviceMemory);
   if (navigatorConfig.userAgentData) {
+    const source = navigatorConfig.userAgentData;
+    const mobile = Boolean(source.mobile);
+    const platform = source.platform || '';
     const uaData = Object.freeze({
-      brands: [],
-      mobile: Boolean(navigatorConfig.userAgentData.mobile),
-      platform: navigatorConfig.userAgentData.platform || '',
-      getHighEntropyValues: async (hints) => {
-        const result = { mobile: Boolean(navigatorConfig.userAgentData.mobile), platform: navigatorConfig.userAgentData.platform || '' };
-        for (const hint of hints || []) {
-          if (hint === 'platformVersion') result.platformVersion = navigatorConfig.userAgentData.platformVersion || '';
-          if (hint === 'architecture') result.architecture = navigatorConfig.userAgentData.architecture || '';
-          if (hint === 'bitness') result.bitness = navigatorConfig.userAgentData.bitness || '';
-          if (hint === 'model') result.model = navigatorConfig.userAgentData.model || '';
+      brands: copyBrands(source.brands),
+      mobile,
+      platform,
+      getHighEntropyValues: maskFunction(async function (hints) {
+        const result = { brands: copyBrands(source.brands), mobile, platform };
+        const requested = Array.isArray(hints) ? hints : [];
+        for (const hint of requested) {
+          if (hint === 'platform') result.platform = platform;
+          if (hint === 'platformVersion') result.platformVersion = source.platformVersion || '';
+          if (hint === 'architecture') result.architecture = source.architecture || '';
+          if (hint === 'bitness') result.bitness = source.bitness || '';
+          if (hint === 'model') result.model = source.model || '';
+          if (hint === 'uaFullVersion') result.uaFullVersion = source.fullVersion || '';
+          if (hint === 'fullVersion') result.fullVersion = source.fullVersion || '';
+          if (hint === 'fullVersionList') result.fullVersionList = copyBrands(source.fullVersionList);
+          if (hint === 'wow64') result.wow64 = Boolean(source.wow64);
         }
         return result;
-      },
-      toJSON: () => ({ brands: [], mobile: Boolean(navigatorConfig.userAgentData.mobile), platform: navigatorConfig.userAgentData.platform || '' }),
+      }, async function getHighEntropyValues() {}),
+      toJSON: maskFunction(function () { return { brands: copyBrands(source.brands), mobile, platform }; }, function toJSON() {}),
     });
-    overrideGetter(Navigator.prototype, 'userAgentData', uaData);
+    overrideGetter(navigatorPrototype, 'userAgentData', uaData);
   }
 
   const localeConfig = config.locale || {};
   if (Array.isArray(localeConfig.languages)) {
-    overrideGetter(Navigator.prototype, 'languages', Object.freeze([...localeConfig.languages]));
-    overrideGetter(Navigator.prototype, 'language', localeConfig.languages[0]);
+    overrideGetter(navigatorPrototype, 'languages', Object.freeze([...localeConfig.languages]));
+    overrideGetter(navigatorPrototype, 'language', localeConfig.languages[0]);
   }
   if (localeConfig.locale || localeConfig.timezoneId) {
-    const originalResolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
-    Intl.DateTimeFormat.prototype.resolvedOptions = maskFunction(function (...args) {
-      const result = originalResolvedOptions.apply(this, args);
-      if (localeConfig.locale) result.locale = localeConfig.locale;
-      if (localeConfig.timezoneId) result.timeZone = localeConfig.timezoneId;
-      return result;
-    }, originalResolvedOptions);
+    const originalResolvedOptions = globalThis.Intl && globalThis.Intl.DateTimeFormat && globalThis.Intl.DateTimeFormat.prototype && globalThis.Intl.DateTimeFormat.prototype.resolvedOptions;
+    if (typeof originalResolvedOptions === 'function') {
+      globalThis.Intl.DateTimeFormat.prototype.resolvedOptions = maskFunction(function (...args) {
+        const result = originalResolvedOptions.apply(this, args);
+        if (localeConfig.locale) result.locale = localeConfig.locale;
+        if (localeConfig.timezoneId) result.timeZone = localeConfig.timezoneId;
+        return result;
+      }, originalResolvedOptions);
+    }
   }
 
   const screenConfig = config.screen || {};
-  overrideGetter(Screen.prototype, 'width', screenConfig.width);
-  overrideGetter(Screen.prototype, 'height', screenConfig.height);
-  overrideGetter(Screen.prototype, 'availWidth', screenConfig.width);
-  overrideGetter(Screen.prototype, 'availHeight', screenConfig.height);
-  overrideGetter(Screen.prototype, 'colorDepth', screenConfig.colorDepth);
-  overrideGetter(Screen.prototype, 'pixelDepth', screenConfig.colorDepth);
-  overrideGetter(Window.prototype, 'innerWidth', screenConfig.viewportWidth);
-  overrideGetter(Window.prototype, 'innerHeight', screenConfig.viewportHeight);
-  overrideGetter(Window.prototype, 'devicePixelRatio', screenConfig.pixelRatio);
+  const screenPrototype = globalThis.Screen && globalThis.Screen.prototype;
+  const windowPrototype = globalThis.Window && globalThis.Window.prototype;
+  overrideGetter(screenPrototype, 'width', screenConfig.width);
+  overrideGetter(screenPrototype, 'height', screenConfig.height);
+  overrideGetter(screenPrototype, 'availWidth', screenConfig.width);
+  overrideGetter(screenPrototype, 'availHeight', screenConfig.height);
+  overrideGetter(screenPrototype, 'colorDepth', screenConfig.colorDepth);
+  overrideGetter(screenPrototype, 'pixelDepth', screenConfig.colorDepth);
+  overrideGetter(windowPrototype, 'innerWidth', screenConfig.viewportWidth);
+  overrideGetter(windowPrototype, 'innerHeight', screenConfig.viewportHeight);
+  overrideGetter(windowPrototype, 'devicePixelRatio', screenConfig.pixelRatio);
 
   const canvasConfig = config.canvas || {};
-  if (canvasConfig.enabled && typeof HTMLCanvasElement !== 'undefined') {
+  if (canvasConfig.enabled && globalThis.HTMLCanvasElement && globalThis.CanvasRenderingContext2D) {
     const seed = canvasConfig.noiseSeed || 1;
     const addNoise = (imageData, seedBase) => {
       if (!imageData || !imageData.data) return imageData;
@@ -378,60 +433,96 @@ def _protector_script() -> str:
       return imageData;
     };
     const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    CanvasRenderingContext2D.prototype.getImageData = maskFunction(function (...args) {
-      return addNoise(originalGetImageData.apply(this, args), seed);
-    }, originalGetImageData);
+    if (typeof originalGetImageData === 'function') {
+      CanvasRenderingContext2D.prototype.getImageData = maskFunction(function (...args) {
+        return addNoise(originalGetImageData.apply(this, args), seed);
+      }, originalGetImageData);
+    }
     const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = maskFunction(function (...args) {
-      const context = this.getContext && this.getContext('2d');
-      if (context) {
-        try {
-          const data = context.getImageData(0, 0, this.width, this.height);
-          context.putImageData(addNoise(data, seed), 0, 0);
-        } catch (_) {}
-      }
-      return originalToDataURL.apply(this, args);
-    }, originalToDataURL);
+    if (typeof originalToDataURL === 'function') {
+      HTMLCanvasElement.prototype.toDataURL = maskFunction(function (...args) {
+        const context = this.getContext && this.getContext('2d');
+        if (context && typeof context.getImageData === 'function' && typeof context.putImageData === 'function') {
+          try {
+            const data = context.getImageData(0, 0, this.width, this.height);
+            context.putImageData(addNoise(data, seed), 0, 0);
+          } catch (_) {}
+        }
+        return originalToDataURL.apply(this, args);
+      }, originalToDataURL);
+    }
   }
 
   const webglConfig = config.webgl || {};
   const hookWebgl = (Constructor) => {
     if (!webglConfig.enabled || !Constructor || !Constructor.prototype) return;
     const originalGetParameter = Constructor.prototype.getParameter;
-    Constructor.prototype.getParameter = maskFunction(function (parameter) {
-      if ((parameter === 0x9245 || parameter === 0x1F00) && webglConfig.vendor) return webglConfig.vendor;
-      if ((parameter === 0x9246 || parameter === 0x1F01) && webglConfig.renderer) return webglConfig.renderer;
-      return originalGetParameter.call(this, parameter);
-    }, originalGetParameter);
+    if (typeof originalGetParameter === 'function') {
+      Constructor.prototype.getParameter = maskFunction(function (parameter) {
+        if ((parameter === 0x9245 || parameter === 0x1F00) && webglConfig.vendor) return webglConfig.vendor;
+        if ((parameter === 0x9246 || parameter === 0x1F01) && webglConfig.renderer) return webglConfig.renderer;
+        return originalGetParameter.call(this, parameter);
+      }, originalGetParameter);
+    }
     const originalReadPixels = Constructor.prototype.readPixels;
-    Constructor.prototype.readPixels = maskFunction(function (...args) {
-      const result = originalReadPixels.apply(this, args);
-      const pixels = args[6];
-      if (pixels && pixels.length && webglConfig.noiseSeed !== undefined) {
-        for (let i = 0; i < pixels.length; i += 4) {
-          const noise = Math.floor(seededRandom(webglConfig.noiseSeed + i) * 5) - 2;
-          pixels[i] = Math.max(0, Math.min(255, pixels[i] + noise));
+    if (typeof originalReadPixels === 'function') {
+      Constructor.prototype.readPixels = maskFunction(function (...args) {
+        const result = originalReadPixels.apply(this, args);
+        const pixels = args[6];
+        if (pixels && pixels.length && webglConfig.noiseSeed !== undefined) {
+          for (let i = 0; i < pixels.length; i += 4) {
+            const noise = Math.floor(seededRandom(webglConfig.noiseSeed + i) * 5) - 2;
+            pixels[i] = Math.max(0, Math.min(255, pixels[i] + noise));
+          }
         }
-      }
-      return result;
-    }, originalReadPixels);
+        return result;
+      }, originalReadPixels);
+    }
   };
   hookWebgl(globalThis.WebGLRenderingContext);
   hookWebgl(globalThis.WebGL2RenderingContext);
 
   const audioConfig = config.audio || {};
-  if (audioConfig.enabled && typeof AnalyserNode !== 'undefined') {
-    const original = AnalyserNode.prototype.getFloatFrequencyData;
-    AnalyserNode.prototype.getFloatFrequencyData = maskFunction(function (array) {
-      original.call(this, array);
-      for (let i = 0; i < array.length; i += 1) array[i] += seededRandom((audioConfig.noiseSeed || 1) + i) * 0.01;
+  if (audioConfig.enabled && globalThis.AnalyserNode && globalThis.AnalyserNode.prototype) {
+    const seed = audioConfig.noiseSeed || 1;
+    const addFloatNoise = (array) => {
+      if (!array || typeof array.length !== 'number') return array;
+      for (let i = 0; i < array.length; i += 1) {
+        const base = Number.isFinite(array[i]) ? array[i] : -100;
+        array[i] = base + ((seededRandom(seed + i) - 0.5) * 0.02);
+      }
       return array;
-    }, original);
+    };
+    const addByteNoise = (array) => {
+      if (!array || typeof array.length !== 'number') return array;
+      for (let i = 0; i < array.length; i += 1) {
+        const noise = Math.floor(seededRandom(seed + i) * 5) - 2;
+        array[i] = Math.max(0, Math.min(255, array[i] + noise));
+      }
+      return array;
+    };
+    const hookAnalyser = (methodName, mutator) => {
+      const original = AnalyserNode.prototype[methodName];
+      if (typeof original !== 'function') return;
+      AnalyserNode.prototype[methodName] = maskFunction(function (array) {
+        original.call(this, array);
+        return mutator(array);
+      }, original);
+    };
+    hookAnalyser('getFloatFrequencyData', addFloatNoise);
+    hookAnalyser('getFloatTimeDomainData', addFloatNoise);
+    hookAnalyser('getByteFrequencyData', addByteNoise);
   }
 
   const webrtcConfig = config.webrtc || {};
   if (webrtcConfig.policy === 'block') {
-    const BlockedPeerConnection = function () { throw new DOMException('WebRTC unavailable', 'NotAllowedError'); };
+    const makeBlockedError = () => {
+      if (typeof DOMException === 'function') return new DOMException('WebRTC unavailable', 'NotAllowedError');
+      const error = new Error('WebRTC unavailable');
+      error.name = 'NotAllowedError';
+      return error;
+    };
+    const BlockedPeerConnection = maskFunction(function () { throw makeBlockedError(); }, globalThis.RTCPeerConnection);
     globalThis.RTCPeerConnection = BlockedPeerConnection;
     globalThis.webkitRTCPeerConnection = BlockedPeerConnection;
   } else if (webrtcConfig.policy === 'disableNonProxiedUdp' && globalThis.RTCPeerConnection) {

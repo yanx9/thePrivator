@@ -71,14 +71,22 @@ def build_identity_runtime_plan(identity: Any) -> IdentityRuntimePlan:
 def _build_extension_config(identity: Mapping[str, Any]) -> JsonObject:
     config: JsonObject = {}
 
+    browser = identity["browser"]
     navigator = identity["navigator"]
+    navigator_config: JsonObject = {}
     if navigator.get("mode") != "real":
-        config["navigator"] = {
-            "platform": navigator["platform"],
-            "hardwareConcurrency": navigator["hardwareConcurrency"],
-            "deviceMemory": navigator["deviceMemory"],
-            "userAgentData": _navigator_user_agent_metadata(navigator),
-        }
+        navigator_config.update(
+            {
+                "platform": navigator["platform"],
+                "hardwareConcurrency": navigator["hardwareConcurrency"],
+                "deviceMemory": navigator["deviceMemory"],
+            }
+        )
+    user_agent_metadata = _browser_user_agent_metadata(browser, navigator)
+    if user_agent_metadata:
+        navigator_config["userAgentData"] = user_agent_metadata
+    if navigator_config:
+        config["navigator"] = navigator_config
 
     locale = identity["locale"]
     if locale.get("mode") != "real":
@@ -186,12 +194,25 @@ def _build_launch_flags(identity: Mapping[str, Any]) -> list[str]:
 
 
 def _browser_user_agent_metadata(browser: Mapping[str, Any], navigator: Mapping[str, Any]) -> JsonObject:
+    browser_hints: JsonObject = {}
     raw_hints = browser.get("clientHints")
     if isinstance(raw_hints, Mapping) and raw_hints:
-        return _complete_cdp_user_agent_metadata(_ordered_metadata(raw_hints), browser.get("userAgent"))
-    if navigator.get("mode") == "real":
+        browser_hints = _ordered_metadata(raw_hints)
+
+    navigator_hints: JsonObject = {}
+    if navigator.get("mode") != "real":
+        navigator_hints = _navigator_user_agent_metadata(navigator)
+
+    if not browser_hints and not navigator_hints:
         return {}
-    return _complete_cdp_user_agent_metadata(_navigator_user_agent_metadata(navigator), browser.get("userAgent"))
+
+    merged: JsonObject = {}
+    for key in ("platform", "platformVersion", "architecture", "mobile", "bitness", "model"):
+        if key in browser_hints:
+            merged[key] = browser_hints[key]
+        elif key in navigator_hints:
+            merged[key] = navigator_hints[key]
+    return _complete_cdp_user_agent_metadata(merged, browser.get("userAgent"))
 
 
 def _complete_cdp_user_agent_metadata(raw: Mapping[str, Any], user_agent: Any) -> JsonObject:

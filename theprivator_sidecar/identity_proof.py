@@ -111,11 +111,27 @@ PROOF_COLLECTOR_SCRIPT = r"""
     }
   };
 
-  const collectAudio = () => {
+  const collectAudio = async () => {
     try {
       const Context = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
       if (!Context) return { supported: false };
-      return { supported: true, sample: [0, 0.125, -0.125] };
+      const context = new Context(1, 128, 44100);
+      const oscillator = context.createOscillator();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 32;
+      oscillator.type = 'triangle';
+      oscillator.frequency.value = 440;
+      oscillator.connect(analyser);
+      analyser.connect(context.destination);
+      oscillator.start(0);
+      oscillator.stop(128 / 44100);
+      await context.startRendering();
+      const sample = new Float32Array(Math.min(8, analyser.frequencyBinCount || 8));
+      analyser.getFloatFrequencyData(sample);
+      return {
+        supported: true,
+        sample: Array.from(sample).map((value) => (Number.isFinite(value) ? Number(value.toFixed(6)) : null)),
+      };
     } catch (error) {
       return { supported: false, errorName: errorName(error) };
     }
@@ -163,7 +179,7 @@ PROOF_COLLECTOR_SCRIPT = r"""
     },
     canvas: collectCanvas(),
     webgl: collectWebgl(),
-    audio: collectAudio(),
+    audio: await collectAudio(),
     webrtc: collectWebrtc(),
   };
 })()

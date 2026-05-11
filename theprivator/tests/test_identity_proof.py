@@ -9,6 +9,7 @@ import requests
 from theprivator_sidecar.cdp import CdpEndpoint, CdpPageEndpoint
 from theprivator_sidecar.identity_proof import (
     IdentityProofServer,
+    PROOF_COLLECTOR_SCRIPT,
     collect_identity_proof,
     collect_identity_proof_for_user_data_dir,
     validate_identity_observation,
@@ -26,7 +27,15 @@ def valid_observation() -> dict[str, Any]:
                 "brands": [],
                 "mobile": False,
                 "platform": "Linux",
-                "highEntropy": {"architecture": "x86", "platformVersion": ""},
+                "highEntropy": {
+                "architecture": "x86",
+                "bitness": "64",
+                "model": "",
+                "platform": "Linux",
+                "platformVersion": "",
+                "uaFullVersion": "120.0.0.0",
+                "fullVersionList": [],
+            },
             },
         },
         "navigator": {
@@ -160,6 +169,13 @@ def test_validate_observation_reports_absent_user_agent_data_as_unsupported():
     assert validated["browser"]["userAgentData"] == {"supported": False}
 
 
+def test_proof_collector_audio_exercises_analyser_path_not_static_placeholder():
+    assert "await collectAudio()" in PROOF_COLLECTOR_SCRIPT
+    assert "createAnalyser" in PROOF_COLLECTOR_SCRIPT
+    assert "getFloatFrequencyData" in PROOF_COLLECTOR_SCRIPT
+    assert "[0, 0.125, -0.125]" not in PROOF_COLLECTOR_SCRIPT
+
+
 def test_collect_identity_proof_discovers_page_target_from_browser_endpoint(monkeypatch):
     created: list[FakeProofClient] = []
     endpoint = CdpEndpoint(
@@ -266,5 +282,15 @@ def test_collect_identity_proof_rejects_malformed_runtime_payloads():
             client_factory=client_factory,
             timeout_seconds=1,
         )
+
+    assert_sidecar_error(exc_info)
+
+
+def test_validate_observation_rejects_non_finite_audio_samples():
+    observation = valid_observation()
+    observation["audio"] = {"supported": True, "sample": [0, float("nan")]}
+
+    with pytest.raises(SidecarError) as exc_info:
+        validate_identity_observation(observation)
 
     assert_sidecar_error(exc_info)
