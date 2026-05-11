@@ -67,7 +67,29 @@ const PROFILE_STORE_RELATIVE_PATH = "profile-store/profiles.json";
 const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
 const MAX_POST_SMOKE_SCAN_ENTRIES = 5_000;
 const MAX_DIAGNOSTIC_READ_BYTES = 512 * 1024;
-const REQUIRED_DIAGNOSTIC_METHODS = ["profiles.create", "chromium.launch", "chromium.stop"];
+export const PACKAGED_SMOKE_PROFILE_PREFIX = "M002 Packaged Identity Smoke";
+export const PACKAGED_SMOKE_PRESET_ID = "ubuntu-linux-chrome-120";
+export const PACKAGED_SMOKE_PRESET_LABEL = "Ubuntu Linux Chrome 120";
+export const PACKAGED_SMOKE_EXPECTED_SURFACE_MODES = Object.freeze({
+  browser: "masked",
+  navigator: "masked",
+  screen: "masked",
+  locale: "masked",
+  canvas: "noise",
+  audio: "noise",
+  webgl: "masked",
+  webrtc: "masked",
+});
+export const PACKAGED_SMOKE_AUDIT_PAGE_ID = "browserleaks-webgl";
+export const PACKAGED_SMOKE_AUDIT_PAGE_LABEL = "BrowserLeaks WebGL";
+export const REQUIRED_DIAGNOSTIC_METHODS = Object.freeze([
+  "profiles.create",
+  "profiles.identity.applyPreset",
+  "chromium.launch",
+  "chromium.stop",
+  "identity.audit.plan",
+  "identity.audit.open",
+]);
 const SUPPORTING_REGRESSION_COMMANDS = [
   "npm run verify:s01",
   "npm run verify:s03",
@@ -75,7 +97,7 @@ const SUPPORTING_REGRESSION_COMMANDS = [
   "npm run verify:s05",
   "npm run verify:s06",
 ];
-const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
+export const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
   "pid",
   "process",
   "command",
@@ -84,6 +106,44 @@ const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
   "stoppedAt",
   "startedAt",
   "termination",
+  "runtime",
+  "runtimeState",
+  "debugPort",
+  "devtoolsPort",
+  "remoteDebuggingPort",
+  "remoteControlPort",
+  "cdpPort",
+  "cdpEndpoint",
+  "debugEndpoint",
+  "websocket",
+  "webSocket",
+  "websocketUrl",
+  "webSocketUrl",
+  "webSocketDebuggerUrl",
+  "browserWSEndpoint",
+  "wsEndpoint",
+  "targetId",
+  "targetIds",
+  "cdpTargetId",
+  "activeTargetId",
+  "args",
+  "argv",
+  "rawArgs",
+  "commandLine",
+  "extensionPath",
+  "extensionDir",
+  "extensionManifestPath",
+  "extensionConfigPath",
+  "generatedExtensionPath",
+  "generatedExtensionDir",
+  "generatedConfigPath",
+  "generatedConfigDir",
+  "generatedExtension",
+  "generatedConfig",
+  "identityRuntime",
+  "identityRuntimeRegistry",
+  "runtimeRegistry",
+  "cdpRuntime",
 ]);
 const FORBIDDEN_DIAGNOSTIC_KEYS = new Set([
   "params",
@@ -97,6 +157,43 @@ const FORBIDDEN_DIAGNOSTIC_KEYS = new Set([
 const DIAGNOSTIC_ALLOWED_SOURCES = new Set(["python-sidecar"]);
 const DIAGNOSTIC_ALLOWED_EVENTS = new Set(["sidecar.request"]);
 const DIAGNOSTIC_ALLOWED_STATUSES = new Set(["ok", "error"]);
+const FORBIDDEN_FINAL_EVIDENCE_FIELDS = new Set([
+  ...FORBIDDEN_DIAGNOSTIC_KEYS,
+  "debugPort",
+  "devtoolsPort",
+  "remoteDebuggingPort",
+  "remoteControlPort",
+  "cdpPort",
+  "cdpEndpoint",
+  "debugEndpoint",
+  "websocketUrl",
+  "webSocketUrl",
+  "webSocketDebuggerUrl",
+  "browserWSEndpoint",
+  "wsEndpoint",
+  "targetId",
+  "targetIds",
+  "cdpTargetId",
+  "activeTargetId",
+  "args",
+  "argv",
+  "rawArgs",
+  "commandLine",
+  "extensionPath",
+  "extensionDir",
+  "extensionManifestPath",
+  "extensionConfigPath",
+  "generatedExtensionPath",
+  "generatedExtensionDir",
+  "generatedConfigPath",
+  "generatedConfigDir",
+  "generatedExtension",
+  "generatedConfig",
+  "identityRuntime",
+  "identityRuntimeRegistry",
+  "runtimeRegistry",
+  "cdpRuntime",
+]);
 const UNSAFE_TEXT_PATTERNS = [
   { code: "S06_REDACTION_USER_DATA_DIR", pattern: /--user-data-dir(?:=|\s+)/i },
   { code: "S06_REDACTION_CHROMIUM_ENV", pattern: /THEPRIVATOR_CHROMIUM_PATH(?:=|[\"'\s:])/i },
@@ -107,6 +204,11 @@ const UNSAFE_TEXT_PATTERNS = [
   { code: "S06_REDACTION_ENV", pattern: /[\"']env[\"']\s*:/i },
   { code: "S06_REDACTION_STDOUT", pattern: /[\"']stdout[\"']\s*:/i },
   { code: "S06_REDACTION_STDERR", pattern: /[\"']stderr[\"']\s*:/i },
+  { code: "S06_REDACTION_DEBUG_RUNTIME", pattern: /\b(?:debugPort|devtoolsPort|remoteDebuggingPort|remoteControlPort|cdpPort|--remote-debugging-port)\b/i },
+  { code: "S06_REDACTION_WEBSOCKET", pattern: /\b(?:websocketUrl|webSocketUrl|webSocketDebuggerUrl|browserWSEndpoint|wsEndpoint|wss?:\/\/)\b/i },
+  { code: "S06_REDACTION_TARGET_ID", pattern: /\b(?:targetId|targetIds|cdpTargetId|activeTargetId)\b/i },
+  { code: "S06_REDACTION_GENERATED_EXTENSION", pattern: /\b(?:extensionPath|extensionDir|extensionManifestPath|extensionConfigPath|generatedExtensionPath|generatedExtensionDir|generatedConfigPath|generatedConfigDir|chrome-extension:\/\/|manifest\.json)\b/i },
+  { code: "S06_REDACTION_PUBLIC_URL", pattern: /https?:\/\/[^\s\"']+/i },
 ];
 
 const GLOBAL_SENSITIVE_VALUES = new Set([ROOT_DIR]);
@@ -464,7 +566,7 @@ export function createSmokeRunContext(options = {}) {
   const dataRoot = join(smokeRoot, "data");
   const configRoot = join(smokeRoot, "config");
   const cacheRoot = join(smokeRoot, "cache");
-  const smokeProfileName = `M001 Packaged Smoke ${runId}`;
+  const smokeProfileName = `${PACKAGED_SMOKE_PROFILE_PREFIX} ${runId}`;
 
   if (existsSync(smokeRoot)) {
     fail("S06 smoke data root already exists; refusing to reuse a duplicate smoke profile name.", {
@@ -1633,6 +1735,58 @@ function collectForbiddenKeys(value, forbiddenKeys, path = "$", output = []) {
   return output;
 }
 
+function smokeIdentitySurfaceModes(identity) {
+  return Object.fromEntries(Object.keys(PACKAGED_SMOKE_EXPECTED_SURFACE_MODES).map((surface) => [
+    surface,
+    identity?.[surface]?.mode,
+  ]));
+}
+
+function assertPackagedSmokeIdentity(identity, profileStorePath, rootDir, smokeContext) {
+  assert(identity && typeof identity === "object" && !Array.isArray(identity), "Smoke profile identity metadata is missing.", {
+    code: "S06_PROFILE_IDENTITY_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  assert(identity.identityVersion === 1, "Smoke profile identity.identityVersion must be v1.", {
+    code: "S06_PROFILE_IDENTITY_VERSION",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    expectedIdentityVersion: 1,
+    actualIdentityVersion: identity.identityVersion,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  assert(identity.presetId === PACKAGED_SMOKE_PRESET_ID && identity.label === PACKAGED_SMOKE_PRESET_LABEL, "Smoke profile did not persist the curated identity preset.", {
+    code: "S06_PROFILE_IDENTITY_PRESET",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    expectedPresetId: PACKAGED_SMOKE_PRESET_ID,
+    expectedLabel: PACKAGED_SMOKE_PRESET_LABEL,
+    actualPresetId: typeof identity.presetId === "string" ? identity.presetId : null,
+    actualLabel: typeof identity.label === "string" ? identity.label : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  const surfaceModes = smokeIdentitySurfaceModes(identity);
+  for (const [surface, expectedMode] of Object.entries(PACKAGED_SMOKE_EXPECTED_SURFACE_MODES)) {
+    assert(surfaceModes[surface] === expectedMode, "Smoke profile identity surface mode did not match the curated preset.", {
+      code: "S06_PROFILE_IDENTITY_SURFACE_MODE",
+      profileStore: repoRelative(rootDir, profileStorePath),
+      smokeProfileName: smokeContext.smokeProfileName,
+      surface,
+      expectedMode,
+      actualMode: typeof surfaceModes[surface] === "string" ? surfaceModes[surface] : null,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  }
+
+  return {
+    identityVersion: identity.identityVersion,
+    presetId: identity.presetId,
+    label: identity.label,
+    surfaceModes,
+  };
+}
+
 export function assertPostSmokeProfileStore(options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const smokeContext = options.smokeContext;
@@ -1641,6 +1795,14 @@ export function assertPostSmokeProfileStore(options = {}) {
   }, { rootDir });
 
   const { path, appDataRoot, payload, profile } = findSmokeProfileStore(rootDir, smokeContext);
+  assert(payload.storeVersion === 2, "profile-store/profiles.json must persist storeVersion: 2 for identity-aware packaged smoke.", {
+    code: "S06_PROFILE_STORE_VERSION",
+    profileStore: repoRelative(rootDir, path),
+    smokeProfileName: smokeContext.smokeProfileName,
+    expectedStoreVersion: 2,
+    actualStoreVersion: payload.storeVersion,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
+  const identity = assertPackagedSmokeIdentity(profile.identity, path, rootDir, smokeContext);
   const storage = profile.storage;
   assert(storage && typeof storage === "object" && !Array.isArray(storage), "Smoke profile storage metadata is missing.", {
     code: "S06_PROFILE_STORAGE_MISSING",
@@ -1680,6 +1842,8 @@ export function assertPostSmokeProfileStore(options = {}) {
     profileStore: repoRelative(rootDir, path),
     profileId: profile.id,
     profileCount: payload.profiles.length,
+    storeVersion: payload.storeVersion,
+    identity,
     storage: {
       profileDir: storage.profileDir,
       userDataDir: storage.userDataDir,
@@ -1709,13 +1873,12 @@ function readBoundedText(path) {
   }
 }
 
+function isSafeDiagnosticMethodName(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(value);
+}
+
 function parseDiagnosticRecords(path, rootDir, smokeContext, appDataRoot) {
   const text = readBoundedText(path);
-  assertNoUnsafeText("profile-store/diagnostics/events.jsonl", text, {
-    rootDir,
-    smokeContext,
-    sensitiveValues: [appDataRoot],
-  });
 
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const records = [];
@@ -1746,6 +1909,12 @@ function parseDiagnosticRecords(path, rootDir, smokeContext, appDataRoot) {
       logPath: parsed.logPath,
       expected: DIAGNOSTIC_RELATIVE_LOG_PATH,
     }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
+    assert(isSafeDiagnosticMethodName(parsed.method), "Diagnostics log row used an unsafe method name.", {
+      code: "S06_DIAGNOSTICS_METHOD_UNSAFE",
+      diagnosticsLog: repoRelative(rootDir, path),
+      row: index + 1,
+      method: "<unsafe>",
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
     assert(DIAGNOSTIC_ALLOWED_SOURCES.has(parsed.source), "Diagnostics log row used an unsafe source.", {
       code: "S06_DIAGNOSTICS_SOURCE_UNSAFE",
       diagnosticsLog: repoRelative(rootDir, path),
@@ -1766,6 +1935,11 @@ function parseDiagnosticRecords(path, rootDir, smokeContext, appDataRoot) {
     }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
     records.push(parsed);
   }
+  assertNoUnsafeText("profile-store/diagnostics/events.jsonl", text, {
+    rootDir,
+    smokeContext,
+    sensitiveValues: [appDataRoot],
+  });
   return { text, lines, records, malformedRows };
 }
 
@@ -1876,6 +2050,12 @@ export function assertPostSmokeRedaction(options = {}) {
     });
   }
   if (options.evidence) {
+    const forbiddenEvidenceKeys = collectForbiddenKeys(options.evidence, FORBIDDEN_FINAL_EVIDENCE_FIELDS);
+    assert(forbiddenEvidenceKeys.length === 0, "verify.s06 final evidence included forbidden runtime/debug/generated fields.", {
+      code: "S06_REDACTION_FORBIDDEN_FIELD",
+      label: "verify.s06 final evidence",
+      forbiddenKeys: forbiddenEvidenceKeys,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
     assertNoUnsafeText("verify.s06 final evidence", options.evidence, {
       rootDir,
       smokeContext,
@@ -1897,6 +2077,25 @@ function stepByName(checks, name) {
 
 export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, platform = process.platform, arch = process.arch } = {}) {
   const packageInspection = stepByName(checks, "package-sidecar-shape")?.inspections ?? [];
+  const identityProof = smoke?.identity ?? (smoke?.profileStore?.identity
+    ? {
+        ...smoke.profileStore.identity,
+        persistence: "profile-store",
+      }
+    : undefined);
+  const diagnosticProof = smoke?.diagnostics?.required ?? {};
+  const auditPlanObserved = Boolean(diagnosticProof["identity.audit.plan"]);
+  const auditOpenObserved = Boolean(diagnosticProof["identity.audit.open"]);
+  const auditProof = smoke?.audit ?? (auditPlanObserved || auditOpenObserved
+    ? {
+        pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+        pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+        planDiagnostic: auditPlanObserved ? "observed" : "missing",
+        openDiagnostic: auditOpenObserved ? "observed" : "missing",
+        checkerContent: "not-inspected",
+        authority: "page-id-only",
+      }
+    : undefined);
   return {
     os: { platform, arch },
     mode,
@@ -1916,6 +2115,8 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
       diagnosticsSource: smoke?.diagnostics?.diagnosticsLog,
       sourceSidecarSubprocess: false,
     },
+    identity: identityProof,
+    audit: auditProof,
     observations: smoke?.observations ?? {
       running: stepByName(checks, "packaged-chromium-launch")
         ? { lifecycle: "running", runningCount: stepByName(checks, "packaged-chromium-launch")?.runningCount }

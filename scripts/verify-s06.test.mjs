@@ -3,6 +3,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  FORBIDDEN_PROFILE_RUNTIME_FIELDS,
+  PACKAGED_SMOKE_AUDIT_PAGE_ID,
+  PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+  PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
+  PACKAGED_SMOKE_PRESET_ID,
+  PACKAGED_SMOKE_PRESET_LABEL,
+  PACKAGED_SMOKE_PROFILE_PREFIX,
+  REQUIRED_DIAGNOSTIC_METHODS,
   VerifyFailure,
   assertFreshBuildArtifacts,
   assertPostSmokeDiagnostics,
@@ -46,6 +54,23 @@ function defaultIdentity() {
     audio: { mode: "real" },
     webgl: { mode: "real" },
     webrtc: { mode: "real", policy: "real" },
+  };
+}
+
+function packagedSmokeIdentity(overrides = {}) {
+  return {
+    identityVersion: 1,
+    label: PACKAGED_SMOKE_PRESET_LABEL,
+    presetId: PACKAGED_SMOKE_PRESET_ID,
+    browser: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.browser },
+    navigator: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.navigator },
+    screen: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.screen },
+    locale: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.locale },
+    canvas: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.canvas },
+    audio: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.audio },
+    webgl: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.webgl },
+    webrtc: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.webrtc, policy: "disableNonProxiedUdp" },
+    ...overrides,
   };
 }
 
@@ -103,6 +128,44 @@ afterEach(() => {
 });
 
 describe("verify-s06 guard helpers", () => {
+  it("exports the packaged identity and audit evidence contract constants", () => {
+    expect(PACKAGED_SMOKE_PROFILE_PREFIX).toBe("M002 Packaged Identity Smoke");
+    expect(PACKAGED_SMOKE_PRESET_ID).toBe("ubuntu-linux-chrome-120");
+    expect(PACKAGED_SMOKE_PRESET_LABEL).toBe("Ubuntu Linux Chrome 120");
+    expect(PACKAGED_SMOKE_EXPECTED_SURFACE_MODES).toEqual({
+      browser: "masked",
+      navigator: "masked",
+      screen: "masked",
+      locale: "masked",
+      canvas: "noise",
+      audio: "noise",
+      webgl: "masked",
+      webrtc: "masked",
+    });
+    expect(PACKAGED_SMOKE_AUDIT_PAGE_ID).toBe("browserleaks-webgl");
+    expect(PACKAGED_SMOKE_AUDIT_PAGE_LABEL).toBe("BrowserLeaks WebGL");
+    expect(REQUIRED_DIAGNOSTIC_METHODS).toEqual([
+      "profiles.create",
+      "profiles.identity.applyPreset",
+      "chromium.launch",
+      "chromium.stop",
+      "identity.audit.plan",
+      "identity.audit.open",
+    ]);
+    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.presets.list");
+    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.validate");
+    expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).toEqual(expect.arrayContaining([
+      "debugPort",
+      "remoteDebuggingPort",
+      "webSocketDebuggerUrl",
+      "targetId",
+      "argv",
+      "extensionPath",
+      "generatedConfigPath",
+      "identityRuntimeRegistry",
+    ]));
+  });
+
   it("rejects stale package artifacts from before the recorded build start", () => {
     const root = makeRoot();
     const beforeBuild = new Date("2026-01-01T00:00:00.000Z");
@@ -242,7 +305,7 @@ describe("verify-s06 guard helpers", () => {
     });
 
     expect(context.runId).toBe("20260509T101112000Z-abc123");
-    expect(context.smokeProfileName).toBe("M001 Packaged Smoke 20260509T101112000Z-abc123");
+    expect(context.smokeProfileName).toBe(`${PACKAGED_SMOKE_PROFILE_PREFIX} 20260509T101112000Z-abc123`);
     expect(context.smokeRootRelative).toBe("src-tauri/target/s06-smoke-data/20260509T101112000Z-abc123");
     expect(existsSync(context.smokeRoot)).toBe(true);
     expect(context.driverEnv).toMatchObject({
@@ -270,6 +333,10 @@ describe("verify-s06 guard helpers", () => {
     expect(serialized).not.toContain("profileId");
     expect(serialized).not.toContain("chromium");
     expect(serialized).not.toContain("sidecar");
+    expect(serialized).not.toContain(PACKAGED_SMOKE_AUDIT_PAGE_ID);
+    expect(serialized).not.toContain(PACKAGED_SMOKE_PRESET_ID);
+    expect(serialized).not.toMatch(/https?:\/\//i);
+    expect(serialized).not.toContain("debugPort");
   });
 
   it("resolves tauri-driver from PATH or an injected cargo bin and redacts visible UI failure snippets", () => {
@@ -322,7 +389,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
-          identity: defaultIdentity(),
+          identity: packagedSmokeIdentity(),
         },
       ],
     });
@@ -335,13 +402,35 @@ describe("verify-s06 guard helpers", () => {
       appDataRoot: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop",
       profileStore: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop/profile-store/profiles.json",
       profileId,
+      storeVersion: 2,
       persistedRuntimeFields: 0,
       storage: {
         profileDir: `profile-store/profiles/${profileId}`,
         userDataDir: `profile-store/profiles/${profileId}/user-data`,
       },
+      identity: {
+        identityVersion: 1,
+        presetId: PACKAGED_SMOKE_PRESET_ID,
+        label: PACKAGED_SMOKE_PRESET_LABEL,
+        surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
+      },
     });
     expect(JSON.stringify(proof)).not.toContain(root);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
       storeVersion: 2,
@@ -354,7 +443,71 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: defaultIdentity(),
-          status: "running",
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/curated identity preset/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 2,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity({ webgl: { mode: "real" } }),
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/surface mode/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 2,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `/tmp/theprivator/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/safe relative user-data/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 2,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/identity metadata/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 2,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+          debugPort: 9222,
+          extensionPath: `profile-store/profiles/${profileId}/generated-extension`,
         },
       ],
     });
@@ -389,7 +542,7 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
-          identity: defaultIdentity(),
+          identity: packagedSmokeIdentity(),
         },
       ],
     });
@@ -397,9 +550,9 @@ describe("verify-s06 guard helpers", () => {
     mkdirSync(dirname(diagnosticsPath), { recursive: true });
     writeFileSync(diagnosticsPath, [
       "not-json-but-safe",
-      ...["profiles.create", "chromium.launch", "chromium.stop"].map((method, index) => JSON.stringify({
+      ...REQUIRED_DIAGNOSTIC_METHODS.map((method, index) => JSON.stringify({
         schemaVersion: 1,
-        ts: `2026-05-09T10:11:1${index}.000Z`,
+        ts: `2026-05-09T10:11:${String(index).padStart(2, "0")}.000Z`,
         source: "python-sidecar",
         event: "sidecar.request",
         status: "ok",
@@ -414,10 +567,35 @@ describe("verify-s06 guard helpers", () => {
 
     const proof = assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context });
 
-    expect(proof.requiredMethods).toEqual(["profiles.create", "chromium.launch", "chromium.stop"]);
+    expect(proof.requiredMethods).toEqual(REQUIRED_DIAGNOSTIC_METHODS);
+    expect(proof.requiredMethods).not.toContain("identity.presets.list");
+    expect(proof.requiredMethods).not.toContain("identity.validate");
     expect(proof.malformedRows).toBe(1);
-    expect(proof.validRows).toBe(3);
+    expect(proof.validRows).toBe(REQUIRED_DIAGNOSTIC_METHODS.length);
     expect(JSON.stringify(proof)).not.toContain(root);
+
+    for (const missingMethod of ["profiles.identity.applyPreset", "identity.audit.plan", "identity.audit.open"]) {
+      writeFileSync(diagnosticsPath, [
+        ...REQUIRED_DIAGNOSTIC_METHODS.filter((method) => method !== missingMethod).map((method, index) => JSON.stringify({
+          schemaVersion: 1,
+          ts: `2026-05-09T10:12:${String(index).padStart(2, "0")}.000Z`,
+          source: "python-sidecar",
+          event: "sidecar.request",
+          status: "ok",
+          requestId: `s06-missing-${index}`,
+          method,
+          durationMs: index,
+          logPath: "profile-store/diagnostics/events.jsonl",
+        })),
+      ].join("\n"), "utf8");
+      try {
+        assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context });
+        throw new Error("expected diagnostics assertion to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(VerifyFailure);
+        expect(error.details.expectedMethod).toBe(missingMethod);
+      }
+    }
 
     writeFileSync(diagnosticsPath, `${JSON.stringify({
       schemaVersion: 1,
@@ -430,6 +608,27 @@ describe("verify-s06 guard helpers", () => {
       logPath: "/tmp/unsafe-events.jsonl",
     })}\n`, "utf8");
     expect(() => assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context })).toThrow(/unsafe logPath/i);
+
+    for (const [field, override, message] of [
+      ["params", { params: { profileId } }, /forbidden raw diagnostic fields/i],
+      ["source", { source: "tauri-bridge" }, /unsafe source/i],
+      ["event", { event: "raw.command" }, /unsafe event/i],
+      ["status", { status: "pending" }, /unsafe status/i],
+      ["method", { method: "https://browserleaks.com/webgl" }, /unsafe method/i],
+    ]) {
+      writeFileSync(diagnosticsPath, `${JSON.stringify({
+        schemaVersion: 1,
+        ts: "2026-05-09T10:11:12.000Z",
+        source: "python-sidecar",
+        event: "sidecar.request",
+        status: "ok",
+        method: "profiles.create",
+        durationMs: 1,
+        logPath: "profile-store/diagnostics/events.jsonl",
+        ...override,
+      })}\n`, "utf8");
+      expect(() => assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context }), field).toThrow(message);
+    }
   });
 
   it("emits a redacted final summary with the S01-S05 regression gate set", () => {
@@ -452,11 +651,17 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
-          identity: defaultIdentity(),
+          identity: packagedSmokeIdentity(),
         },
       ],
     });
 
+    const profileStore = assertPostSmokeProfileStore({ rootDir: root, smokeContext: context });
+    const diagnostics = {
+      diagnosticsLog: "src-tauri/target/s06-smoke-data/run/data/app/profile-store/diagnostics/events.jsonl",
+      requiredMethods: REQUIRED_DIAGNOSTIC_METHODS,
+      required: Object.fromEntries(REQUIRED_DIAGNOSTIC_METHODS.map((method) => [method, { status: "ok" }])),
+    };
     const redaction = assertPostSmokeRedaction({
       rootDir: root,
       smokeContext: context,
@@ -476,7 +681,8 @@ describe("verify-s06 guard helpers", () => {
         smokeProfileName: context.smokeProfileName,
         smokeRoot: context.smokeRootRelative,
         lifecycle: "created-launched-stopped-restarted",
-        diagnostics: { diagnosticsLog: "src-tauri/target/s06-smoke-data/run/data/app/profile-store/diagnostics/events.jsonl" },
+        diagnostics,
+        profileStore,
         redaction,
       },
       checks: [{ name: "package-sidecar-shape", inspections: [{ artifact: "pkg.deb", status: "pass" }] }],
@@ -490,11 +696,35 @@ describe("verify-s06 guard helpers", () => {
       "npm run verify:s06",
     ]);
     expect(summary.sidecarBundledInvocation.sourceSidecarSubprocess).toBe(false);
+    expect(summary.identity).toMatchObject({
+      presetId: PACKAGED_SMOKE_PRESET_ID,
+      label: PACKAGED_SMOKE_PRESET_LABEL,
+      surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
+      persistence: "profile-store",
+    });
+    expect(summary.audit).toMatchObject({
+      pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
+      pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
+      planDiagnostic: "observed",
+      openDiagnostic: "observed",
+      checkerContent: "not-inspected",
+    });
+    expect(JSON.stringify(summary)).not.toMatch(/https?:\/\//i);
     expect(JSON.stringify(summary)).not.toContain(root);
     expect(() => assertPostSmokeRedaction({
       rootDir: root,
       smokeContext: context,
       evidence: { leaked: `--user-data-dir=${join(root, "profile-store", "profiles", profileId, "user-data")}` },
     })).toThrow(/leaked/i);
+    expect(() => assertPostSmokeRedaction({
+      rootDir: root,
+      smokeContext: context,
+      evidence: { debugPort: 9222, extensionPath: "profile-store/profiles/profile/generated-extension", targetId: "target-1" },
+    })).toThrow(/forbidden/i);
+    expect(() => assertPostSmokeRedaction({
+      rootDir: root,
+      smokeContext: context,
+      evidence: { publicCheckerUrl: "https://browserleaks.com/webgl" },
+    })).toThrow(/unsafe/i);
   });
 });
