@@ -38,6 +38,8 @@ def valid_observation() -> dict[str, Any]:
                 "platformVersion": "",
                 "uaFullVersion": "120.0.0.0",
                 "fullVersionList": [],
+                "brands": [],
+                "mobile": False,
             },
             },
         },
@@ -246,6 +248,22 @@ def test_validate_observation_reports_absent_user_agent_data_as_unsupported():
 
     assert validated["browser"]["userAgentData"] == {"supported": False}
 
+
+def test_validate_observation_allows_bounded_high_entropy_low_entropy_echoes():
+    observation = valid_observation()
+    observation["browser"]["userAgentData"]["highEntropy"].update(
+        {
+            "brands": [{"brand": "Chromium", "version": "120"}],
+            "mobile": False,
+        }
+    )
+
+    validated = validate_identity_observation(observation)
+
+    assert validated["browser"]["userAgentData"]["highEntropy"]["brands"] == [
+        {"brand": "Chromium", "version": "120"}
+    ]
+    assert validated["browser"]["userAgentData"]["highEntropy"]["mobile"] is False
 
 def test_proof_collector_audio_exercises_analyser_path_not_static_placeholder():
     assert "await collectAudio()" in PROOF_COLLECTOR_SCRIPT
@@ -492,6 +510,23 @@ def test_validate_identity_surface_proof_rejects_unknown_headers_and_debug_field
         validate_identity_surface_proof(proof)
 
     assert_sidecar_error(debug_exc)
+
+
+def test_validate_surface_proof_preserves_nested_high_entropy_brand_strings():
+    proof = valid_surface_proof()
+    proof["targets"]["new"]["observation"]["browser"]["userAgentData"]["highEntropy"].update(
+        {
+            "brands": [{"brand": "Chromium", "version": "120"}],
+            "fullVersionList": [{"brand": "Chromium", "version": "120.0.0.0"}],
+            "mobile": False,
+        }
+    )
+
+    validated = validate_identity_surface_proof(proof)
+
+    high_entropy = validated["targets"]["new"]["observation"]["browser"]["userAgentData"]["highEntropy"]
+    assert high_entropy["brands"] == [{"brand": "Chromium", "version": "120"}]
+    assert high_entropy["fullVersionList"] == [{"brand": "Chromium", "version": "120.0.0.0"}]
 
 
 @pytest.mark.parametrize("missing_key", ["browser", "navigator", "locale", "viewport", "canvas", "webgl", "audio", "webrtc"])

@@ -56,7 +56,7 @@ npm run verify:s04
 npm run verify:s05
 ```
 
-Those checks cover the sidecar health spine, profile-store contract, Chromium lifecycle contract, and legacy import plus diagnostics lookup contract. A failure in one of them usually means the packaged smoke is exposing an upstream regression, not a packaging-only issue.
+Those checks cover the sidecar health spine, profile-store contract, Chromium lifecycle contract, S04 full identity-surface local proof with preserved legacy built-sidecar smoke, and legacy import plus diagnostics lookup contract. A failure in one of them usually means the packaged smoke is exposing an upstream regression, not a packaging-only issue.
 
 Build the packaged app and run the final smoke:
 

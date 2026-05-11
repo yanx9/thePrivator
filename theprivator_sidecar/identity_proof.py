@@ -70,6 +70,8 @@ _ALLOWED_USER_AGENT_DATA_HIGH_ENTROPY_KEYS = {
     "platformVersion",
     "uaFullVersion",
     "fullVersionList",
+    "brands",
+    "mobile",
 }
 _SURFACE_LABELS = [
     "headers.userAgent",
@@ -703,8 +705,11 @@ def _validate_browser(browser: Mapping[str, Any]) -> None:
         raise _proof_error()
     _require_allowed_keys(high_entropy, set(_ALLOWED_USER_AGENT_DATA_HIGH_ENTROPY_KEYS))
     for key, value in high_entropy.items():
-        if key == "fullVersionList":
+        if key in {"brands", "fullVersionList"}:
             _validate_brand_list(value)
+        elif key == "mobile":
+            if not isinstance(value, bool):
+                raise _proof_error()
         else:
             _require_string(value, allow_empty=True)
 
@@ -857,7 +862,7 @@ def _validate_bounded_json_object(payload: Mapping[str, Any], *, max_bytes: int)
 
 
 def _bounded_json_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 8:
+    if depth > 12:
         return None
     if isinstance(value, Mapping):
         result: JsonObject = {}
