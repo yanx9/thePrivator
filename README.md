@@ -62,11 +62,13 @@ pip install .
 python -m theprivator
 ```
 
-### Tauri packaged first profile loop
+### Tauri packaged identity regression
 
-The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. The health-only S01 smoke is an early guardrail; the final current-OS packaged proof is `npm run verify:s06`, which rebuilds the Tauri artifact, opens the packaged app through WebDriver, creates a profile, launches real Chromium, stops it, verifies restart persistence, and checks the diagnostics/import surfaces.
+The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. The health-only S01 smoke is an early guardrail; the final current-OS package proof is `npm run verify:s06`, which rebuilds the Tauri artifact, opens the packaged app through WebDriver, creates a unique M002 smoke profile, applies and persists `ubuntu-linux-chrome-120` / **Ubuntu Linux Chrome 120**, launches and stops real Chromium with that identity configured, restarts with the identity summary intact, enters the guided audit flow, opens **BrowserLeaks WebGL** through the fixed pageId-only `identity.audit.open` boundary, and checks bundled sidecar diagnostics/redaction without scraping public checker content.
 
-Start with the [packaged first profile loop runbook](docs/packaged-first-profile-loop.md) for prerequisites, command order, Linux `.deb`/`.rpm` artifact expectations, manual fallback UAT, and troubleshooting. Use [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) when you only need to validate the sidecar health spine or diagnose an upstream health/error regression before the packaged loop.
+Use `npm run verify:s04` for deterministic local identity-surface proof and `npm run verify:s05` for the source guided public-audit proof. `verify:s06` then proves those boundaries survive the current-OS packaged app and sidecar bundle. Public checker pages remain manual comparison targets only: there is no guarantee of undetectability, checker success scores, or stable public-page assertions.
+
+Start with the [packaged identity regression and first profile loop runbook](docs/packaged-first-profile-loop.md) for prerequisites, preflight, command order, Linux `.deb`/`.rpm` artifact expectations, manual fallback UAT, diagnostics, and troubleshooting. Use [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) when you only need to validate the sidecar health spine or diagnose an upstream health/error regression before the packaged loop.
 
 ### Creating Your First Profile
 
