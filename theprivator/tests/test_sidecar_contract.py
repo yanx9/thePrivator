@@ -66,6 +66,15 @@ def make_fake_chromium(tmp_path):
                 "if capture:",
                 "    with open(capture, 'w', encoding='utf-8') as handle:",
                 "        json.dump(sys.argv, handle)",
+                "devtools_content = os.environ.get('THEPRIVATOR_FAKE_CHROMIUM_DEVTOOLS_CONTENT')",
+                "if devtools_content is not None:",
+                "    for arg in sys.argv[1:]:",
+                "        if arg.startswith('--user-data-dir='):",
+                "            user_data_dir = arg.split('=', 1)[1]",
+                "            os.makedirs(user_data_dir, exist_ok=True)",
+                "            with open(os.path.join(user_data_dir, 'DevToolsActivePort'), 'w', encoding='utf-8') as handle:",
+                "                handle.write(devtools_content)",
+                "            break",
                 "def handle_term(signum, frame):",
                 "    raise SystemExit(0)",
                 "signal.signal(signal.SIGTERM, handle_term)",
@@ -847,6 +856,10 @@ def test_chromium_launch_status_stop_sidecar_contract_redacts_runtime_details(tm
         assert str(fake_chromium) not in combined
         assert str(argv_capture) not in combined
         assert "--user-data-dir" not in combined
+        assert "--remote-debugging-port" not in combined
+        assert "DevToolsActivePort" not in combined
+        assert "ws://" not in combined
+        assert "debugPort" not in combined
         assert "Traceback" not in combined
     finally:
         run_sidecar(
@@ -866,6 +879,126 @@ def test_chromium_launch_status_stop_sidecar_contract_redacts_runtime_details(tm
     assert "status" not in stored_profile
     assert "process" not in stored_profile
     assert "command" not in stored_profile
+
+
+def test_chromium_masked_identity_cdp_failure_is_typed_redacted_and_cleans_runtime(tmp_path):
+    store_root = str(tmp_path / "app-data-path-should-not-leak")
+    profile_name = "Masked Launch Should Not Leak"
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv-should-not-leak.json"
+
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "masked-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": profile_name},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    apply_proc = run_sidecar(
+        request_line(
+            {
+                "id": "masked-profile-identity",
+                "method": "profiles.identity.applyPreset",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "presetId": "windows-10-chrome-120",
+                },
+            }
+        )
+    )
+    assert parse_ndjson(apply_proc.stdout)[0]["ok"] is True
+
+    launch_proc = run_sidecar(
+        request_line(
+            {
+                "id": "masked-chromium-launch",
+                "method": "chromium.launch",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        ),
+        env={
+            "THEPRIVATOR_CHROMIUM_PATH": str(fake_chromium),
+            "THEPRIVATOR_FAKE_CHROMIUM_ARGV": str(argv_capture),
+            "THEPRIVATOR_FAKE_CHROMIUM_DEVTOOLS_CONTENT": "not-a-port\n/devtools/browser/test\n",
+        },
+    )
+
+    launch_response = parse_ndjson(launch_proc.stdout)[0]
+    diagnostic = parse_ndjson(launch_proc.stderr)[0]
+    error = assert_error_envelope(launch_response, "IDENTITY_CDP_FAILED", "masked-chromium-launch")
+    assert diagnostic["event"] == "sidecar.request"
+    assert diagnostic["method"] == "chromium.launch"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "IDENTITY_CDP_FAILED"
+    assert diagnostic["detailRef"] == error["detailRef"]
+
+    argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+    assert "--remote-debugging-port=0" in argv
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
+    assert any(arg.startswith("--load-extension=") for arg in argv)
+    assert any(arg.startswith("--disable-extensions-except=") for arg in argv)
+
+    status_proc = run_sidecar(
+        request_line(
+            {
+                "id": "masked-chromium-status",
+                "method": "chromium.status",
+                "params": {"storeRoot": store_root},
+            }
+        )
+    )
+    assert parse_ndjson(status_proc.stdout)[0]["result"] == {
+        "runningCount": 0,
+        "profiles": [],
+        "reconciled": [],
+    }
+
+    stop_proc = run_sidecar(
+        request_line(
+            {
+                "id": "masked-chromium-stop",
+                "method": "chromium.stop",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        )
+    )
+    stop_response = parse_ndjson(stop_proc.stdout)[0]
+    assert stop_response["ok"] is True
+    assert stop_response["result"]["termination"] == "already-stopped"
+
+    stored_profile = json.loads(
+        Path(store_root, "profile-store", "profiles.json").read_text(encoding="utf-8")
+    )["profiles"][0]
+    for forbidden in ("pid", "status", "process", "command", "startedAt", "debugPort"):
+        assert forbidden not in stored_profile
+
+    combined = (
+        create_proc.stdout
+        + create_proc.stderr
+        + apply_proc.stdout
+        + apply_proc.stderr
+        + launch_proc.stdout
+        + launch_proc.stderr
+        + status_proc.stdout
+        + status_proc.stderr
+        + stop_proc.stdout
+        + stop_proc.stderr
+    )
+    assert store_root not in combined
+    assert str(fake_chromium) not in combined
+    assert str(argv_capture) not in combined
+    assert profile_name not in launch_proc.stderr
+    assert "DevToolsActivePort" not in combined
+    assert "not-a-port" not in combined
+    assert "ws://" not in combined
+    assert "--remote-debugging-port" not in combined
+    assert "--load-extension" not in combined
+    assert "debugPort" not in combined
+    assert "Traceback" not in combined
 
 
 def test_chromium_missing_executable_sidecar_error_is_typed_and_redacted(tmp_path):

@@ -19,14 +19,25 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
+from .identity_extension import (
+    IdentityExtensionArtifact,
+    generate_identity_extension,
+    runtime_identity_extension_root,
+)
+from .identity_runtime import (
+    WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG,
+    IdentityRuntimePlan,
+    build_identity_runtime_plan,
+)
 from .profiles import STORE_DIR, ProfileRecord, ProfileStore, utc_now_iso
 from .protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
     CHROMIUM_STOP_FAILED,
+    IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
     SidecarError,
@@ -65,6 +76,12 @@ _SAFE_CHROMIUM_ARGS = (
     "--disable-translate",
     "--disable-features=TranslateUI",
 )
+_REMOTE_DEBUGGING_ARG = "--remote-debugging-port=0"
+_LOAD_EXTENSION_PREFIX = "--load-extension="
+_DISABLE_EXTENSIONS_EXCEPT_PREFIX = "--disable-extensions-except="
+_ALLOWED_IDENTITY_LAUNCH_FLAGS = {WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG}
+IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
+IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -193,6 +210,7 @@ def status(store_root: Union[str, Path]) -> JsonObject:
 def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Launch Chromium for a stored profile and record only transient runtime state."""
     profile = _load_profile(store_root, profile_id)
+    identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
     records = registry.read()
     active, _reconciled, changed = _reconcile_records(records)
@@ -216,30 +234,38 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
             message="Chromium user data directory could not be prepared.",
         ) from exc
 
+    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
     owner_token = uuid.uuid4().hex
-    args = build_launch_args(executable, user_data_path, profile.defaults.startUrl)
-    process = _spawn_chromium(args, owner_token=owner_token)
-    time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
-    if process.poll() is not None or not is_process_alive(process.pid):
-        _reap_if_child(process.pid)
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium exited before it could be registered as running.",
-        )
-
-    record = RuntimeRecord(
-        profile_id=profile.id,
-        pid=process.pid,
-        started_at=utc_now_iso(),
-        user_data_dir=profile.storage.userDataDir,
-        owner_token=owner_token,
+    args = build_launch_args(
+        executable,
+        user_data_path,
+        "about:blank",
+        extra_args=_identity_launch_args(identity_plan, extension_artifact),
     )
-    updated = dict(active)
-    updated[profile.id] = record
+    process = _spawn_chromium(args, owner_token=owner_token)
     try:
+        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
+        if process.poll() is not None or not is_process_alive(process.pid):
+            _reap_if_child(process.pid)
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium exited before it could be registered as running.",
+            )
+
+        _apply_identity_cdp_if_needed(identity_plan, user_data_path)
+
+        record = RuntimeRecord(
+            profile_id=profile.id,
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            user_data_dir=profile.storage.userDataDir,
+            owner_token=owner_token,
+        )
+        updated = dict(active)
+        updated[profile.id] = record
         registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
     except SidecarError:
-        _stop_process_tree(record.pid)
+        _stop_child_after_failed_launch(process.pid)
         raise
     return {**_running_payload(record), "runningCount": len(updated)}
 
@@ -295,14 +321,129 @@ def discover_executable() -> Path:
 
 
 
-def build_launch_args(executable: Path, user_data_dir: Path, start_url: str) -> list[str]:
+def build_launch_args(
+    executable: Path,
+    user_data_dir: Path,
+    start_url: str,
+    *,
+    extra_args: Sequence[str] = (),
+) -> list[str]:
     """Build safe Chromium arguments from sidecar-owned values only."""
     return [
         str(executable),
         f"--user-data-dir={user_data_dir}",
         *_SAFE_CHROMIUM_ARGS,
+        *_validate_extra_launch_args(extra_args),
         start_url or "about:blank",
     ]
+
+
+def _prepare_identity_extension(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+) -> Optional[IdentityExtensionArtifact]:
+    if not identity_plan.requires_extension:
+        return None
+    extension_root = runtime_identity_extension_root(store_root).resolve()
+    return generate_identity_extension(extension_root, profile.id, identity_plan)
+
+
+def _identity_launch_args(
+    identity_plan: IdentityRuntimePlan,
+    extension_artifact: Optional[IdentityExtensionArtifact],
+) -> list[str]:
+    args: list[str] = []
+    if extension_artifact is not None:
+        extension_dir = str(extension_artifact.extension_dir)
+        args.append(f"{_LOAD_EXTENSION_PREFIX}{extension_dir}")
+        args.append(f"{_DISABLE_EXTENSIONS_EXCEPT_PREFIX}{extension_dir}")
+    if identity_plan.requires_cdp:
+        args.append(_REMOTE_DEBUGGING_ARG)
+    args.extend(identity_plan.launch_flags)
+    return _validate_extra_launch_args(args)
+
+
+def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
+    safe_args: list[str] = []
+    for arg in args:
+        if not isinstance(arg, str) or not arg:
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium launch arguments could not be prepared.",
+            )
+        if arg == _REMOTE_DEBUGGING_ARG or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
+            safe_args.append(arg)
+            continue
+        if arg.startswith(_LOAD_EXTENSION_PREFIX) or arg.startswith(_DISABLE_EXTENSIONS_EXCEPT_PREFIX):
+            _validate_extension_arg_path(arg.split("=", 1)[1])
+            safe_args.append(arg)
+            continue
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium launch arguments could not be prepared.",
+        )
+    return safe_args
+
+
+def _validate_extension_arg_path(value: str) -> None:
+    try:
+        path = Path(value)
+    except TypeError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium launch arguments could not be prepared.",
+        ) from exc
+    if not value or not path.is_absolute() or "\x00" in value:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium launch arguments could not be prepared.",
+        )
+
+
+def discover_devtools_endpoint(user_data_dir: Union[str, Path], **kwargs: Any) -> Any:
+    """Lazy CDP discovery wrapper so non-CDP sidecar commands do not require CDP deps."""
+    try:
+        from .cdp import discover_devtools_endpoint as _discover_devtools_endpoint
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        ) from exc
+    return _discover_devtools_endpoint(user_data_dir, **kwargs)
+
+
+def apply_identity_cdp_overrides(endpoint_or_url: Any, overrides: Mapping[str, Any], **kwargs: Any) -> JsonObject:
+    """Lazy CDP apply wrapper that collapses dependency/import failures safely."""
+    try:
+        from .cdp import apply_identity_cdp_overrides as _apply_identity_cdp_overrides
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        ) from exc
+    return _apply_identity_cdp_overrides(endpoint_or_url, overrides, **kwargs)
+
+
+def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_path: Path) -> None:
+    if not identity_plan.requires_cdp:
+        return
+    endpoint = discover_devtools_endpoint(
+        user_data_path,
+        timeout_seconds=IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS,
+    )
+    apply_identity_cdp_overrides(
+        endpoint,
+        identity_plan.cdp_overrides,
+        timeout_seconds=IDENTITY_CDP_APPLY_TIMEOUT_SECONDS,
+    )
+
+
+def _stop_child_after_failed_launch(pid: int) -> None:
+    try:
+        _stop_process_tree(pid)
+    except SidecarError:
+        _reap_if_child(pid)
 
 
 

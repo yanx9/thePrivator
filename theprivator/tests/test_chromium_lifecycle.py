@@ -9,11 +9,14 @@ from typing import Any, Mapping
 import pytest
 
 from theprivator_sidecar import chromium
+from theprivator_sidecar.identity import curated_preset
 from theprivator_sidecar.profiles import ProfileStore
 from theprivator_sidecar.protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
+    IDENTITY_CDP_FAILED,
+    IDENTITY_EXTENSION_FAILED,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
     SidecarError,
@@ -113,6 +116,10 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
         assert launched_user_data.is_dir()
         assert "--profile-directory=Default" in argv
         assert "--no-first-run" in argv
+        assert "--load-extension" not in "\n".join(argv)
+        assert "--disable-extensions-except" not in "\n".join(argv)
+        assert "--remote-debugging-port" not in "\n".join(argv)
+        assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" not in argv
 
         status = chromium.status(tmp_path)
         assert status["runningCount"] == 1
@@ -147,6 +154,153 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
 
     stored_profile = read_profiles_payload(tmp_path)["profiles"][0]
     assert_no_runtime_truth(stored_profile)
+
+
+def test_masked_identity_launch_generates_extension_and_applies_cdp_before_registry_write(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert Path(user_data_dir) == tmp_path / profile["storage"]["userDataDir"]
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("discover", kwargs))
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fake_apply_identity_cdp_overrides(endpoint, overrides, **kwargs):
+        assert endpoint == "ws://127.0.0.1:1/devtools/browser/test"
+        assert "userAgent" in overrides
+        assert "deviceMetrics" in overrides
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("apply", sorted(overrides), kwargs))
+        return {"applied": ["userAgent", "deviceMetrics", "timezone", "locale"]}
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fake_apply_identity_cdp_overrides)
+
+    launch = chromium.launch(tmp_path, profile["id"])
+
+    try:
+        assert [call[0] for call in calls] == ["discover", "apply"]
+        assert launch["profileId"] == profile["id"]
+        assert launch["status"] == "running"
+        assert launch["runningCount"] == 1
+        assert set(launch) == {"profileId", "status", "pid", "startedAt", "userDataDir", "runningCount"}
+        assert str(tmp_path) not in json.dumps(launch)
+        assert "ws://" not in json.dumps(launch)
+        assert "--remote-debugging-port" not in json.dumps(launch)
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        joined_argv = "\n".join(argv)
+        assert "--remote-debugging-port=0" in argv
+        assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
+        load_extension = next(arg for arg in argv if arg.startswith("--load-extension="))
+        disable_except = next(arg for arg in argv if arg.startswith("--disable-extensions-except="))
+        assert load_extension.split("=", 1)[1] == disable_except.split("=", 1)[1]
+        extension_dir = Path(load_extension.split("=", 1)[1])
+        assert extension_dir.is_dir()
+        assert (extension_dir / "manifest.json").is_file()
+        assert profile["id"] not in str(extension_dir)
+        assert "windows-10-chrome-120" not in joined_argv
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        assert status["profiles"][0] == {
+            "profileId": profile["id"],
+            "status": "running",
+            "pid": launch["pid"],
+            "startedAt": launch["startedAt"],
+            "userDataDir": profile["storage"]["userDataDir"],
+        }
+        registry_payload = json.dumps(
+            json.loads(
+                (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+        assert "ws://" not in registry_payload
+        assert "--remote-debugging-port" not in registry_payload
+        assert str(extension_dir) not in registry_payload
+        assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_extension_failure_happens_before_spawn_and_leaves_registry_empty(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+
+    def fail_generate_identity_extension(*args, **kwargs):
+        raise SidecarError(
+            code=IDENTITY_EXTENSION_FAILED,
+            message="Identity extension could not be prepared.",
+        )
+
+    def fail_if_spawned(*args, **kwargs):
+        raise AssertionError("Chromium must not spawn after extension generation fails")
+
+    monkeypatch.setattr(chromium, "generate_identity_extension", fail_generate_identity_extension)
+    monkeypatch.setattr(chromium, "_spawn_chromium", fail_if_spawned)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, IDENTITY_EXTENSION_FAILED)
+    assert str(tmp_path) not in error.message
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_cdp_failure_after_spawn_cleans_child_and_leaves_no_runtime_record(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setattr(chromium, "GRACEFUL_STOP_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(chromium, "FORCE_STOP_TIMEOUT_SECONDS", 0.1)
+
+    real_spawn = chromium._spawn_chromium
+    spawned_pids = []
+
+    def capture_spawn(args, *, owner_token):
+        process = real_spawn(args, owner_token=owner_token)
+        spawned_pids.append(process.pid)
+        return process
+
+    def fake_discover_devtools_endpoint(*args, **kwargs):
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fail_apply_identity_cdp_overrides(*args, **kwargs):
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        )
+
+    monkeypatch.setattr(chromium, "_spawn_chromium", capture_spawn)
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fail_apply_identity_cdp_overrides)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, IDENTITY_CDP_FAILED)
+    assert str(tmp_path) not in error.message
+    assert spawned_pids
+    assert not chromium.is_process_alive(spawned_pids[0])
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
 
 
 def test_status_reconciles_stale_registry_records_without_changing_profiles(tmp_path):

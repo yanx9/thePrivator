@@ -19,6 +19,9 @@ const BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 // Large legacy user-data copies can legitimately outlive CRUD/health checks, so
 // only legacy.import receives this longer one-shot process timeout.
 const LEGACY_IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
+// Identity-aware Chromium launch can include extension generation, process
+// startup, DevTools readiness polling, and CDP apply before the sidecar responds.
+const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
 const SIDECAR_PROCESS_ERROR: &str = "SIDECAR_PROCESS_ERROR";
@@ -417,13 +420,14 @@ async fn chromium_launch_with_runner<R: SidecarRunner>(
     store_root: String,
     profile_id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
-    invoke_method_with_params(
+    invoke_method_with_params_timeout(
         runner,
         "chromium.launch",
         json!({
             "storeRoot": store_root,
             "profileId": profile_id,
         }),
+        CHROMIUM_LAUNCH_TIMEOUT,
     )
     .await
 }
@@ -1753,6 +1757,8 @@ mod tests {
                 ("profileId", json!("profile-id")),
             ],
         );
+        assert_eq!(runner.last_timeout(), CHROMIUM_LAUNCH_TIMEOUT);
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
     }
 
     #[test]
@@ -1815,7 +1821,7 @@ mod tests {
         );
         assert!(
             runner.last_timeout() > BRIDGE_TIMEOUT,
-            "legacy.import should be the only command with a longer copy timeout",
+            "legacy.import should retain a longer copy timeout",
         );
     }
 
@@ -1887,6 +1893,19 @@ mod tests {
         assert!(error.recoverable);
         assert_eq!(error.detail_ref, "chromium-executable-detail");
         assert_eq!(runner.last_request()["method"], "chromium.launch");
+    }
+
+    #[test]
+    fn chromium_launch_timeout_maps_to_timeout_error_with_identity_apply_budget() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_chromium_launch(&runner, "/app/data/root", "profile-id")
+            .expect_err("chromium launch timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "chromium.launch");
+        assert_eq!(runner.last_timeout(), CHROMIUM_LAUNCH_TIMEOUT);
     }
 
     #[test]
