@@ -120,6 +120,25 @@ function profileEnvelope(result: unknown, overrides: Record<string, unknown> = {
   };
 }
 
+function proxyValidationResult(proxy: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    proxy,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function proxyEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-proxy-1",
+    protocolVersion: "1.0.0",
+    durationMs: 4.9,
+    result,
+    ...overrides,
+  };
+}
+
 function identityPreset(label: string, presetId: string, overrides: Record<string, unknown> = {}) {
   return defaultIdentity({ label, presetId, ...overrides });
 }
@@ -578,8 +597,244 @@ describe("ThePrivator profile library UI", () => {
     const fixedCard = await screen.findByRole("listitem", { name: /fixed research/i });
     expect(directCard).toHaveTextContent(/Direct connection/i);
     expect(fixedCard).toHaveTextContent(/http:\/\/proxy\.example:8080/i);
-    expect(fixedCard).not.toHaveTextContent(/configured/i);
-    expect(fixedCard).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|username|password|credentials/i);
+    expect(fixedCard).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(fixedCard).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|username|password/i);
+  });
+
+  it("checks and saves a fixed proxy draft through typed sidecar wrappers without rendering raw credentials", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    const checkedProxy = fixedProxySummary({
+      protocol: "socks5",
+      host: "proxy.example",
+      port: 1080,
+      credentialState: "configured",
+      summary: "socks5://proxy.example:1080",
+    });
+    const updatedProfile = profileRecord({
+      id: profile.id,
+      name: "Research",
+      updatedAt: "2026-05-04T18:22:00.000Z",
+      proxy: checkedProxy,
+    });
+    mockStartup([profile]);
+    mockInvoke
+      .mockResolvedValueOnce(proxyEnvelope(proxyValidationResult(checkedProxy)))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([updatedProfile], { profile: updatedProfile })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
+
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+    expect(panel).toHaveTextContent(/Proxy configuration phaseready/i);
+    expect(panel).toHaveTextContent(/Saved public summaryDirect connection/i);
+
+    fireEvent.click(within(panel).getByLabelText(/Fixed server/i));
+    fireEvent.change(within(panel).getByLabelText(/Protocol/i), { target: { value: "socks5" } });
+    fireEvent.change(within(panel).getByLabelText(/Host/i), { target: { value: "proxy.example" } });
+    fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "1080" } });
+    fireEvent.click(within(panel).getByLabelText(/Replace credentials/i));
+    fireEvent.change(within(panel).getByLabelText(/^Replacement username$/i), { target: { value: "proxy-user-should-not-leak" } });
+    fireEvent.change(within(panel).getByLabelText(/^Replacement password$/i), { target: { value: "proxy-pass-should-not-leak" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /check proxy/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Proxy check completed with 0 warnings/i));
+    expect(panel).toHaveTextContent(/socks5:\/\/proxy\.example:1080/i);
+    expect(panel).toHaveTextContent(/Requestbridge-proxy-1/i);
+    expect(panel).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak/i);
+    expect(mockInvoke).toHaveBeenCalledWith("proxy_validate", {
+      proxy: {
+        proxyVersion: 1,
+        mode: "fixedServer",
+        protocol: "socks5",
+        host: "proxy.example",
+        port: 1080,
+        credentials: {
+          username: "proxy-user-should-not-leak",
+          password: "proxy-pass-should-not-leak",
+        },
+      },
+    });
+
+    fireEvent.click(within(panel).getByRole("button", { name: /save proxy/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Proxy configuration saved/i));
+    expect(panel).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(panel).toHaveTextContent(/Saved public summarysocks5:\/\/proxy\.example:1080/i);
+    expect(within(panel).queryByLabelText(/^Replacement username$/i)).not.toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak/i);
+    expect(card).toHaveTextContent(/socks5:\/\/proxy\.example:1080/i);
+    expect(card).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_proxy_update", {
+      profileId: profile.id,
+      proxy: {
+        proxyVersion: 1,
+        mode: "fixedServer",
+        protocol: "socks5",
+        host: "proxy.example",
+        port: 1080,
+        credentials: {
+          username: "proxy-user-should-not-leak",
+          password: "proxy-pass-should-not-leak",
+        },
+      },
+    });
+    expect(commandCalls("proxy_validate")).toHaveLength(1);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(1);
+  });
+
+  it("keeps previous proxy truth and editable draft visible when save returns a typed sidecar error", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    mockStartup([profile]);
+    mockInvoke.mockRejectedValueOnce(profileError("PROXY_INVALID", "Proxy endpoint failed validation.", "sidecar-proxy-save-detail"));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const summary = within(card).getByLabelText(/research saved proxy summary/i);
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+
+    fireEvent.click(within(panel).getByLabelText(/Fixed server/i));
+    fireEvent.change(within(panel).getByLabelText(/Host/i), { target: { value: "proxy.example" } });
+    fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "8080" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /save proxy/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/PROXY_INVALID/i));
+    expect(panel).toHaveTextContent(/Proxy endpoint failed validation/i);
+    expect(panel).toHaveTextContent(/sidecar-proxy-save-detail/i);
+    expect(within(panel).getByRole("button", { name: /lookup diagnostics for sidecar-proxy-save-detail/i })).toBeEnabled();
+    expect(within(panel).getByLabelText(/Host/i)).toHaveValue("proxy.example");
+    expect(summary).toHaveTextContent(/Direct connection/i);
+    expect(summary).not.toHaveTextContent(/proxy\.example/i);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(1);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+  });
+
+  it("blocks proxy check and save while Chromium is running", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 7878 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+
+    const fixedMode = within(panel).getByLabelText(/Fixed server/i);
+    const checkProxyButton = within(panel).getByRole("button", { name: /check proxy/i });
+    const saveProxyButton = within(panel).getByRole("button", { name: /save proxy/i });
+    expect(fixedMode).toBeDisabled();
+    expect(checkProxyButton).toBeDisabled();
+    expect(checkProxyButton).toHaveAccessibleDescription(/saved proxy edits apply on the next launch/i);
+    expect(saveProxyButton).toBeDisabled();
+    expect(saveProxyButton).toHaveAccessibleDescription(/saved proxy edits apply on the next launch/i);
+    expect(panel).toHaveTextContent(/Proxy changes are disabled while Chromium is running/i);
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
+  });
+
+  it("blocks proxy check and save while Chromium launch is pending", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    const pendingLaunch = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string, args?: { profileId?: string }) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "chromium_launch" && args?.profileId === profile.id) {
+        return pendingLaunch.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/Launching/i));
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+
+    expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/Proxy changes are disabled while Chromium is launching/i);
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
+
+    await act(async () => {
+      pendingLaunch.resolve(chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id }), runningCount: 1 }));
+      await pendingLaunch.promise;
+    });
+  });
+
+  it("blocks proxy check and save while Chromium stop is pending", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 8989 });
+    const pendingStop = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string, args?: { profileId?: string }) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult({ profiles: [running] })));
+      }
+      if (command === "chromium_stop" && args?.profileId === profile.id) {
+        return pendingStop.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /stop chromium/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/Stopping/i));
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+
+    expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/Proxy changes are disabled while Chromium is stopping/i);
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
+
+    await act(async () => {
+      pendingStop.resolve(chromiumEnvelope({ ...chromiumStoppedProfile({ profileId: profile.id }), runningCount: 0 }));
+      await pendingStop.promise;
+    });
+  });
+
+  it("shows local proxy draft errors and blocks sidecar calls until fixed", async () => {
+    const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
+    mockStartup([profile]);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+
+    fireEvent.click(within(panel).getByLabelText(/Fixed server/i));
+    fireEvent.change(within(panel).getByLabelText(/Host/i), { target: { value: "https://proxy.example/path" } });
+    expect(within(panel).getByLabelText(/Host/i)).toHaveAttribute("aria-invalid", "true");
+    expect(panel).toHaveTextContent(/not a URL, path, argv, or userinfo/i);
+    expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
   });
 
   it("renders saved identity as profile truth without lazy identity startup calls", async () => {
@@ -2265,6 +2520,8 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("updateProfileIdentity");
     expect(source).toContain("getIdentityAuditPlan");
     expect(source).toContain("openIdentityAuditPage");
+    expect(source).toContain("validateProxy");
+    expect(source).toContain("updateProfileProxy");
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs|shell)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);

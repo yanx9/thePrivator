@@ -15,6 +15,19 @@ import {
   type IdentityDraftState,
 } from "./identityControls";
 import {
+  FIXED_PROXY_PROTOCOL_OPTIONS,
+  createProxyDraftState,
+  formatProxyCredentialMode,
+  parseProxyDraftState,
+  updateProxyDraftCredentialField,
+  updateProxyDraftCredentialMode,
+  updateProxyDraftField,
+  updateProxyDraftMode,
+  type ProxyCredentialDraftMode,
+  type ProxyDraftFieldPath,
+  type ProxyDraftState,
+} from "./proxyControls";
+import {
   applyProfileIdentityPreset,
   createProfile,
   deleteProfile,
@@ -32,7 +45,9 @@ import {
   triggerSidecarDiagnosticFailure,
   updateProfile,
   updateProfileIdentity,
+  updateProfileProxy,
   validateIdentity,
+  validateProxy,
 } from "./sidecar/client";
 import type {
   ChromiumRunningProfileState,
@@ -54,7 +69,9 @@ import type {
   IdentityWarning,
   ProfileListSnapshot,
   ProfileMutationSnapshot,
+  ProfileProxySummary,
   ProfileRecord,
+  ProxyProtocol,
   SidecarClientError,
   SidecarHealthSnapshot,
   SidecarUiPhase,
@@ -163,6 +180,38 @@ type IdentityConfigPanelState = {
   currentAction: IdentityConfigAction | null;
   error: IdentityConfigError | null;
   applySuccess: IdentityConfigSuccess | null;
+};
+
+type ProxyConfigPhase = "idle" | "ready" | "checking" | "saving" | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+type ProxyConfigAction = "check" | "save";
+
+type ProxyConfigError = {
+  profileId: string;
+  action: ProxyConfigAction;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+
+type ProxyConfigSuccess = {
+  profileId: string;
+  action: ProxyConfigAction;
+  requestId: string;
+  summary: string;
+  mode: ProfileProxySummary["mode"];
+  protocol: ProxyProtocol | null;
+  credentialState: ProfileProxySummary["credentialState"];
+  warningCount: number;
+  occurredAt: string;
+};
+
+type ProxyConfigPanelState = {
+  isOpen: boolean;
+  phase: ProxyConfigPhase;
+  draft: ProxyDraftState | null;
+  currentAction: ProxyConfigAction | null;
+  error: ProxyConfigError | null;
+  success: ProxyConfigSuccess | null;
 };
 
 type LegacySelectionState = Record<string, boolean>;
@@ -306,6 +355,20 @@ const IDENTITY_AUDIT_ACTION_LABELS: Record<IdentityAuditAction, string> = {
   "open-page": "Open curated checker page",
 };
 
+const PROXY_CONFIG_PHASE_LABELS: Record<ProxyConfigPhase, string> = {
+  idle: "Proxy panel closed",
+  ready: "Proxy configuration ready",
+  checking: "Checking proxy draft",
+  saving: "Saving proxy configuration",
+  "recoverable-error": "Recoverable proxy error",
+  "bridge-error": "Proxy bridge error",
+};
+
+const PROXY_CONFIG_ACTION_LABELS: Record<ProxyConfigAction, string> = {
+  check: "Check proxy draft",
+  save: "Save proxy configuration",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -360,6 +423,12 @@ export function App() {
   const [identityAuditPlan, setIdentityAuditPlan] = useState<IdentityAuditPlanSnapshot | null>(null);
   const [identityAuditError, setIdentityAuditError] = useState<IdentityAuditError | null>(null);
   const [identityAuditOpenSuccess, setIdentityAuditOpenSuccess] = useState<IdentityAuditOpenSuccess | null>(null);
+  const [proxyPanelProfileId, setProxyPanelProfileId] = useState<string | null>(null);
+  const [proxyDraft, setProxyDraft] = useState<ProxyDraftState | null>(null);
+  const [proxyConfigPhase, setProxyConfigPhase] = useState<ProxyConfigPhase>("idle");
+  const [proxyCurrentAction, setProxyCurrentAction] = useState<ProxyConfigAction | null>(null);
+  const [proxyConfigError, setProxyConfigError] = useState<ProxyConfigError | null>(null);
+  const [proxyConfigSuccess, setProxyConfigSuccess] = useState<ProxyConfigSuccess | null>(null);
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -367,6 +436,7 @@ export function App() {
   const diagnosticLookupRequestIdRef = useRef(0);
   const identityConfigRequestIdRef = useRef(0);
   const identityAuditRequestIdRef = useRef(0);
+  const proxyConfigRequestIdRef = useRef(0);
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
 
@@ -958,7 +1028,216 @@ export function App() {
     setIdentityAuditOpenSuccess(null);
   }, []);
 
+  const recordProxyConfigError = useCallback((profileId: string, action: ProxyConfigAction, error: SidecarClientError) => {
+    setProxyConfigSuccess(null);
+    setProxyConfigError({
+      profileId,
+      action,
+      error,
+      occurredAt: new Date().toISOString(),
+    });
+    setProxyConfigPhase(error.phase);
+    setProxyCurrentAction(action);
+  }, []);
+
+  const closeProxyConfig = useCallback(() => {
+    proxyConfigRequestIdRef.current += 1;
+    setProxyPanelProfileId(null);
+    setProxyDraft(null);
+    setProxyConfigPhase("idle");
+    setProxyCurrentAction(null);
+    setProxyConfigError(null);
+    setProxyConfigSuccess(null);
+  }, []);
+
+  const openProxyConfig = useCallback(
+    (profile: ProfileRecord) => {
+      const requestId = proxyConfigRequestIdRef.current + 1;
+      proxyConfigRequestIdRef.current = requestId;
+      closeIdentityConfig();
+      closeIdentityAuditPanel();
+      setProxyPanelProfileId(profile.id);
+      setProxyDraft(createProxyDraftState(profile.proxy));
+      setProxyConfigPhase("ready");
+      setProxyCurrentAction(null);
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+    },
+    [closeIdentityAuditPanel, closeIdentityConfig],
+  );
+
+  const handleProxyDraftModeChange = useCallback(
+    (profileId: string, mode: string) => {
+      if (proxyPanelProfileId !== profileId) {
+        return;
+      }
+
+      setProxyDraft((current) => (current ? updateProxyDraftMode(current, mode) : current));
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+      setProxyConfigPhase("ready");
+      setProxyCurrentAction(null);
+    },
+    [proxyPanelProfileId],
+  );
+
+  const handleProxyDraftFieldChange = useCallback(
+    (profileId: string, field: Extract<ProxyDraftFieldPath, "protocol" | "host" | "port">, value: string) => {
+      if (proxyPanelProfileId !== profileId) {
+        return;
+      }
+
+      setProxyDraft((current) => (current ? updateProxyDraftField(current, field, value) : current));
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+      setProxyConfigPhase("ready");
+      setProxyCurrentAction(null);
+    },
+    [proxyPanelProfileId],
+  );
+
+  const handleProxyDraftCredentialModeChange = useCallback(
+    (profileId: string, credentialMode: ProxyCredentialDraftMode) => {
+      if (proxyPanelProfileId !== profileId) {
+        return;
+      }
+
+      setProxyDraft((current) => (current ? updateProxyDraftCredentialMode(current, credentialMode) : current));
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+      setProxyConfigPhase("ready");
+      setProxyCurrentAction(null);
+    },
+    [proxyPanelProfileId],
+  );
+
+  const handleProxyDraftCredentialFieldChange = useCallback(
+    (profileId: string, field: "username" | "password", value: string) => {
+      if (proxyPanelProfileId !== profileId) {
+        return;
+      }
+
+      setProxyDraft((current) => (current ? updateProxyDraftCredentialField(current, field, value) : current));
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+      setProxyConfigPhase("ready");
+      setProxyCurrentAction(null);
+    },
+    [proxyPanelProfileId],
+  );
+
+  const handleCheckProxy = useCallback(
+    async (profile: ProfileRecord) => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      if (
+        proxyPanelProfileId !== profile.id ||
+        !proxyDraft ||
+        proxyConfigPhase === "checking" ||
+        proxyConfigPhase === "saving" ||
+        isProfileLoading ||
+        mutationPhase !== "idle" ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation !== null
+      ) {
+        return;
+      }
+
+      const parsed = parseProxyDraftState(proxyDraft);
+      if (!parsed.ok) {
+        setProxyDraft({ ...proxyDraft, errors: parsed.errors });
+        setProxyConfigError(null);
+        setProxyConfigSuccess(null);
+        setProxyConfigPhase("ready");
+        setProxyCurrentAction(null);
+        return;
+      }
+
+      const requestId = proxyConfigRequestIdRef.current;
+      setProxyDraft({ ...proxyDraft, errors: {} });
+      setProxyConfigPhase("checking");
+      setProxyCurrentAction("check");
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+
+      try {
+        const snapshot = await validateProxy(parsed.proxy);
+        if (proxyConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setProxyConfigSuccess(createProxyConfigSuccess(profile.id, "check", snapshot.proxy, snapshot.requestId, snapshot.warnings.length));
+        setProxyConfigPhase("ready");
+        setProxyCurrentAction(null);
+        setProxyConfigError(null);
+      } catch (error) {
+        if (proxyConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        recordProxyConfigError(profile.id, "check", error as SidecarClientError);
+      }
+    },
+    [isProfileLoading, mutationPhase, proxyConfigPhase, proxyDraft, proxyPanelProfileId, recordProxyConfigError],
+  );
+
+  const handleSaveProxy = useCallback(
+    async (profile: ProfileRecord) => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      if (
+        proxyPanelProfileId !== profile.id ||
+        !proxyDraft ||
+        proxyConfigPhase === "checking" ||
+        proxyConfigPhase === "saving" ||
+        isProfileLoading ||
+        mutationPhase !== "idle" ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation !== null
+      ) {
+        return;
+      }
+
+      const parsed = parseProxyDraftState(proxyDraft);
+      if (!parsed.ok) {
+        setProxyDraft({ ...proxyDraft, errors: parsed.errors });
+        setProxyConfigError(null);
+        setProxyConfigSuccess(null);
+        setProxyConfigPhase("ready");
+        setProxyCurrentAction(null);
+        return;
+      }
+
+      const requestId = proxyConfigRequestIdRef.current;
+      setProxyDraft({ ...proxyDraft, errors: {} });
+      setProxyConfigPhase("saving");
+      setProxyCurrentAction("save");
+      setProxyConfigError(null);
+      setProxyConfigSuccess(null);
+
+      try {
+        const snapshot = await updateProfileProxy(profile.id, parsed.proxy);
+        if (proxyConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        applyProfileSnapshot(snapshot);
+        setProxyDraft(createProxyDraftState(snapshot.profile.proxy));
+        setProxyConfigSuccess(createProxyConfigSuccess(profile.id, "save", snapshot.profile.proxy, snapshot.requestId, 0));
+        setProxyConfigPhase("ready");
+        setProxyCurrentAction(null);
+        setProxyConfigError(null);
+      } catch (error) {
+        if (proxyConfigRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        recordProxyConfigError(profile.id, "save", error as SidecarClientError);
+      }
+    },
+    [applyProfileSnapshot, isProfileLoading, mutationPhase, proxyConfigPhase, proxyDraft, proxyPanelProfileId, recordProxyConfigError],
+  );
+
   const loadIdentityAuditPlan = useCallback((profile: ProfileRecord) => {
+    closeProxyConfig();
     const requestId = identityAuditRequestIdRef.current + 1;
     identityAuditRequestIdRef.current = requestId;
 
@@ -997,7 +1276,7 @@ export function App() {
           occurredAt: new Date().toISOString(),
         });
       });
-  }, []);
+  }, [closeProxyConfig]);
 
   const openIdentityAuditCatalogPage = useCallback(
     async (profile: ProfileRecord, page: IdentityAuditPage) => {
@@ -1058,6 +1337,7 @@ export function App() {
 
   const openIdentityConfig = useCallback(
     (profile: ProfileRecord) => {
+      closeProxyConfig();
       const requestId = identityConfigRequestIdRef.current + 1;
       identityConfigRequestIdRef.current = requestId;
       const draft = createIdentityDraftState(profile);
@@ -1114,7 +1394,7 @@ export function App() {
           recordIdentityConfigError(profile.id, "validate-saved", error as SidecarClientError);
         });
     },
-    [identityPresetCache, recordIdentityConfigError],
+    [closeProxyConfig, identityPresetCache, recordIdentityConfigError],
   );
 
   const handleIdentityPresetSelect = useCallback(
@@ -1512,6 +1792,14 @@ export function App() {
                     error: identityAuditError?.profileId === profile.id ? identityAuditError : null,
                     openSuccess: identityAuditOpenSuccess?.profileId === profile.id ? identityAuditOpenSuccess : null,
                   }}
+                  proxyConfigState={{
+                    isOpen: proxyPanelProfileId === profile.id,
+                    phase: proxyPanelProfileId === profile.id ? proxyConfigPhase : "idle",
+                    draft: proxyPanelProfileId === profile.id ? proxyDraft : null,
+                    currentAction: proxyPanelProfileId === profile.id ? proxyCurrentAction : null,
+                    error: proxyConfigError?.profileId === profile.id ? proxyConfigError : null,
+                    success: proxyConfigSuccess?.profileId === profile.id ? proxyConfigSuccess : null,
+                  }}
                   isLifecycleActionBusy={chromiumMutation !== null}
                   isProfileBusy={isProfileBusy}
                   lifecycleError={chromiumErrorsByProfile[profile.id] ?? chromiumStatusError}
@@ -1539,6 +1827,14 @@ export function App() {
                   onIdentitySave={handleSaveIdentity}
                   onIdentitySurfaceModeChange={handleIdentitySurfaceModeChange}
                   onLaunch={handleLaunchProfile}
+                  onProxyCheck={handleCheckProxy}
+                  onProxyClose={closeProxyConfig}
+                  onProxyConfigure={openProxyConfig}
+                  onProxyDraftCredentialFieldChange={handleProxyDraftCredentialFieldChange}
+                  onProxyDraftCredentialModeChange={handleProxyDraftCredentialModeChange}
+                  onProxyDraftFieldChange={handleProxyDraftFieldChange}
+                  onProxyDraftModeChange={handleProxyDraftModeChange}
+                  onProxySave={handleSaveProxy}
                   onRefreshStatus={() => void refreshChromiumStatus("manual")}
                   onRenameCancel={() => setEditing(null)}
                   onRenameRequest={() => {
@@ -2161,6 +2457,7 @@ function ProfileCard({
   editing,
   identityConfigState,
   identityAuditState,
+  proxyConfigState,
   isLifecycleActionBusy,
   isProfileBusy,
   lifecycleError,
@@ -2185,6 +2482,14 @@ function ProfileCard({
   onIdentitySave,
   onIdentitySurfaceModeChange,
   onLaunch,
+  onProxyCheck,
+  onProxyClose,
+  onProxyConfigure,
+  onProxyDraftCredentialFieldChange,
+  onProxyDraftCredentialModeChange,
+  onProxyDraftFieldChange,
+  onProxyDraftModeChange,
+  onProxySave,
   onRefreshStatus,
   onRenameCancel,
   onRenameRequest,
@@ -2199,6 +2504,7 @@ function ProfileCard({
   editing: EditingState | null;
   identityConfigState: IdentityConfigPanelState;
   identityAuditState: IdentityAuditPanelState;
+  proxyConfigState: ProxyConfigPanelState;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
   lifecycleError: ChromiumLifecycleError | null;
@@ -2223,6 +2529,14 @@ function ProfileCard({
   onIdentitySave: (profile: ProfileRecord) => void;
   onIdentitySurfaceModeChange: (profileId: string, surface: IdentitySurface, mode: string) => void;
   onLaunch: (profile: ProfileRecord) => void;
+  onProxyCheck: (profile: ProfileRecord) => void;
+  onProxyClose: () => void;
+  onProxyConfigure: (profile: ProfileRecord) => void;
+  onProxyDraftCredentialFieldChange: (profileId: string, field: "username" | "password", value: string) => void;
+  onProxyDraftCredentialModeChange: (profileId: string, credentialMode: ProxyCredentialDraftMode) => void;
+  onProxyDraftFieldChange: (profileId: string, field: Extract<ProxyDraftFieldPath, "protocol" | "host" | "port">, value: string) => void;
+  onProxyDraftModeChange: (profileId: string, mode: string) => void;
+  onProxySave: (profile: ProfileRecord) => void;
   onRefreshStatus: () => void;
   onRenameCancel: () => void;
   onRenameRequest: () => void;
@@ -2247,6 +2561,9 @@ function ProfileCard({
   const runtimeTone = isLaunchingThis || isStoppingThis ? "pending" : runningState ? "running" : "stopped";
   const identityRuntimeProtectionReason = isRuntimeProtected
     ? `Identity changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before checking or saving; changes affect the next launch only.`
+    : null;
+  const proxyRuntimeProtectionReason = isRuntimeProtected
+    ? `Proxy changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before checking or saving; saved proxy edits apply on the next launch.`
     : null;
 
   const retryLifecycle = () => {
@@ -2306,6 +2623,27 @@ function ProfileCard({
           onPresetSelect={onIdentityPresetSelect}
           onSaveIdentity={onIdentitySave}
           onSurfaceModeChange={onIdentitySurfaceModeChange}
+        />
+      ) : null}
+
+      <ProfileProxySummary isConfigOpen={proxyConfigState.isOpen} profile={profile} onConfigure={() => onProxyConfigure(profile)} />
+
+      {proxyConfigState.isOpen ? (
+        <ProxyConfigurationPanel
+          diagnosticLookupState={diagnosticLookupState}
+          isLifecycleActionBusy={isLifecycleActionBusy}
+          isProfileBusy={isProfileBusy}
+          profile={profile}
+          runtimeProtectionReason={proxyRuntimeProtectionReason}
+          state={proxyConfigState}
+          onCheckProxy={onProxyCheck}
+          onClose={onProxyClose}
+          onCredentialFieldChange={onProxyDraftCredentialFieldChange}
+          onCredentialModeChange={onProxyDraftCredentialModeChange}
+          onDiagnosticLookup={onDiagnosticLookup}
+          onDraftFieldChange={onProxyDraftFieldChange}
+          onModeChange={onProxyDraftModeChange}
+          onSaveProxy={onProxySave}
         />
       ) : null}
 
@@ -2476,6 +2814,467 @@ function ProfileIdentitySummary({
         <Metric label="Label" value={profile.identity.label} />
         <Metric label="Preset" value={profile.identity.presetId ? `Preset ${profile.identity.presetId}` : "No preset"} />
         <Metric label="Surface modes" value={compactModes} />
+      </dl>
+    </section>
+  );
+}
+
+function ProfileProxySummary({
+  isConfigOpen,
+  profile,
+  onConfigure,
+}: {
+  isConfigOpen: boolean;
+  profile: ProfileRecord;
+  onConfigure: () => void;
+}) {
+  const panelId = `proxy-panel-${profile.id}`;
+  const proxy = profile.proxy;
+
+  return (
+    <section className="proxy-summary-panel" aria-label={`${profile.name} saved proxy summary`}>
+      <div className="proxy-summary-panel__header">
+        <div>
+          <p className="signal-label">M003 saved proxy</p>
+          <h4>{proxy.summary}</h4>
+        </div>
+        <button
+          type="button"
+          className="button--secondary"
+          aria-controls={panelId}
+          aria-expanded={isConfigOpen}
+          aria-label={`Configure proxy for ${profile.name}`}
+          onClick={onConfigure}
+        >
+          Configure proxy
+        </button>
+      </div>
+      <p>Public profile truth only: endpoint summaries are redacted and credential values stay private to the sidecar.</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Saved summary" value={proxy.summary} />
+        <Metric label="Mode" value={formatProxyMode(proxy.mode)} />
+        <Metric label="Protocol" value={proxy.mode === "fixedServer" ? formatProxyProtocol(proxy.protocol) : "Not applicable"} />
+        <Metric label="Credential state" value={formatProxyCredentialState(proxy.credentialState)} />
+      </dl>
+    </section>
+  );
+}
+
+function ProxyConfigurationPanel({
+  diagnosticLookupState,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runtimeProtectionReason,
+  state,
+  onCheckProxy,
+  onClose,
+  onCredentialFieldChange,
+  onCredentialModeChange,
+  onDiagnosticLookup,
+  onDraftFieldChange,
+  onModeChange,
+  onSaveProxy,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runtimeProtectionReason: string | null;
+  state: ProxyConfigPanelState;
+  onCheckProxy: (profile: ProfileRecord) => void;
+  onClose: () => void;
+  onCredentialFieldChange: (profileId: string, field: "username" | "password", value: string) => void;
+  onCredentialModeChange: (profileId: string, credentialMode: ProxyCredentialDraftMode) => void;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onDraftFieldChange: (profileId: string, field: Extract<ProxyDraftFieldPath, "protocol" | "host" | "port">, value: string) => void;
+  onModeChange: (profileId: string, mode: string) => void;
+  onSaveProxy: (profile: ProfileRecord) => void;
+}) {
+  const draftState = state.draft ?? createProxyDraftState(profile.proxy);
+  const isChecking = state.phase === "checking";
+  const isSaving = state.phase === "saving";
+  const isProxyBusy = isChecking || isSaving;
+  const fieldErrorCount = Object.keys(draftState.errors).length;
+  const modeFieldsetId = `proxy-mode-${profile.id}`;
+  const modeHintId = `proxy-mode-hint-${profile.id}`;
+  const modeErrorId = `proxy-mode-error-${profile.id}`;
+  const protocolId = `proxy-protocol-${profile.id}`;
+  const protocolHintId = `proxy-protocol-hint-${profile.id}`;
+  const protocolErrorId = `proxy-protocol-error-${profile.id}`;
+  const hostId = `proxy-host-${profile.id}`;
+  const hostHintId = `proxy-host-hint-${profile.id}`;
+  const hostErrorId = `proxy-host-error-${profile.id}`;
+  const portId = `proxy-port-${profile.id}`;
+  const portHintId = `proxy-port-hint-${profile.id}`;
+  const portErrorId = `proxy-port-error-${profile.id}`;
+  const credentialModeId = `proxy-credential-mode-${profile.id}`;
+  const credentialHintId = `proxy-credential-hint-${profile.id}`;
+  const credentialErrorId = `proxy-credential-error-${profile.id}`;
+  const credentialUsernameId = `proxy-credential-username-${profile.id}`;
+  const credentialPasswordId = `proxy-credential-password-${profile.id}`;
+  const proxyActionHintId = `proxy-action-hint-${profile.id}`;
+  const editDisabledReason = runtimeProtectionReason
+    ?? (isProfileBusy
+      ? "Profile loading or mutation is in progress; wait before editing proxy settings."
+      : isLifecycleActionBusy
+        ? "A Chromium lifecycle action is in progress; proxy edits fail closed until runtime state settles."
+        : isChecking
+          ? "Proxy draft check is already running."
+          : isSaving
+            ? "Proxy save is already running."
+            : null);
+  const actionDisabledReason = editDisabledReason
+    ?? (fieldErrorCount > 0
+      ? `Fix ${fieldErrorCount} local proxy field error${fieldErrorCount === 1 ? "" : "s"} before checking or saving.`
+      : null);
+  const isEditDisabled = editDisabledReason !== null;
+  const canRunProxyAction = actionDisabledReason === null;
+  const modeDescription = draftState.errors.mode ? `${modeHintId} ${modeErrorId}` : modeHintId;
+  const protocolDescription = draftState.errors.protocol ? `${protocolHintId} ${protocolErrorId}` : protocolHintId;
+  const hostDescription = draftState.errors.host ? `${hostHintId} ${hostErrorId}` : hostHintId;
+  const portDescription = draftState.errors.port ? `${portHintId} ${portErrorId}` : portHintId;
+  const credentialDescription = draftState.errors.credentials ? `${credentialHintId} ${credentialErrorId}` : credentialHintId;
+  const isFixedServer = draftState.mode === "fixedServer";
+  const isDirect = draftState.mode === "direct";
+
+  return (
+    <section
+      id={`proxy-panel-${profile.id}`}
+      className="proxy-config-panel"
+      role="region"
+      aria-label={`Configure proxy for ${profile.name}`}
+      aria-live="polite"
+    >
+      <div className="proxy-config-panel__header">
+        <div>
+          <p className="signal-label">Profile proxy configuration</p>
+          <h4>{profile.proxy.summary}</h4>
+          <p>
+            Choose Direct or one fixed HTTP/HTTPS/SOCKS4/SOCKS5 endpoint. Check validates only the draft; Save writes public
+            profile truth through the typed sidecar command and keeps credentials redacted.
+          </p>
+        </div>
+        <button type="button" className="button--secondary" onClick={onClose} aria-label="Close proxy configuration">
+          Close
+        </button>
+      </div>
+
+      <dl className="metric-list metric-list--inline proxy-config-observability" aria-label={`${profile.name} proxy observability`}>
+        <Metric label="Proxy configuration phase" value={`${state.phase} · ${PROXY_CONFIG_PHASE_LABELS[state.phase]}`} />
+        <Metric label="Current proxy action" value={state.currentAction ? PROXY_CONFIG_ACTION_LABELS[state.currentAction] : "No active proxy action"} />
+        <Metric label="Draft validation" value={fieldErrorCount ? `${fieldErrorCount} local field error${fieldErrorCount === 1 ? "" : "s"}` : "Local draft parseable"} />
+        <Metric label="Saved public summary" value={profile.proxy.summary} />
+        <Metric label="Credential state" value={formatProxyCredentialState(profile.proxy.credentialState)} />
+        <Metric label="Draft credentials" value={formatProxyCredentialMode(draftState.credentialMode)} />
+        <Metric label="Last proxy request" value={state.success?.requestId} />
+        <Metric label="Last proxy detailRef" value={state.error?.error.detailRef} />
+      </dl>
+
+      {isChecking ? (
+        <div className="proxy-status" role="status" aria-live="polite" aria-atomic="true">
+          Checking the proxy draft through <code>proxy.validate</code>…
+        </div>
+      ) : null}
+      {isSaving ? (
+        <div className="proxy-status" role="status" aria-live="polite" aria-atomic="true">
+          Saving the proxy draft through <code>profiles.proxy.update</code>…
+        </div>
+      ) : null}
+
+      <section className="proxy-draft-editor" aria-label={`${profile.name} proxy draft editor`}>
+        <div className="identity-panel-subhead">
+          <strong>Proxy draft</strong>
+          <span>{fieldErrorCount ? `${fieldErrorCount} field error${fieldErrorCount === 1 ? "" : "s"}` : "Locally parseable draft"}</span>
+        </div>
+
+        <fieldset id={modeFieldsetId} className="proxy-mode-group" aria-describedby={modeDescription} aria-invalid={Boolean(draftState.errors.mode)}>
+          <legend>Connection mode</legend>
+          <label className="proxy-mode-option">
+            <input
+              type="radio"
+              name={`proxy-mode-${profile.id}`}
+              value="direct"
+              checked={isDirect}
+              disabled={isEditDisabled}
+              onChange={() => onModeChange(profile.id, "direct")}
+            />
+            <span>Direct</span>
+            <small>Clear endpoint and credential fields; Chromium connects without a proxy.</small>
+          </label>
+          <label className="proxy-mode-option">
+            <input
+              type="radio"
+              name={`proxy-mode-${profile.id}`}
+              value="fixedServer"
+              checked={isFixedServer}
+              disabled={isEditDisabled}
+              onChange={() => onModeChange(profile.id, "fixedServer")}
+            />
+            <span>Fixed server</span>
+            <small>Use one explicit HTTP, HTTPS, SOCKS4, or SOCKS5 endpoint for this profile.</small>
+          </label>
+          <p id={modeHintId} className="proxy-field-hint">
+            Saved masked credentials are never reused implicitly: choose replacement credentials or no credentials before Check or Save.
+          </p>
+          {draftState.errors.mode ? (
+            <p id={modeErrorId} className="proxy-field-error" role="alert">
+              {draftState.errors.mode}
+            </p>
+          ) : null}
+        </fieldset>
+
+        {isFixedServer ? (
+          <div className="proxy-endpoint-grid">
+            <div className="proxy-field">
+              <label htmlFor={protocolId}>Protocol</label>
+              <select
+                id={protocolId}
+                value={draftState.protocol}
+                disabled={isEditDisabled}
+                aria-invalid={Boolean(draftState.errors.protocol)}
+                aria-describedby={protocolDescription}
+                onChange={(event) => onDraftFieldChange(profile.id, "protocol", event.target.value)}
+              >
+                {FIXED_PROXY_PROTOCOL_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+                {draftState.protocol && !FIXED_PROXY_PROTOCOL_OPTIONS.some((option) => option.value === draftState.protocol) ? (
+                  <option value={draftState.protocol}>Unsupported saved protocol</option>
+                ) : null}
+              </select>
+              <p id={protocolHintId} className="proxy-field-hint">
+                HTTP/HTTPS and SOCKS4/SOCKS5 are the only fixed-server protocols accepted by the typed contract.
+              </p>
+              {draftState.errors.protocol ? (
+                <p id={protocolErrorId} className="proxy-field-error" role="alert">
+                  {draftState.errors.protocol}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="proxy-field">
+              <label htmlFor={hostId}>Host</label>
+              <input
+                id={hostId}
+                value={draftState.host}
+                disabled={isEditDisabled}
+                autoComplete="off"
+                placeholder="proxy.example"
+                aria-invalid={Boolean(draftState.errors.host)}
+                aria-describedby={hostDescription}
+                onChange={(event) => onDraftFieldChange(profile.id, "host", event.target.value)}
+              />
+              <p id={hostHintId} className="proxy-field-hint">
+                Enter a host name or IP address only, not a URL, path, userinfo, argv, or launch flag.
+              </p>
+              {draftState.errors.host ? (
+                <p id={hostErrorId} className="proxy-field-error" role="alert">
+                  {draftState.errors.host}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="proxy-field">
+              <label htmlFor={portId}>Port</label>
+              <input
+                id={portId}
+                value={draftState.port}
+                inputMode="numeric"
+                disabled={isEditDisabled}
+                autoComplete="off"
+                aria-invalid={Boolean(draftState.errors.port)}
+                aria-describedby={portDescription}
+                onChange={(event) => onDraftFieldChange(profile.id, "port", event.target.value)}
+              />
+              <p id={portHintId} className="proxy-field-hint">Use a whole-number TCP port from 1 to 65535.</p>
+              {draftState.errors.port ? (
+                <p id={portErrorId} className="proxy-field-error" role="alert">
+                  {draftState.errors.port}
+                </p>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <p className="proxy-muted-copy" role="status" aria-live="polite">
+            Direct mode clears endpoint and credential fields before Check or Save; saved public summary will be “Direct connection”.
+          </p>
+        )}
+
+        {isFixedServer ? (
+          <fieldset className="proxy-credential-group" aria-describedby={credentialDescription} aria-invalid={Boolean(draftState.errors.credentials)}>
+            <legend id={credentialModeId}>Credentials</legend>
+            {draftState.savedCredentialState === "configured" ? (
+              <label className="proxy-mode-option">
+                <input
+                  type="radio"
+                  name={`proxy-credential-mode-${profile.id}`}
+                  value="saved"
+                  checked={draftState.credentialMode === "saved"}
+                  disabled={isEditDisabled}
+                  onChange={() => onCredentialModeChange(profile.id, "saved")}
+                />
+                <span>Saved masked credentials</span>
+                <small>Visible only as credentialState configured; choose replace or clear before Check or Save.</small>
+              </label>
+            ) : null}
+            <label className="proxy-mode-option">
+              <input
+                type="radio"
+                name={`proxy-credential-mode-${profile.id}`}
+                value="none"
+                checked={draftState.credentialMode === "none"}
+                disabled={isEditDisabled}
+                onChange={() => onCredentialModeChange(profile.id, "none")}
+              />
+              <span>No credentials</span>
+              <small>Save a fixed proxy endpoint without proxy authentication.</small>
+            </label>
+            <label className="proxy-mode-option">
+              <input
+                type="radio"
+                name={`proxy-credential-mode-${profile.id}`}
+                value="replace"
+                checked={draftState.credentialMode === "replace"}
+                disabled={isEditDisabled}
+                onChange={() => onCredentialModeChange(profile.id, "replace")}
+              />
+              <span>Replace credentials</span>
+              <small>Send a replacement username/password to the sidecar once; saved UI remains masked.</small>
+            </label>
+            {draftState.savedCredentialState === "configured" ? (
+              <label className="proxy-mode-option">
+                <input
+                  type="radio"
+                  name={`proxy-credential-mode-${profile.id}`}
+                  value="clear"
+                  checked={draftState.credentialMode === "clear"}
+                  disabled={isEditDisabled}
+                  onChange={() => onCredentialModeChange(profile.id, "clear")}
+                />
+                <span>Clear saved credentials</span>
+                <small>Save the endpoint without proxy authentication and remove the masked credential state.</small>
+              </label>
+            ) : null}
+            <p id={credentialHintId} className="proxy-field-hint">
+              Replacement fields are editable only for this draft and are not echoed in success, error, or saved summaries.
+            </p>
+            {draftState.credentialMode === "replace" ? (
+              <div className="proxy-credential-fields">
+                <div className="proxy-field">
+                  <label htmlFor={credentialUsernameId}>Replacement username</label>
+                  <input
+                    id={credentialUsernameId}
+                    value={draftState.credentialUsername}
+                    disabled={isEditDisabled}
+                    autoComplete="off"
+                    aria-invalid={Boolean(draftState.errors.credentials)}
+                    aria-describedby={credentialDescription}
+                    onChange={(event) => onCredentialFieldChange(profile.id, "username", event.target.value)}
+                  />
+                </div>
+                <div className="proxy-field">
+                  <label htmlFor={credentialPasswordId}>Replacement password</label>
+                  <input
+                    id={credentialPasswordId}
+                    type="password"
+                    value={draftState.credentialPassword}
+                    disabled={isEditDisabled}
+                    autoComplete="new-password"
+                    aria-invalid={Boolean(draftState.errors.credentials)}
+                    aria-describedby={credentialDescription}
+                    onChange={(event) => onCredentialFieldChange(profile.id, "password", event.target.value)}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {draftState.errors.credentials ? (
+              <p id={credentialErrorId} className="proxy-field-error" role="alert">
+                {draftState.errors.credentials}
+              </p>
+            ) : null}
+          </fieldset>
+        ) : null}
+
+        <div className="proxy-actions">
+          <button
+            type="button"
+            className="button--secondary"
+            disabled={!canRunProxyAction}
+            aria-describedby={proxyActionHintId}
+            onClick={() => onCheckProxy(profile)}
+          >
+            {isChecking ? "Checking proxy…" : "Check proxy"}
+          </button>
+          <button type="button" disabled={!canRunProxyAction} aria-describedby={proxyActionHintId} onClick={() => onSaveProxy(profile)}>
+            {isSaving ? "Saving proxy…" : "Save proxy"}
+          </button>
+        </div>
+        <p id={proxyActionHintId} className="proxy-muted-copy" role="status" aria-live="polite">
+          {actionDisabledReason
+            ?? "Check uses proxy.validate without persistence; Save uses profiles.proxy.update and preserves the previous saved summary if the sidecar rejects the draft."}
+        </p>
+      </section>
+
+      {state.error ? (
+        <ProxyConfigErrorFeedback
+          diagnosticLookupState={diagnosticLookupState}
+          state={state.error}
+          onDiagnosticLookup={onDiagnosticLookup}
+        />
+      ) : null}
+
+      {state.success ? <ProxyConfigSuccessFeedback state={state.success} /> : null}
+    </section>
+  );
+}
+
+function ProxyConfigErrorFeedback({
+  diagnosticLookupState,
+  state,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: ProxyConfigError;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
+  return (
+    <section className="proxy-error-feedback" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>{PROXY_CONFIG_ACTION_LABELS[state.action]} failed safely.</strong>
+      <p>{state.error.message}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={state.error.code} />
+        <Metric label="Source" value={state.error.source} />
+        <Metric label="Recoverable" value={state.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={state.error.detailRef} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      <DiagnosticReference detailRef={state.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+    </section>
+  );
+}
+
+function ProxyConfigSuccessFeedback({ state }: { state: ProxyConfigSuccess }) {
+  const heading = state.action === "check" ? "Proxy check completed." : "Proxy configuration saved.";
+  const copy = state.action === "check"
+    ? `Proxy check completed with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Save is still an explicit profile-store mutation.`
+    : "Proxy configuration saved with redacted public profile truth and will apply on the next Chromium launch.";
+
+  return (
+    <section className="proxy-success-feedback" role="status" aria-live="polite" aria-atomic="true">
+      <strong>{heading}</strong>
+      <p>{copy}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Action" value={PROXY_CONFIG_ACTION_LABELS[state.action]} />
+        <Metric label="Request" value={state.requestId} />
+        <Metric label="Summary" value={state.summary} />
+        <Metric label="Mode" value={formatProxyMode(state.mode)} />
+        <Metric label="Protocol" value={state.protocol ? formatProxyProtocol(state.protocol) : "Not applicable"} />
+        <Metric label="Credential state" value={formatProxyCredentialState(state.credentialState)} />
+        <Metric label="Warnings" value={state.warningCount} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
       </dl>
     </section>
   );
@@ -3647,6 +4446,58 @@ function formatProfileTimestamp(value: string | null | undefined): string {
 
 function formatBrowser(value: ProfileRecord["defaults"]["browser"]): string {
   return value === "chromium" ? "Chromium" : value;
+}
+
+function createProxyConfigSuccess(
+  profileId: string,
+  action: ProxyConfigAction,
+  proxy: ProfileProxySummary,
+  requestId: string,
+  warningCount: number,
+): ProxyConfigSuccess {
+  return {
+    profileId,
+    action,
+    requestId,
+    summary: proxy.summary,
+    mode: proxy.mode,
+    protocol: proxy.mode === "fixedServer" ? proxy.protocol : null,
+    credentialState: proxy.credentialState,
+    warningCount,
+    occurredAt: new Date().toISOString(),
+  };
+}
+
+function formatProxyMode(value: ProfileProxySummary["mode"] | string): string {
+  if (value === "direct") {
+    return "Direct";
+  }
+  if (value === "fixedServer") {
+    return "Fixed server";
+  }
+
+  return value;
+}
+
+function formatProxyProtocol(value: ProxyProtocol | string): string {
+  if (value === "http") {
+    return "HTTP";
+  }
+  if (value === "https") {
+    return "HTTPS";
+  }
+  if (value === "socks4") {
+    return "SOCKS4";
+  }
+  if (value === "socks5") {
+    return "SOCKS5";
+  }
+
+  return value;
+}
+
+function formatProxyCredentialState(value: ProfileProxySummary["credentialState"]): string {
+  return value === "configured" ? "configured (masked)" : "none";
 }
 
 function formatIdentityAuditCategory(value: IdentityAuditPage["category"]): string {

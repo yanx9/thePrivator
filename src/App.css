@@ -225,6 +225,8 @@ label {
 .create-card,
 .profile-feedback,
 .legacy-import-panel,
+.proxy-summary-panel,
+.proxy-config-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel,
@@ -952,6 +954,8 @@ p {
   line-height: 1.35;
 }
 
+.proxy-summary-panel,
+.proxy-config-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel {
@@ -964,6 +968,7 @@ p {
     rgba(0, 0, 0, 0.14);
 }
 
+.proxy-summary-panel,
 .identity-summary-panel {
   border-color: rgba(154, 178, 111, 0.34);
 }
@@ -972,6 +977,8 @@ p {
   border-color: rgba(240, 198, 109, 0.3);
 }
 
+.proxy-summary-panel__header,
+.proxy-config-panel__header,
 .identity-summary-panel__header,
 .identity-audit-summary-panel__header,
 .identity-config-panel__header,
@@ -984,6 +991,8 @@ p {
   justify-content: space-between;
 }
 
+.proxy-summary-panel h4,
+.proxy-config-panel h4,
 .identity-summary-panel h4,
 .identity-audit-summary-panel h4,
 .identity-config-panel h4,
@@ -992,6 +1001,10 @@ p {
   margin-bottom: 0;
 }
 
+.proxy-summary-panel p,
+.proxy-config-panel p,
+.proxy-muted-copy,
+.proxy-field-hint,
 .identity-summary-panel p,
 .identity-audit-summary-panel p,
 .identity-config-panel p,
@@ -1000,14 +1013,18 @@ p {
 .identity-muted-copy,
 .identity-audit-muted,
 .identity-mode-option small,
+.proxy-mode-option small,
 .identity-warning-card p,
 .identity-error-feedback p,
 .identity-audit-error p,
-.identity-audit-success p {
+.identity-audit-success p,
+.proxy-error-feedback p,
+.proxy-success-feedback p {
   color: var(--muted);
   line-height: 1.55;
 }
 
+.proxy-config-panel,
 .identity-config-panel {
   border-color: rgba(240, 198, 109, 0.32);
 }
@@ -1143,6 +1160,13 @@ p {
   margin-top: 14px;
 }
 
+.proxy-config-observability,
+.proxy-status,
+.proxy-draft-editor,
+.proxy-mode-group,
+.proxy-credential-group,
+.proxy-error-feedback,
+.proxy-success-feedback,
 .identity-config-observability,
 .identity-status,
 .identity-preset-apply,
@@ -1158,12 +1182,14 @@ p {
   background: rgba(0, 0, 0, 0.14);
 }
 
+.proxy-status,
 .identity-status {
   border-color: rgba(240, 198, 109, 0.42);
   color: #ffe6a6;
   background: var(--warning-soft);
 }
 
+.proxy-error-feedback,
 .identity-error-feedback {
   border-color: rgba(230, 120, 95, 0.46);
   background:
@@ -1171,6 +1197,7 @@ p {
     rgba(0, 0, 0, 0.16);
 }
 
+.proxy-success-feedback,
 .identity-success-feedback {
   border-color: rgba(154, 178, 111, 0.44);
   background:
@@ -1178,12 +1205,96 @@ p {
     rgba(0, 0, 0, 0.14);
 }
 
+.proxy-error-feedback > strong,
 .identity-error-feedback > strong {
   color: #ffe0d7;
 }
 
+.proxy-success-feedback > strong,
 .identity-success-feedback > strong {
   color: #def4b2;
+}
+
+.proxy-draft-editor,
+.proxy-field,
+.proxy-endpoint-grid,
+.proxy-credential-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.proxy-mode-group,
+.proxy-credential-group {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.proxy-mode-group legend,
+.proxy-credential-group legend {
+  padding: 0 4px;
+  color: var(--ink);
+  font-weight: 850;
+}
+
+.proxy-mode-option {
+  display: grid;
+  grid-template-columns: auto minmax(96px, 0.28fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.proxy-mode-option input {
+  width: 20px;
+  min-height: 20px;
+  accent-color: var(--sage);
+}
+
+.proxy-endpoint-grid,
+.proxy-credential-fields {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+
+.proxy-field {
+  min-width: 0;
+}
+
+.proxy-field label {
+  font-size: 0.9rem;
+}
+
+.proxy-field input,
+.proxy-field select {
+  background-color: rgba(0, 0, 0, 0.24);
+}
+
+.proxy-field-hint,
+.proxy-field-error {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.proxy-field-error {
+  color: #ffe0d7;
+  font-weight: 800;
+}
+
+.proxy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+
+.proxy-success-feedback p,
+.proxy-muted-copy {
+  margin: 10px 0 0;
 }
 
 .identity-panel-subhead span {
