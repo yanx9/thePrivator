@@ -4,9 +4,6 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   FORBIDDEN_PROFILE_RUNTIME_FIELDS,
-  PACKAGED_SMOKE_AUDIT_PAGE_ID,
-  PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
-  PACKAGED_SMOKE_AUDIT_PAGE_COUNT,
   PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
   PACKAGED_SMOKE_PRESET_ID,
   PACKAGED_SMOKE_PRESET_LABEL,
@@ -75,6 +72,65 @@ function packagedSmokeIdentity(overrides = {}) {
   };
 }
 
+function packagedSmokeProxy(overrides = {}) {
+  return {
+    proxyVersion: 1,
+    mode: "fixedServer",
+    protocol: "http",
+    host: "proxy.example",
+    port: 8080,
+    credentialState: "configured",
+    summary: "http://proxy.example:8080",
+    credentials: {
+      username: "proxy-user-should-not-leak",
+      password: "proxy-pass-should-not-leak",
+    },
+    ...overrides,
+  };
+}
+
+function packagedSmokeProxyProof(overrides = {}) {
+  return {
+    proxyCheckVersion: 1,
+    profileId: "33333333-3333-4333-8333-333333333333",
+    requestId: "bridge-proxy-check-1",
+    routeProof: {
+      status: "proved",
+      basis: "sidecar-managed-local-fixture",
+      scope: "local-fixture",
+      protocol: "http",
+      credentialState: "configured",
+      durationMs: 123.4,
+      fixture: { kind: "http", managed: true },
+      target: { host: "198.51.100.20", port: 443 },
+      observationCounts: { proxy: 2, target: 1 },
+      directFallbackDetected: false,
+    },
+    ipHiding: {
+      status: "proved",
+      basis: "route-proof-succeeded",
+      scope: "local-fixture",
+      publicExitIpClaimed: false,
+      publicExitIp: null,
+      localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
+    },
+    webRtc: {
+      status: "restricted",
+      basis: "profile-identity-policy",
+      mode: "masked",
+      policy: "disableNonProxiedUdp",
+      localIpExposure: "non-proxied-udp-disabled",
+    },
+    publicCheckers: {
+      status: "advisory-only",
+      basis: "fixed-https-allowlist",
+      networkDependency: "user-driven-external-pages",
+      pages: ["cloudflare-trace", "aws-checkip", "webbrowsertools-webrtc"],
+    },
+    ...overrides,
+  };
+}
+
 function writeExecutable(path, mtime) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, "#!/bin/sh\nexit 0\n", "utf8");
@@ -129,8 +185,8 @@ afterEach(() => {
 });
 
 describe("verify-s06 guard helpers", () => {
-  it("exports the packaged identity and audit evidence contract constants", () => {
-    expect(PACKAGED_SMOKE_PROFILE_PREFIX).toBe("M002 Packaged Identity Smoke");
+  it("exports the packaged identity and proxy evidence contract constants", () => {
+    expect(PACKAGED_SMOKE_PROFILE_PREFIX).toBe("M003 Packaged Proxy Smoke");
     expect(PACKAGED_SMOKE_PRESET_ID).toBe("ubuntu-linux-chrome-120");
     expect(PACKAGED_SMOKE_PRESET_LABEL).toBe("Ubuntu Linux Chrome 120");
     expect(PACKAGED_SMOKE_EXPECTED_SURFACE_MODES).toEqual({
@@ -143,19 +199,17 @@ describe("verify-s06 guard helpers", () => {
       webgl: "masked",
       webrtc: "masked",
     });
-    expect(PACKAGED_SMOKE_AUDIT_PAGE_ID).toBe("browserleaks-webgl");
-    expect(PACKAGED_SMOKE_AUDIT_PAGE_LABEL).toBe("BrowserLeaks WebGL");
-    expect(PACKAGED_SMOKE_AUDIT_PAGE_COUNT).toBe(9);
     expect(REQUIRED_DIAGNOSTIC_METHODS).toEqual([
       "profiles.create",
       "profiles.identity.applyPreset",
+      "profiles.proxy.update",
+      "profiles.proxy.check",
       "chromium.launch",
       "chromium.stop",
-      "identity.audit.plan",
-      "identity.audit.open",
     ]);
-    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.presets.list");
-    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.validate");
+    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.audit.plan");
+    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("identity.audit.open");
+    expect(REQUIRED_DIAGNOSTIC_METHODS).not.toContain("proxy.validate");
     expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).toEqual(expect.arrayContaining([
       "debugPort",
       "remoteDebuggingPort",
@@ -165,7 +219,11 @@ describe("verify-s06 guard helpers", () => {
       "extensionPath",
       "generatedConfigPath",
       "identityRuntimeRegistry",
+      "proxyRuntimeRegistry",
+      "proxyAuthExtensionPath",
+      "proxyAuthorization",
     ]));
+    expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).not.toContain("credentials");
   });
 
   it("rejects stale package artifacts from before the recorded build start", () => {
@@ -337,7 +395,7 @@ describe("verify-s06 guard helpers", () => {
     expect(serialized).not.toContain("profileId");
     expect(serialized).not.toContain("chromium");
     expect(serialized).not.toContain("sidecar");
-    expect(serialized).not.toContain(PACKAGED_SMOKE_AUDIT_PAGE_ID);
+    expect(serialized).not.toContain("browserleaks-webgl");
     expect(serialized).not.toContain(PACKAGED_SMOKE_PRESET_ID);
     expect(serialized).not.toMatch(/https?:\/\//i);
     expect(serialized).not.toContain("debugPort");
@@ -365,7 +423,7 @@ describe("verify-s06 guard helpers", () => {
     expect(snippet.length).toBeLessThanOrEqual(520);
   });
 
-  it("asserts packaged profile persistence from a discovered app-data root", () => {
+  it("asserts packaged store-v3 proxy persistence while redacting public proof", () => {
     const root = makeRoot();
     const context = createSmokeRunContext({
       rootDir: root,
@@ -376,7 +434,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "11111111-1111-4111-8111-111111111111";
     const appDataRoot = join(context.dataRoot, "Com.ThePrivator.Desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -386,7 +444,7 @@ describe("verify-s06 guard helpers", () => {
           defaults: {
             browser: "chromium",
             startUrl: "about:blank",
-            proxyMode: "direct",
+            proxyMode: "fixedServer",
             fingerprintMode: "disabled",
           },
           storage: {
@@ -394,6 +452,7 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
@@ -406,7 +465,7 @@ describe("verify-s06 guard helpers", () => {
       appDataRoot: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop",
       profileStore: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop/profile-store/profiles.json",
       profileId,
-      storeVersion: 2,
+      storeVersion: 3,
       persistedRuntimeFields: 0,
       storage: {
         profileDir: `profile-store/profiles/${profileId}`,
@@ -418,8 +477,18 @@ describe("verify-s06 guard helpers", () => {
         label: PACKAGED_SMOKE_PRESET_LABEL,
         surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
       },
+      proxy: {
+        proxyVersion: 1,
+        mode: "fixedServer",
+        protocol: "http",
+        credentialState: "configured",
+        summary: "http://proxy.example:8080",
+      },
     });
     expect(JSON.stringify(proof)).not.toContain(root);
+    expect(JSON.stringify(proof)).not.toContain("proxy-user-should-not-leak");
+    expect(JSON.stringify(proof)).not.toContain("proxy-pass-should-not-leak");
+    expect(JSON.stringify(proof)).not.toContain('"credentials"');
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
       profiles: [
@@ -431,6 +500,7 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
@@ -446,14 +516,15 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
-          identity: defaultIdentity(),
+          identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
-    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/curated identity preset/i);
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -462,14 +533,31 @@ describe("verify-s06 guard helpers", () => {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
-          identity: packagedSmokeIdentity({ webgl: { mode: "real" } }),
+          identity: defaultIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
-    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/surface mode/i);
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/curated identity preset/i);
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/proxy/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -479,28 +567,14 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `/tmp/theprivator/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/safe relative user-data/i);
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-        },
-      ],
-    });
-    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/identity metadata/i);
-
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -510,12 +584,30 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
           debugPort: 9222,
-          extensionPath: `profile-store/profiles/${profileId}/generated-extension`,
+          proxyAuthExtensionPath: `profile-store/profiles/${profileId}/generated-proxy-auth-extension`,
         },
       ],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/runtime truth/i);
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 3,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy({ summary: "http://proxy-user-should-not-leak:proxy-pass-should-not-leak@proxy.example:8080" }),
+        },
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/proxy|credential|redaction/i);
   });
 
   it("asserts packaged diagnostics correlation and rejects unsafe diagnostic rows", () => {
@@ -529,7 +621,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "22222222-2222-4222-8222-222222222222";
     const appDataRoot = join(context.dataRoot, "theprivator-desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -539,7 +631,7 @@ describe("verify-s06 guard helpers", () => {
           defaults: {
             browser: "chromium",
             startUrl: "about:blank",
-            proxyMode: "direct",
+            proxyMode: "fixedServer",
             fingerprintMode: "disabled",
           },
           storage: {
@@ -547,6 +639,7 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
@@ -572,13 +665,21 @@ describe("verify-s06 guard helpers", () => {
     const proof = assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context });
 
     expect(proof.requiredMethods).toEqual(REQUIRED_DIAGNOSTIC_METHODS);
-    expect(proof.requiredMethods).not.toContain("identity.presets.list");
-    expect(proof.requiredMethods).not.toContain("identity.validate");
+    expect(proof.requiredMethods).toEqual([
+      "profiles.create",
+      "profiles.identity.applyPreset",
+      "profiles.proxy.update",
+      "profiles.proxy.check",
+      "chromium.launch",
+      "chromium.stop",
+    ]);
+    expect(proof.requiredMethods).not.toContain("identity.audit.plan");
+    expect(proof.requiredMethods).not.toContain("identity.audit.open");
     expect(proof.malformedRows).toBe(1);
     expect(proof.validRows).toBe(REQUIRED_DIAGNOSTIC_METHODS.length);
     expect(JSON.stringify(proof)).not.toContain(root);
 
-    for (const missingMethod of ["profiles.identity.applyPreset", "identity.audit.plan", "identity.audit.open"]) {
+    for (const missingMethod of ["profiles.proxy.update", "profiles.proxy.check", "chromium.launch", "chromium.stop"]) {
       writeFileSync(diagnosticsPath, [
         ...REQUIRED_DIAGNOSTIC_METHODS.filter((method) => method !== missingMethod).map((method, index) => JSON.stringify({
           schemaVersion: 1,
@@ -635,7 +736,7 @@ describe("verify-s06 guard helpers", () => {
     }
   });
 
-  it("emits a redacted final summary with the S01-S05 regression gate set", () => {
+  it("emits a redacted final summary with packaged proxy proof evidence", () => {
     const root = makeRoot();
     const context = createSmokeRunContext({
       rootDir: root,
@@ -646,7 +747,7 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "33333333-3333-4333-8333-333333333333";
     const appDataRoot = join(context.dataRoot, "theprivator");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
+      storeVersion: 3,
       profiles: [
         {
           id: profileId,
@@ -656,11 +757,13 @@ describe("verify-s06 guard helpers", () => {
             userDataDir: `profile-store/profiles/${profileId}/user-data`,
           },
           identity: packagedSmokeIdentity(),
+          proxy: packagedSmokeProxy(),
         },
       ],
     });
 
     const profileStore = assertPostSmokeProfileStore({ rootDir: root, smokeContext: context });
+    const proxyCheck = packagedSmokeProxyProof({ profileId });
     const diagnostics = {
       diagnosticsLog: "src-tauri/target/s06-smoke-data/run/data/app/profile-store/diagnostics/events.jsonl",
       requiredMethods: REQUIRED_DIAGNOSTIC_METHODS,
@@ -669,7 +772,11 @@ describe("verify-s06 guard helpers", () => {
     const redaction = assertPostSmokeRedaction({
       rootDir: root,
       smokeContext: context,
-      evidence: { artifact: "src-tauri/target/release/theprivator" },
+      evidence: {
+        artifact: "src-tauri/target/release/theprivator",
+        proxy: profileStore.proxy,
+        proxyCheck,
+      },
     });
     const summary = buildFinalSummary({
       mode: "full",
@@ -684,16 +791,19 @@ describe("verify-s06 guard helpers", () => {
       smoke: {
         smokeProfileName: context.smokeProfileName,
         smokeRoot: context.smokeRootRelative,
-        lifecycle: "created-launched-stopped-restarted",
+        lifecycle: "created-proxy-checked-saved-proof-launched-stopped-restarted",
         diagnostics,
         profileStore,
+        proxy: profileStore.proxy,
+        proxyCheck,
         redaction,
+        cleanup: { status: "pass" },
       },
       checks: [{ name: "package-sidecar-shape", inspections: [{ artifact: "pkg.deb", status: "pass" }] }],
     });
 
     expect(summary.supportingRegressions).toEqual([
-      "npm run verify:s01",
+      "npm run verify:s02",
       "npm run verify:s03",
       "npm run verify:s04",
       "npm run verify:s05",
@@ -706,29 +816,38 @@ describe("verify-s06 guard helpers", () => {
       surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
       persistence: "profile-store",
     });
-    expect(summary.audit).toMatchObject({
-      pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
-      pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
-      planDiagnostic: "observed",
-      openDiagnostic: "observed",
-      checkerContent: "not-inspected",
+    expect(summary.audit).toBeUndefined();
+    expect(summary.proxy).toMatchObject({
+      mode: "fixedServer",
+      protocol: "http",
+      credentialState: "configured",
+      summary: "http://proxy.example:8080",
     });
-    expect(JSON.stringify(summary)).not.toMatch(/https?:\/\//i);
+    expect(summary.proxy).not.toHaveProperty("credentials");
+    expect(summary.proxyCheck).toMatchObject({
+      routeProof: { status: "proved", directFallbackDetected: false },
+      ipHiding: { status: "proved", publicExitIpClaimed: false },
+      webRtc: { status: "restricted" },
+      publicCheckers: { status: "advisory-only" },
+    });
+    expect(summary.routeProof).toMatchObject({ status: "proved", directFallbackDetected: false });
+    expect(summary.ipHiding).toMatchObject({ status: "proved", publicExitIpClaimed: false });
+    expect(summary.webRtc).toMatchObject({ status: "restricted" });
+    expect(summary.publicCheckers).toMatchObject({ status: "advisory-only" });
+    expect(summary.cleanup).toMatchObject({ status: "pass" });
     expect(JSON.stringify(summary)).not.toContain(root);
-    expect(() => assertPostSmokeRedaction({
-      rootDir: root,
-      smokeContext: context,
-      evidence: { leaked: `--user-data-dir=${join(root, "profile-store", "profiles", profileId, "user-data")}` },
-    })).toThrow(/leaked/i);
-    expect(() => assertPostSmokeRedaction({
-      rootDir: root,
-      smokeContext: context,
-      evidence: { debugPort: 9222, extensionPath: "profile-store/profiles/profile/generated-extension", targetId: "target-1" },
-    })).toThrow(/forbidden/i);
-    expect(() => assertPostSmokeRedaction({
-      rootDir: root,
-      smokeContext: context,
-      evidence: { publicCheckerUrl: "https://browserleaks.com/webgl" },
-    })).toThrow(/unsafe/i);
+    expect(JSON.stringify(summary)).not.toMatch(/proxy-user-should-not-leak|proxy-pass-should-not-leak|"credentials"|Proxy-Authorization|--proxy-server|profile-store\/profiles|public checker body/i);
+
+    for (const evidence of [
+      { credentials: { username: "redacted", password: "redacted" } },
+      { proxyAuthorization: "Proxy-Authorization: Basic redacted" },
+      { launchArgs: ["--proxy-server=http://127.0.0.1:8080"] },
+      { generatedAuthExtensionPath: "profile-store/profiles/profile/generated-proxy-auth-extension" },
+      { appDataRoot: join(context.dataRoot, "theprivator") },
+      { publicCheckerBodyText: "Cloudflare trace body text ip=203.0.113.5" },
+      { fixtureTrust: { spkiSha256: "verifier-only-trust-detail" } },
+    ]) {
+      expect(() => assertPostSmokeRedaction({ rootDir: root, smokeContext: context, evidence })).toThrow(/forbidden|unsafe|leaked/i);
+    }
   });
 });

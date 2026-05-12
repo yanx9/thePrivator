@@ -1047,6 +1047,90 @@ describe("ThePrivator profile library UI", () => {
     expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
   });
 
+  it("runs saved proxy proof for a credentialed fixed proxy with S04 result vocabulary", async () => {
+    const fixedProxy = fixedProxySummary({ credentialState: "configured", summary: "http://proxy.example:8080" });
+    const profile = profileRecord({ name: "Research", proxy: fixedProxy });
+    const proof = proxyCheckResult({
+      profileId: profile.id,
+      proxy: fixedProxy,
+      routeProof: proxyCheckRouteProofProved({ credentialState: "configured" }),
+      ipHiding: proxyCheckIpHidingProved(),
+      webRtc: proxyCheckWebRtcRestricted(),
+      publicCheckers: proxyCheckPublicCheckers(),
+    });
+    mockStartup([profile]);
+    mockInvoke.mockResolvedValueOnce(proxyCheckEnvelope(proof));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const input = within(card).getByLabelText(/research saved proxy proof input/i);
+    expect(input).toHaveTextContent(/Saved summaryhttp:\/\/proxy\.example:8080/i);
+    expect(input).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+
+    fireEvent.click(within(card).getByRole("button", { name: /run saved proxy proof/i }));
+
+    const results = await within(card).findByLabelText(/saved proxy proof results/i);
+    expect(results).toHaveTextContent(/Local fixture proved saved proxy routing/i);
+    expect(results).toHaveTextContent(/The local fixture observed proxy routing/i);
+    expect(results).toHaveTextContent(/Deterministic local route proof/i);
+    expect(results).toHaveTextContent(/sidecar-managed local fixture saw the proxy path/i);
+    expect(results).toHaveTextContent(/IP-hiding conclusion/i);
+    expect(results).toHaveTextContent(/target-IP hiding only for the deterministic fixture/i);
+    expect(results).toHaveTextContent(/WebRTC \/ local-IP baseline/i);
+    expect(results).toHaveTextContent(/Non Proxied Udp Disabled/i);
+    expect(results).toHaveTextContent(/Public checker advisory pages/i);
+    expect(results).toHaveTextContent(/Cloudflare trace/i);
+    expect(results).toHaveTextContent(/AWS checkip/i);
+    expect(results).toHaveTextContent(/WebRTC leak test/i);
+    expect(results).toHaveTextContent(/Fallback routeNot detected/i);
+    expect(results).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(card).toHaveTextContent(/Saved proxy proof finished for request\s*bridge-proxy-check-1/i);
+    expect(card).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|Proxy-Authorization|--proxy-server|DevToolsActivePort|raw public checker body/i);
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_proxy_check", { profileId: profile.id });
+    expect(commandCalls("profiles_proxy_check")).toHaveLength(1);
+  });
+
+  it("keeps saved proxy truth and diagnostic lookup safe when saved proxy proof fails", async () => {
+    const fixedProxy = fixedProxySummary({ credentialState: "configured", summary: "http://proxy.example:8080" });
+    const profile = profileRecord({ name: "Research", proxy: fixedProxy });
+    const detailRef = "sidecar-proxy-proof-detail";
+    mockStartup([profile]);
+    mockInvoke
+      .mockRejectedValueOnce({
+        ...profileError("PROXY_PROOF_FAILED", "Saved proxy proof could not be completed.", detailRef),
+        unsafeContext: "proxy-user-should-not-leak proxy-pass-should-not-leak Proxy-Authorization --proxy-server raw public checker body ws://127.0.0.1/devtools/browser",
+      })
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: "PROXY_PROOF_FAILED", method: "profiles.proxy.check" })],
+      }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const savedSummary = within(card).getByLabelText(/research saved proxy summary/i);
+    fireEvent.click(within(card).getByRole("button", { name: /run saved proxy proof/i }));
+
+    await waitFor(() => expect(card).toHaveTextContent(/PROXY_PROOF_FAILED/i));
+    expect(card).toHaveTextContent(/Saved proxy proof could not be completed/i);
+    expect(card).toHaveTextContent(detailRef);
+    expect(card).toHaveTextContent(/The saved profile\/proxy record was not changed/i);
+    expect(savedSummary).toHaveTextContent(/http:\/\/proxy\.example:8080/i);
+    expect(savedSummary).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(within(card).queryByLabelText(/saved proxy proof results/i)).not.toBeInTheDocument();
+    expect(card).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|Proxy-Authorization|--proxy-server|raw public checker body|ws:\/\/127\.0\.0\.1|DevToolsActivePort/i);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+
+    fireEvent.click(within(card).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/PROXY_PROOF_FAILED/i);
+    expect(lookupPanel).toHaveTextContent(/profiles\.proxy\.check/i);
+    expect(lookupPanel).toHaveTextContent(detailRef);
+    expect(lookupPanel).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|Proxy-Authorization|--proxy-server|raw public checker body|ws:\/\/127\.0\.0\.1/i);
+    expect(mockInvoke).toHaveBeenCalledWith("diagnostics_lookup", { detailRef });
+  });
+
   it("renders saved identity as profile truth without lazy identity startup calls", async () => {
     const savedIdentity = defaultIdentity({
       label: "Banking desktop",
