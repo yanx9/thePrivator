@@ -18,23 +18,33 @@ const PYTHON_LABEL = "python";
 const SIDECAR_MODULE_LABEL = `${PYTHON_LABEL} -m theprivator_sidecar`;
 const SIDECAR_TIMEOUT_MS = 15_000;
 const SIDECAR_STOP_TIMEOUT_MS = 2_000;
-const SMOKE_PROFILE_NAME = "S03 Identity Profile";
-const TARGET_PRESET_ID = "ubuntu-linux-chrome-120";
-const EXPECTED_PRESET_IDS = [
-  "macos-ventura-chrome-120",
-  "ubuntu-linux-chrome-120",
-  "windows-10-chrome-120",
-  "windows-11-chrome-121",
-];
+const SMOKE_PROFILE_NAME = "S03 Proxy Config Profile";
+const HTTP_PROXY_USERNAME = "proxy-s03-http-user-sentinel";
+const HTTP_PROXY_PASSWORD = "proxy-s03-http-password-sentinel";
+const BAD_PROXY_USERNAME = "proxy-s03-bad-user-sentinel";
+const BAD_PROXY_PASSWORD = "proxy-s03-bad-password-sentinel";
 const STEP_RESULTS = [];
 const PUBLIC_EVENTS = [];
-const SENSITIVE_VALUES = new Set([ROOT_DIR]);
+const SIDECAR_TRANSCRIPTS = [];
+const SENSITIVE_VALUES = new Set([
+  ROOT_DIR,
+  HTTP_PROXY_USERNAME,
+  HTTP_PROXY_PASSWORD,
+  BAD_PROXY_USERNAME,
+  BAD_PROXY_PASSWORD,
+]);
+const DANGEROUS_VALUE_KEY_RE = /^(?:auth|authorization|credentials?|password|proxyauthorization|proxypass|proxypassword|proxyuser|proxyusername|username)$/i;
+const PUBLIC_SECRET_KEY_RE = /^(?:credentials?|password|proxyAuthorization|proxyPassword|proxyPass|proxyUser|proxyUsername|username)$/i;
 const FORBIDDEN_DURABLE_KEYS = new Set([
   "args",
   "argv",
+  "binaryPath",
   "command",
   "debugPort",
   "devtoolsPort",
+  "executable",
+  "executablePath",
+  "launchArgs",
   "pid",
   "process",
   "remoteControlPort",
@@ -48,7 +58,12 @@ const FORBIDDEN_DURABLE_KEYS = new Set([
   "wsEndpoint",
 ]);
 const FORBIDDEN_TEXT_MARKERS = [
+  /Proxy-Authorization/i,
+  /--proxy-server/i,
+  /--load-extension/i,
+  /--disable-extensions-except/i,
   /--remote-debugging-port/i,
+  /--user-data-dir/i,
   /DevToolsActivePort/i,
   /Traceback \(most recent call last\)/i,
   /\bWebSocket\b/i,
@@ -56,7 +71,10 @@ const FORBIDDEN_TEXT_MARKERS = [
   /\bwss:\/\//i,
   /profile-store[\\/]+runtime/i,
   /runtime-registry/i,
+  /identity-extensions/i,
+  /proxy-auth-extensions/i,
 ];
+const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
 
 class VerifyFailure extends Error {
   constructor(message, details) {
@@ -158,40 +176,61 @@ function rememberSensitive(value) {
   }
 }
 
-function redact(value) {
+function activeSensitiveValues(extra = []) {
+  return [...SENSITIVE_VALUES, ...extra].filter((value) => typeof value === "string" && value.length > 0);
+}
+
+function redactText(value, extra = []) {
+  let redacted = String(value ?? "");
+  for (const sensitive of activeSensitiveValues(extra).sort((a, b) => b.length - a.length)) {
+    if (!sensitive) {
+      continue;
+    }
+    const replacement = sensitive === ROOT_DIR
+      ? "<repo>"
+      : sensitive.includes("theprivator-s03-proxy-")
+        ? "<temp-root>"
+        : "<redacted>";
+    redacted = redacted.split(sensitive).join(replacement);
+  }
+  return redacted
+    .replace(/ws:\/\/[^\s"']+/gi, "ws://<redacted>")
+    .replace(/wss:\/\/[^\s"']+/gi, "wss://<redacted>")
+    .replace(/--remote-debugging-port(?:=|\s+)\d+/gi, "--remote-debugging-port=<redacted>")
+    .replace(/debugPort["':\s=]+\d+/gi, "debugPort=<redacted>");
+}
+
+function redact(value, extra = []) {
   if (value === null || value === undefined) {
     return value;
   }
 
   if (typeof value === "string") {
-    let redacted = value;
-    const values = Array.from(SENSITIVE_VALUES).sort((a, b) => b.length - a.length);
-    for (const sensitive of values) {
-      if (!sensitive) {
-        continue;
-      }
-      redacted = redacted.split(sensitive).join(sensitive === ROOT_DIR ? "<repo>" : "<redacted-path>");
-    }
-    return redacted;
+    return redactText(value, extra);
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => redact(item));
+    return value.map((item) => redact(item, extra));
   }
 
   if (typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (DANGEROUS_VALUE_KEY_RE.test(key)) {
+        return ["<redacted-key>", "<redacted>"];
+      }
+      return [redactText(key, extra), redact(item, extra)];
+    }));
   }
 
   return value;
 }
 
-function normalizeOutput(value) {
+function normalizeOutput(value, extra = []) {
   if (!value) {
     return "";
   }
 
-  return redact(value)
+  return redactText(value, extra)
     .split(/\r?\n/)
     .filter((line) => line.trim())
     .slice(-10)
@@ -222,9 +261,9 @@ async function runStep(name, action) {
   } catch (error) {
     const durationMs = Math.round(performance.now() - started);
     const message = error instanceof Error ? error.message : String(error);
-    const record = { name, status: "fail", durationMs, message: redact(message) };
+    const record = { name, status: "fail", durationMs, message: redactText(message) };
     STEP_RESULTS.push(record);
-    emit({ step: name, status: "fail", durationMs, message: redact(message) });
+    emit({ step: name, status: "fail", durationMs, message: redactText(message) });
     if (error?.details) {
       emit({ step: name, status: "fail-details", details: redact(error.details) });
     }
@@ -236,11 +275,13 @@ function makeTempRoot(prefix) {
   const root = mkdtempSync(join(tmpdir(), prefix));
   rememberSensitive(root);
   rememberSensitive(join(root, "profile-store"));
+  rememberSensitive(join(root, "profile-store", "profiles.json"));
+  rememberSensitive(join(root, "profile-store", "diagnostics", "events.jsonl"));
   return root;
 }
 
 function makeRequestId(label) {
-  return `verify-s03-${label}`;
+  return `verify-s03-${label}`.slice(0, 120);
 }
 
 function sidecarRequest(id, method, params) {
@@ -319,10 +360,19 @@ function startSourceSidecar() {
         stdout.next(timeoutMs, killForTimeout),
         stderr.next(timeoutMs, killForTimeout),
       ]);
-      return {
-        response: parseNdjsonLine("stdout", stdoutLine, requestPayload.method),
-        diagnostic: parseNdjsonLine("stderr", stderrLine, requestPayload.method),
-      };
+      assertNoPublicLeaks(`source sidecar ${requestPayload.method} stdout`, stdoutLine);
+      assertNoPublicLeaks(`source sidecar ${requestPayload.method} stderr`, stderrLine);
+      const response = parseNdjsonLine("stdout", stdoutLine, requestPayload.method);
+      const diagnostic = parseNdjsonLine("stderr", stderrLine, requestPayload.method);
+      SIDECAR_TRANSCRIPTS.push({
+        requestId: requestPayload.id,
+        method: requestPayload.method,
+        stdoutLine,
+        stderrLine,
+        response,
+        diagnostic,
+      });
+      return { response, diagnostic };
     } catch (error) {
       if (error instanceof VerifyFailure) {
         throw error;
@@ -402,29 +452,32 @@ function parseNdjsonLine(streamName, line, method) {
   }
 }
 
-async function callSidecar(client, request, options = {}) {
-  const { response, diagnostic } = await client.request(request, options);
+async function callSidecar(client, requestPayload, options = {}) {
+  const { response, diagnostic } = await client.request(requestPayload, options);
 
+  assertPublicPayloadSafe(response, `sidecar ${requestPayload.method} response`);
+  assertPublicPayloadSafe(diagnostic, `sidecar ${requestPayload.method} diagnostic`);
   assert(diagnostic.event === "sidecar.request", "Sidecar diagnostic event name changed.", {
-    method: request.method,
+    method: requestPayload.method,
     diagnosticEvent: diagnostic.event,
   });
-  assert(diagnostic.method === request.method, "Sidecar diagnostic method did not match the request.", {
-    method: request.method,
+  assert(diagnostic.method === requestPayload.method, "Sidecar diagnostic method did not match the request.", {
+    method: requestPayload.method,
     diagnosticMethod: diagnostic.method,
   });
-  assert(diagnostic.requestId === request.id, "Sidecar diagnostic request id did not match the request.", {
-    requestId: request.id,
+  assert(diagnostic.requestId === requestPayload.id, "Sidecar diagnostic request id did not match the request.", {
+    requestId: requestPayload.id,
     diagnosticRequestId: diagnostic.requestId,
   });
-  assert(!("params" in diagnostic), "Sidecar diagnostic leaked request params.", { method: request.method });
-  assert(!("storeRoot" in diagnostic), "Sidecar diagnostic leaked store root.", { method: request.method });
+  assert(!("params" in diagnostic), "Sidecar diagnostic leaked request params.", { method: requestPayload.method });
+  assert(!("storeRoot" in diagnostic), "Sidecar diagnostic leaked store root.", { method: requestPayload.method });
 
   return { response, diagnostic };
 }
 
 async function sidecarSuccess(client, id, method, params, options = {}) {
-  const { response, diagnostic } = await callSidecar(client, sidecarRequest(id, method, params), options);
+  const transcript = await callSidecar(client, sidecarRequest(id, method, params), options);
+  const { response, diagnostic } = transcript;
   assert(response.id === id, "Sidecar response id did not match the request.", {
     method,
     requestId: id,
@@ -451,11 +504,12 @@ async function sidecarSuccess(client, id, method, params, options = {}) {
     detailRef: diagnostic.detailRef,
   });
   assert(response.result && typeof response.result === "object" && !Array.isArray(response.result), "Success response result must be an object.", { method });
-  return response.result;
+  return { ...transcript, result: response.result };
 }
 
 async function sidecarError(client, id, method, params, options = {}) {
-  const { response, diagnostic } = await callSidecar(client, sidecarRequest(id, method, params), options);
+  const transcript = await callSidecar(client, sidecarRequest(id, method, params), options);
+  const { response, diagnostic } = transcript;
   assert(response.id === id, "Sidecar error response id did not match the request.", {
     method,
     requestId: id,
@@ -484,7 +538,11 @@ async function sidecarError(client, id, method, params, options = {}) {
     method,
     detailRef: response.error.detailRef,
   });
-  return response.error;
+  assert(response.error.recoverable === true, "Proxy verifier expected a recoverable typed sidecar error.", {
+    method,
+    recoverable: response.error.recoverable,
+  });
+  return { ...transcript, error: response.error };
 }
 
 function isSafeRelativeStoragePath(value) {
@@ -495,23 +553,24 @@ function isSafeRelativeStoragePath(value) {
     && !value.includes("..");
 }
 
-function assertProfileShape(profile) {
+function assertProfileShape(profile, expectedName = SMOKE_PROFILE_NAME) {
   assert(profile && typeof profile === "object" && !Array.isArray(profile), "Profile payload is missing.");
   assert(typeof profile.id === "string" && profile.id.length > 0, "Profile is missing id.");
-  assert(profile.name === SMOKE_PROFILE_NAME, "Profile name mismatch.", { profileName: profile.name });
+  assert(profile.name === expectedName, "Profile name mismatch.", { profileName: profile.name });
   assert(profile.storage && typeof profile.storage === "object", "Profile is missing storage metadata.");
-  assert(isSafeRelativeStoragePath(profile.storage.userDataDir), "Profile userDataDir is not a safe relative S02 path.", {
+  assert(isSafeRelativeStoragePath(profile.storage.userDataDir), "Profile userDataDir is not a safe relative path.", {
     userDataDir: profile.storage.userDataDir,
   });
   assert(profile.identity && typeof profile.identity === "object" && !Array.isArray(profile.identity), "Profile is missing identity.");
   assert(profile.identity.identityVersion === 1, "Profile identity version mismatch.", {
     identityVersion: profile.identity.identityVersion,
   });
+  assertPublicPayloadSafe(profile, "public profile payload");
   return profile;
 }
 
 function assertCollectionShape(result, expectedProfileId) {
-  assert(result.storeVersion === 2, "Profile collection must use storeVersion 2.", { storeVersion: result.storeVersion });
+  assert(result.storeVersion === 3, "Profile collection must use storeVersion 3.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.profiles), "Profile collection profiles field is not an array.");
   assert(result.count === result.profiles.length, "Profile collection count mismatch.", {
     count: result.count,
@@ -540,20 +599,74 @@ function deepEqualJson(left, right) {
   return JSON.stringify(sortJson(left)) === JSON.stringify(sortJson(right));
 }
 
-function makeSuspiciousOverride(presetIdentity) {
-  const identity = cloneJson(presetIdentity);
-  identity.label = "S03 warning-bearing override";
-  identity.presetId = null;
-  identity.navigator.hardwareConcurrency = 7;
-  identity.navigator.deviceMemory = 3;
-  identity.screen.viewportWidth = identity.screen.width + 1;
-  return identity;
+function expectedSummary(proxy) {
+  if (proxy.mode === "direct") {
+    return {
+      proxyVersion: 1,
+      mode: "direct",
+      credentialState: "none",
+      summary: "Direct connection",
+    };
+  }
+  return {
+    proxyVersion: 1,
+    mode: "fixedServer",
+    protocol: proxy.protocol,
+    host: proxy.host,
+    port: proxy.port,
+    credentialState: proxy.credentials ? "configured" : "none",
+    summary: `${proxy.protocol}://${proxy.host}:${proxy.port}`,
+  };
+}
+
+function assertPublicProxySummary(proxy, expected) {
+  assert(proxy && typeof proxy === "object" && !Array.isArray(proxy), "Proxy summary is missing.");
+  assert(proxy.proxyVersion === 1, "Proxy summary did not report proxyVersion 1.", { proxyVersion: proxy.proxyVersion });
+  assert(proxy.mode === expected.mode, "Proxy summary mode mismatch.", { mode: proxy.mode, expectedMode: expected.mode });
+  assert(proxy.credentialState === expected.credentialState, "Proxy summary credential state mismatch.", {
+    credentialState: proxy.credentialState,
+    expectedCredentialState: expected.credentialState,
+  });
+  assert(proxy.summary === expected.summary, "Proxy summary text mismatch.", {
+    summary: proxy.summary,
+    expectedSummary: expected.summary,
+  });
+  if (expected.mode === "fixedServer") {
+    assert(proxy.protocol === expected.protocol, "Proxy summary protocol mismatch.", { protocol: proxy.protocol, expectedProtocol: expected.protocol });
+    assert(proxy.host === expected.host, "Proxy summary host mismatch.", { host: proxy.host, expectedHost: expected.host });
+    assert(proxy.port === expected.port, "Proxy summary port mismatch.", { port: proxy.port, expectedPort: expected.port });
+  }
+  assertPublicPayloadSafe(proxy, "public proxy summary");
+  return proxy;
+}
+
+function assertProxyValidationResult(result, expected) {
+  assert(result.proxyVersion === 1, "Proxy validation result did not report proxyVersion 1.", { proxyVersion: result.proxyVersion });
+  assert(Array.isArray(result.warnings) && result.warnings.length === 0, "Proxy validation returned unexpected warnings.", {
+    warningCount: Array.isArray(result.warnings) ? result.warnings.length : "not-array",
+  });
+  assertPublicProxySummary(result.proxy, expected);
+  return result.proxy;
+}
+
+function assertProxyMutationResult(result, profileId, expected) {
+  assert(result.storeVersion === 3, "Proxy update did not preserve store v3.", { storeVersion: result.storeVersion });
+  assert(Array.isArray(result.profiles), "Proxy update did not return a profiles array.");
+  assert(result.profile?.id === profileId, "Proxy update returned the wrong profile id.", {
+    profileId: result.profile?.id,
+    expectedProfileId: profileId,
+  });
+  assertPublicProxySummary(result.profile.proxy, expected);
+  const listed = result.profiles.find((item) => item?.id === profileId);
+  assert(listed, "Proxy update result did not include the updated profile in the list.", { profileId });
+  assertPublicProxySummary(listed.proxy, expected);
+  return result.profile;
 }
 
 function readProfilesJson(storeRoot) {
   const profilesPath = join(storeRoot, "profile-store", "profiles.json");
-  assert(existsSync(profilesPath), "profiles.json was not written for the identity verifier.");
   rememberSensitive(profilesPath);
+  assert(existsSync(profilesPath), "profiles.json was not written for the proxy verifier.");
   const text = readFileSync(profilesPath, "utf8");
   let payload;
   try {
@@ -566,9 +679,124 @@ function readProfilesJson(storeRoot) {
   return { path: profilesPath, text, payload };
 }
 
-function assertNoForbiddenKeys(value, context, path = "$") {
+function findPrivateProfile(storeRoot, profileId) {
+  const { text, payload } = readProfilesJson(storeRoot);
+  assert(payload.storeVersion === 3, "profiles.json must remain a v3 profile-store payload.", {
+    storeVersion: payload.storeVersion,
+  });
+  assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");
+  const profile = payload.profiles.find((item) => item?.id === profileId);
+  assert(profile, "profiles.json does not contain the smoke profile.", { profileId });
+  assertNoPrivateRuntimeLeaks(text, payload);
+  return { text, payload, profile };
+}
+
+function assertPrivateProxy(storeRoot, profileId, expectedPrivateProxy) {
+  const { payload, profile } = findPrivateProfile(storeRoot, profileId);
+  assert(deepEqualJson(profile.proxy, expectedPrivateProxy), "Persisted private proxy did not match the expected canonical shape.", {
+    expectedMode: expectedPrivateProxy.mode,
+    actualMode: profile.proxy?.mode,
+    expectedProtocol: expectedPrivateProxy.protocol ?? "none",
+    actualProtocol: profile.proxy?.protocol ?? "none",
+    expectedCredentialState: expectedPrivateProxy.credentials ? "private" : "none",
+    actualCredentialState: profile.proxy?.credentials ? "private" : "none",
+  });
+  return {
+    storeVersion: payload.storeVersion,
+    profileCount: payload.profiles.length,
+    credentialState: expectedPrivateProxy.credentials ? "private" : "none",
+  };
+}
+
+function diagnosticLogPath(storeRoot) {
+  return join(storeRoot, "profile-store", "diagnostics", "events.jsonl");
+}
+
+function readDiagnosticLogEntries(storeRoot) {
+  const path = diagnosticLogPath(storeRoot);
+  rememberSensitive(path);
+  assert(existsSync(path), "Diagnostic JSONL log was not written.");
+  const text = readFileSync(path, "utf8");
+  assertNoPublicLeaks("diagnostic JSONL log", text);
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  assert(lines.length > 0, "Diagnostic JSONL log did not contain any entries.");
+  return lines.map((line, index) => {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch (error) {
+      fail("Persisted diagnostic line is not valid JSON.", {
+        lineNumber: index + 1,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    assertDiagnosticEntrySafe(entry, index + 1);
+    return entry;
+  });
+}
+
+function assertDiagnosticEntrySafe(entry, lineNumber) {
+  const allowedKeys = new Set(["schemaVersion", "ts", "source", "event", "status", "logPath", "requestId", "method", "durationMs", "errorCode", "detailRef"]);
+  for (const key of Object.keys(entry)) {
+    assert(allowedKeys.has(key), "Persisted diagnostic contained an unexpected field.", { lineNumber, key });
+  }
+  assert(entry.schemaVersion === 1, "Persisted diagnostic schema version mismatch.", { lineNumber, schemaVersion: entry.schemaVersion });
+  assert(entry.source === "python-sidecar", "Persisted diagnostic source mismatch.", { lineNumber, source: entry.source });
+  assert(entry.event === "sidecar.request", "Persisted diagnostic event name changed.", { lineNumber, event: entry.event });
+  assert(entry.logPath === DIAGNOSTIC_RELATIVE_LOG_PATH, "Persisted diagnostic log path changed.", { lineNumber, logPath: entry.logPath });
+  assert(!("params" in entry), "Persisted diagnostic leaked params.", { lineNumber });
+  assert(!("storeRoot" in entry), "Persisted diagnostic leaked storeRoot.", { lineNumber });
+  assertPublicPayloadSafe(entry, "persisted diagnostic entry");
+}
+
+function assertStoredDiagnosticLogEntries(storeRoot, expectedDiagnostics) {
+  const entries = readDiagnosticLogEntries(storeRoot);
+  for (const expected of expectedDiagnostics) {
+    const matching = entries.filter((entry) => entry.requestId === expected.requestId && entry.method === expected.method);
+    assert(matching.length === 1, "Persisted diagnostic log did not contain exactly one matching command entry.", {
+      requestId: expected.requestId,
+      method: expected.method,
+      matchCount: matching.length,
+    });
+    const entry = matching[0];
+    assert(entry.status === expected.status, "Persisted diagnostic entry status mismatch.", {
+      requestId: expected.requestId,
+      method: expected.method,
+      expectedStatus: expected.status,
+      actualStatus: entry.status,
+    });
+    assert(entry.errorCode === expected.errorCode, "Persisted diagnostic entry errorCode mismatch.", {
+      requestId: expected.requestId,
+      method: expected.method,
+      expectedErrorCode: expected.errorCode,
+      actualErrorCode: entry.errorCode,
+    });
+    assert(entry.detailRef === expected.detailRef, "Persisted diagnostic entry detailRef mismatch.", {
+      requestId: expected.requestId,
+      method: expected.method,
+    });
+  }
+  return {
+    diagnosticEntries: entries.length,
+    expectedEntries: expectedDiagnostics.length,
+    errorEntries: entries.filter((entry) => entry.status === "error").length,
+  };
+}
+
+function trackStoredDiagnostic(expectedDiagnostics, transcript) {
+  expectedDiagnostics.push({
+    requestId: transcript.diagnostic.requestId,
+    method: transcript.diagnostic.method,
+    status: transcript.diagnostic.status,
+    errorCode: transcript.diagnostic.errorCode,
+    detailRef: transcript.diagnostic.detailRef,
+  });
+  return transcript;
+}
+
+function assertNoForbiddenKeys(value, context, path = "$", allowProxyCredentials = false) {
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoForbiddenKeys(item, context, `${path}[${index}]`));
+    value.forEach((item, index) => assertNoForbiddenKeys(item, context, `${path}[${index}]`, allowProxyCredentials));
     return;
   }
   if (!value || typeof value !== "object") {
@@ -576,16 +804,67 @@ function assertNoForbiddenKeys(value, context, path = "$") {
   }
 
   for (const [key, nestedValue] of Object.entries(value)) {
-    assert(!FORBIDDEN_DURABLE_KEYS.has(key), `${context} contains forbidden runtime/debug field ${key}.`, {
+    const nextPath = `${path}.${key}`;
+    const isAllowedCredentialKey = allowProxyCredentials && (nextPath.endsWith(".proxy.credentials") || nextPath.endsWith(".proxy.credentials.username") || nextPath.endsWith(".proxy.credentials.password"));
+    assert(isAllowedCredentialKey || !FORBIDDEN_DURABLE_KEYS.has(key), `${context} contains forbidden runtime/debug field ${key}.`, {
       key,
-      path: `${path}.${key}`,
+      path: nextPath,
     });
-    assertNoForbiddenKeys(nestedValue, context, `${path}.${key}`);
+    assertNoForbiddenKeys(nestedValue, context, nextPath, allowProxyCredentials);
   }
 }
 
-function assertNoForbiddenText(text, context) {
-  for (const sensitive of SENSITIVE_VALUES) {
+function assertNoPublicSecretKeys(value, context, path = "$") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoPublicSecretKeys(item, context, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  for (const [key, nestedValue] of Object.entries(value)) {
+    assert(!PUBLIC_SECRET_KEY_RE.test(key), `${context} exposed a proxy credential-bearing field.`, {
+      key,
+      path: `${path}.${key}`,
+    });
+    assertNoPublicSecretKeys(nestedValue, context, `${path}.${key}`);
+  }
+}
+
+function assertNoForbiddenText(text, context, extra = []) {
+  for (const sensitive of activeSensitiveValues(extra)) {
+    assert(!text.includes(sensitive), `${context} leaked a sensitive sentinel or absolute path.`, {
+      context,
+      leaked: sensitive === ROOT_DIR ? "repo-root" : "sentinel-or-path",
+    });
+  }
+  for (const marker of FORBIDDEN_TEXT_MARKERS) {
+    assert(!marker.test(text), `${context} leaked a forbidden runtime/debug marker.`, {
+      context,
+      marker: String(marker),
+    });
+  }
+}
+
+function assertNoPublicLeaks(label, value, extra = []) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  assertNoForbiddenText(text, label, extra);
+}
+
+function assertPublicPayloadSafe(value, context) {
+  assertNoPublicSecretKeys(value, context);
+  assertNoPublicLeaks(context, value);
+}
+
+function assertNoPrivateRuntimeLeaks(text, payload) {
+  assertNoForbiddenTextWithoutCredentials(text, "profiles.json");
+  assertNoForbiddenKeys(payload, "profiles.json", "$", true);
+  assert(!text.includes(ROOT_DIR), "profiles.json leaked the repository path.");
+}
+
+function assertNoForbiddenTextWithoutCredentials(text, context) {
+  const nonCredentialSensitive = [...SENSITIVE_VALUES].filter((value) => ![HTTP_PROXY_USERNAME, HTTP_PROXY_PASSWORD, BAD_PROXY_USERNAME, BAD_PROXY_PASSWORD].includes(value));
+  for (const sensitive of nonCredentialSensitive) {
     assert(!text.includes(sensitive), `${context} leaked a sensitive absolute path.`, {
       context,
       leaked: sensitive === ROOT_DIR ? "repo-root" : "runtime-path",
@@ -599,240 +878,514 @@ function assertNoForbiddenText(text, context) {
   }
 }
 
-function assertProfilesJsonClean(storeRoot, profileId, expectedIdentity) {
-  const { text, payload } = readProfilesJson(storeRoot);
-  assert(payload.storeVersion === 2, "profiles.json must remain a v2 profile-store payload.", {
-    storeVersion: payload.storeVersion,
+function assertVerifierRedactionHelpers() {
+  const redacted = redact({
+    stdoutTail: `leaked ${HTTP_PROXY_USERNAME}`,
+    stderrTail: `leaked ${HTTP_PROXY_PASSWORD}`,
+    proxyPassword: HTTP_PROXY_PASSWORD,
+    credentialState: "configured",
   });
-  assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");
-  const profile = payload.profiles.find((item) => item?.id === profileId);
-  assert(profile, "profiles.json does not contain the smoke profile.", { profileId });
-  assert(deepEqualJson(profile.identity, expectedIdentity), "profiles.json did not persist the expected warning-bearing identity override.", {
-    expectedLabel: expectedIdentity.label,
-    actualLabel: profile.identity?.label,
-  });
-  assertNoForbiddenKeys(payload, "profiles.json");
-  assertNoForbiddenText(text, "profiles.json");
-  return { profileCount: payload.profiles.length, storeVersion: payload.storeVersion };
+  assertNoPublicLeaks("verifier redaction helper output", redacted);
+  assert(JSON.stringify(redacted).includes("credentialState"), "Verifier redaction helper should preserve safe credentialState vocabulary.");
+
+  let caughtLeak = false;
+  try {
+    assertPublicPayloadSafe({ proxy: { credentials: { username: HTTP_PROXY_USERNAME } } }, "synthetic malformed public payload");
+  } catch (error) {
+    caughtLeak = error instanceof VerifyFailure;
+  }
+  assert(caughtLeak, "Verifier redaction boundary did not reject a synthetic malformed public credentials payload.");
+  return { redactionHelper: "proxy-sentinels", malformedPublicPayloadRejected: true };
 }
 
-function assertPresetList(result) {
-  assert(result.identityVersion === 1, "Preset list identityVersion mismatch.", { identityVersion: result.identityVersion });
-  assert(Array.isArray(result.presets), "Preset list presets field is not an array.");
-  assert(result.count === result.presets.length, "Preset list count mismatch.", {
-    count: result.count,
-    presetCount: result.presets.length,
-  });
-  const ids = result.presets.map((preset) => preset?.presetId).sort();
-  assert(deepEqualJson(ids, EXPECTED_PRESET_IDS), "Curated preset ids changed unexpectedly.", {
-    expectedPresetIds: EXPECTED_PRESET_IDS,
-    actualPresetIds: ids,
-  });
-  return result.presets;
+function assertTranscriptRedaction() {
+  const publicText = SIDECAR_TRANSCRIPTS.map((item) => `${item.stdoutLine}\n${item.stderrLine}`).join("\n");
+  assertNoPublicLeaks("source sidecar transcripts", publicText);
+  return { transcriptCount: SIDECAR_TRANSCRIPTS.length };
 }
 
-async function runIdentityVerifier(storeRoot) {
+function assertVerifierEventsRedacted() {
+  assertNoPublicLeaks("verify:s03 public events", JSON.stringify(PUBLIC_EVENTS));
+  return { emittedEvents: PUBLIC_EVENTS.length };
+}
+
+const DIRECT_PROXY = { proxyVersion: 1, mode: "direct" };
+const HTTP_CREDENTIAL_PROXY = {
+  proxyVersion: 1,
+  mode: "fixedServer",
+  protocol: "http",
+  host: "proxy-s03-http.example",
+  port: 18080,
+  credentials: {
+    username: HTTP_PROXY_USERNAME,
+    password: HTTP_PROXY_PASSWORD,
+  },
+};
+const HTTPS_NO_CREDENTIAL_PROXY = {
+  proxyVersion: 1,
+  mode: "fixedServer",
+  protocol: "https",
+  host: "proxy-s03-https.example",
+  port: 18443,
+};
+const SOCKS4_NO_CREDENTIAL_PROXY = {
+  proxyVersion: 1,
+  mode: "fixedServer",
+  protocol: "socks4",
+  host: "proxy-s03-socks4.example",
+  port: 19040,
+};
+const SOCKS5_NO_CREDENTIAL_PROXY = {
+  proxyVersion: 1,
+  mode: "fixedServer",
+  protocol: "socks5",
+  host: "proxy-s03-socks5.example",
+  port: 19050,
+};
+
+async function runInvalidProxyUpdateNoWrite({ client, expectedDiagnostics, storeRoot, profileId, requestId, proxy, expectedErrorCode }) {
+  const before = readProfilesJson(storeRoot).text;
+  const result = trackStoredDiagnostic(
+    expectedDiagnostics,
+    await sidecarError(client, requestId, "profiles.proxy.update", { storeRoot, profileId, proxy }),
+  );
+  assert(result.error.code === expectedErrorCode, "Invalid proxy update returned the wrong typed error code.", {
+    requestId,
+    expectedErrorCode,
+    actualErrorCode: result.error.code,
+  });
+  assert(result.error.code.startsWith("PROXY_"), "Invalid proxy update did not return a typed PROXY_* error.", {
+    requestId,
+    errorCode: result.error.code,
+  });
+  const after = readProfilesJson(storeRoot).text;
+  assert(after === before, "Invalid proxy update mutated profiles.json.", {
+    requestId,
+    errorCode: result.error.code,
+  });
+  return {
+    requestId,
+    errorCode: result.error.code,
+    detailRef: result.error.detailRef,
+    storeUnchanged: true,
+  };
+}
+
+async function runProxyConfigVerifier(storeRoot) {
+  const expectedDiagnostics = [];
   const client = await runStep("source-sidecar-start", async () => {
     const startedClient = startSourceSidecar();
-    return { value: startedClient, log: { process: "source-sidecar", transport: "ndjson-stdio" } };
+    return {
+      value: startedClient,
+      log: {
+        phase: "proxy-config",
+        action: "start",
+        process: "source-sidecar",
+        transport: "ndjson-stdio",
+      },
+    };
   });
   let profile;
-  let suspiciousIdentity;
-  let profilesJsonBeforeInvalid;
+  let finalSummary = null;
 
   try {
     profile = await runStep("profile-create", async () => {
-      const create = await sidecarSuccess(
-        client,
-        makeRequestId("profile-create"),
-        "profiles.create",
-        { storeRoot, name: SMOKE_PROFILE_NAME },
+      const create = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("profile-create"),
+          "profiles.create",
+          { storeRoot, name: SMOKE_PROFILE_NAME },
+        ),
       );
-      const createdProfile = assertProfileShape(create.profile);
-      assertCollectionShape(create, createdProfile.id);
+      const createdProfile = assertProfileShape(create.result.profile);
+      assertCollectionShape(create.result, createdProfile.id);
+      assertPublicProxySummary(createdProfile.proxy, expectedSummary(DIRECT_PROXY));
       return {
         value: createdProfile,
         log: {
+          phase: "proxy-config",
+          action: "create-profile",
           profileId: createdProfile.id,
-          storeVersion: create.storeVersion,
-          profileCount: create.count,
+          storeVersion: create.result.storeVersion,
+          profileCount: create.result.count,
+          savedSummary: createdProfile.proxy.summary,
+          credentialState: createdProfile.proxy.credentialState,
         },
       };
     });
 
-    const presets = await runStep("curated-presets-list", async () => {
-      const presetList = await sidecarSuccess(
-        client,
-        makeRequestId("preset-list"),
-        "identity.presets.list",
-        {},
+    await runStep("profile-list-initial-direct", async () => {
+      const list = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("profile-list-initial"),
+          "profiles.list",
+          { storeRoot },
+        ),
       );
-      const loadedPresets = assertPresetList(presetList);
+      const listedProfile = assertCollectionShape(list.result, profile.id);
+      assertPublicProxySummary(listedProfile.proxy, expectedSummary(DIRECT_PROXY));
       return {
-        value: loadedPresets,
-        log: {
-          presetCount: loadedPresets.length,
-          presetIds: loadedPresets.map((preset) => preset.presetId).sort(),
-        },
+        phase: "reload",
+        action: "list-initial",
+        profileCount: list.result.count,
+        savedSummary: listedProfile.proxy.summary,
+        credentialState: listedProfile.proxy.credentialState,
       };
     });
 
-    const appliedProfile = await runStep("apply-ubuntu-preset", async () => {
-      const apply = await sidecarSuccess(
-        client,
-        makeRequestId("apply-ubuntu"),
-        "profiles.identity.applyPreset",
-        { storeRoot, profileId: profile.id, presetId: TARGET_PRESET_ID },
-      );
-      const updatedProfile = assertProfileShape(apply.profile);
-      assertCollectionShape(apply, profile.id);
-      assert(updatedProfile.identity.presetId === TARGET_PRESET_ID, "Applied profile identity preset id mismatch.", {
-        presetId: updatedProfile.identity.presetId,
-      });
-      assert(Array.isArray(apply.warnings) && apply.warnings.length === 0, "Ubuntu curated preset should apply without warnings.", {
-        warningCount: Array.isArray(apply.warnings) ? apply.warnings.length : "not-array",
-      });
-      return {
-        value: updatedProfile,
-        log: {
-          profileId: updatedProfile.id,
-          presetId: updatedProfile.identity.presetId,
-          warningCount: apply.warnings.length,
-        },
-      };
-    });
-
-    const targetPreset = presets.find((preset) => preset.presetId === TARGET_PRESET_ID) ?? appliedProfile.identity;
-    suspiciousIdentity = makeSuspiciousOverride(targetPreset);
-
-    const validatedWarningCodes = await runStep("validate-warning-override", async () => {
+    await runStep("proxy-validate-direct", async () => {
       const validation = await sidecarSuccess(
         client,
-        makeRequestId("validate-warning"),
-        "identity.validate",
-        { identity: suspiciousIdentity },
+        makeRequestId("validate-direct"),
+        "proxy.validate",
+        { proxy: DIRECT_PROXY },
       );
-      assert(validation.identityVersion === 1, "Identity validation version mismatch.", { identityVersion: validation.identityVersion });
-      assert(deepEqualJson(validation.identity, suspiciousIdentity), "Validated suspicious override did not normalize as expected.", {
-        expectedLabel: suspiciousIdentity.label,
-        actualLabel: validation.identity?.label,
-      });
-      assert(Array.isArray(validation.warnings) && validation.warnings.length >= 2, "Suspicious override should return saveable warnings.", {
-        warningCount: Array.isArray(validation.warnings) ? validation.warnings.length : "not-array",
-      });
-      const warningCodes = validation.warnings.map((warning) => warning.code).sort();
-      assert(warningCodes.includes("IDENTITY_UNUSUAL_CPU"), "Suspicious override did not report unusual CPU warning.", { warningCodes });
-      assert(warningCodes.includes("IDENTITY_UNUSUAL_DEVICE_MEMORY"), "Suspicious override did not report unusual memory warning.", { warningCodes });
-      assert(warningCodes.includes("IDENTITY_VIEWPORT_EXCEEDS_SCREEN"), "Suspicious override did not report viewport warning.", { warningCodes });
+      const proxy = assertProxyValidationResult(validation.result, expectedSummary(DIRECT_PROXY));
       return {
-        value: warningCodes,
-        log: {
-          warningCount: warningCodes.length,
-          warningCodes,
-        },
+        phase: "proxy-config",
+        action: "validate",
+        proxyMode: proxy.mode,
+        credentialState: proxy.credentialState,
       };
     });
 
-    await runStep("save-warning-override", async () => {
-      const update = await sidecarSuccess(
-        client,
-        makeRequestId("save-warning"),
-        "profiles.identity.update",
-        { storeRoot, profileId: profile.id, identity: suspiciousIdentity },
+    await runStep("profile-proxy-save-direct", async () => {
+      const update = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("save-direct"),
+          "profiles.proxy.update",
+          { storeRoot, profileId: profile.id, proxy: DIRECT_PROXY },
+        ),
       );
-      const updatedProfile = assertProfileShape(update.profile);
-      assertCollectionShape(update, profile.id);
-      assert(deepEqualJson(updatedProfile.identity, suspiciousIdentity), "Profile update did not return the warning-bearing override.", {
-        expectedLabel: suspiciousIdentity.label,
-        actualLabel: updatedProfile.identity?.label,
-      });
-      const warningCodes = update.warnings.map((warning) => warning.code).sort();
-      assert(deepEqualJson(warningCodes, validatedWarningCodes), "Update warnings did not match validation warnings.", {
-        validationWarningCodes: validatedWarningCodes,
-        updateWarningCodes: warningCodes,
-      });
+      const updatedProfile = assertProxyMutationResult(update.result, profile.id, expectedSummary(DIRECT_PROXY));
+      const privateState = assertPrivateProxy(storeRoot, profile.id, DIRECT_PROXY);
       return {
+        phase: "proxy-config",
+        action: "update",
         profileId: updatedProfile.id,
-        presetId: updatedProfile.identity.presetId,
-        warningCount: warningCodes.length,
-        warningCodes,
+        savedSummary: updatedProfile.proxy.summary,
+        credentialState: updatedProfile.proxy.credentialState,
+        privateCredentialState: privateState.credentialState,
       };
     });
 
-    await runStep("reload-persisted-override", async () => {
-      const list = await sidecarSuccess(
-        client,
-        makeRequestId("reload-list"),
-        "profiles.list",
-        { storeRoot },
-      );
-      const reloadedProfile = assertCollectionShape(list, profile.id);
-      assert(deepEqualJson(reloadedProfile.identity, suspiciousIdentity), "Reloaded profile did not preserve the warning-bearing override.", {
-        expectedLabel: suspiciousIdentity.label,
-        actualLabel: reloadedProfile.identity?.label,
-      });
+    await runStep("proxy-validate-fixed-vocabulary", async () => {
+      const fixtures = [
+        HTTP_CREDENTIAL_PROXY,
+        HTTPS_NO_CREDENTIAL_PROXY,
+        SOCKS4_NO_CREDENTIAL_PROXY,
+        SOCKS5_NO_CREDENTIAL_PROXY,
+      ];
+      const protocols = [];
+      const credentialStates = [];
+      for (const draft of fixtures) {
+        const validation = await sidecarSuccess(
+          client,
+          makeRequestId(`validate-${draft.protocol}`),
+          "proxy.validate",
+          { proxy: draft },
+        );
+        const proxy = assertProxyValidationResult(validation.result, expectedSummary(draft));
+        protocols.push(proxy.protocol);
+        credentialStates.push(proxy.credentialState);
+      }
       return {
-        profileId: reloadedProfile.id,
-        label: reloadedProfile.identity.label,
-        presetId: reloadedProfile.identity.presetId ?? "none",
-        profileCount: list.count,
+        phase: "proxy-config",
+        action: "validate-fixed-family",
+        protocols,
+        credentialStates,
       };
     });
 
-    profilesJsonBeforeInvalid = readProfilesJson(storeRoot).text;
-
-    await runStep("invalid-update-no-write", async () => {
-      const invalidIdentity = cloneJson(suspiciousIdentity);
-      invalidIdentity.identityVersion = 999;
-      const error = await sidecarError(
-        client,
-        makeRequestId("invalid-update"),
-        "profiles.identity.update",
-        { storeRoot, profileId: profile.id, identity: invalidIdentity },
+    await runStep("profile-proxy-save-http-credentials", async () => {
+      const update = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("save-http-fixed"),
+          "profiles.proxy.update",
+          { storeRoot, profileId: profile.id, proxy: HTTP_CREDENTIAL_PROXY },
+        ),
       );
-      assert(error.code.startsWith("IDENTITY_"), "Invalid identity update did not return a typed IDENTITY_* code.", {
-        errorCode: error.code,
-      });
-      assert(error.recoverable === true, "Invalid identity update should be recoverable.", {
-        recoverable: error.recoverable,
-      });
-      const profilesJsonAfterInvalid = readProfilesJson(storeRoot).text;
-      assert(profilesJsonAfterInvalid === profilesJsonBeforeInvalid, "Invalid identity update mutated profiles.json.", {
-        errorCode: error.code,
-      });
-      const list = await sidecarSuccess(
-        client,
-        makeRequestId("post-invalid-list"),
-        "profiles.list",
-        { storeRoot },
-      );
-      const reloadedProfile = assertCollectionShape(list, profile.id);
-      assert(deepEqualJson(reloadedProfile.identity, suspiciousIdentity), "Invalid identity update changed the in-store identity.", {
-        expectedLabel: suspiciousIdentity.label,
-        actualLabel: reloadedProfile.identity?.label,
-      });
+      const updatedProfile = assertProxyMutationResult(update.result, profile.id, expectedSummary(HTTP_CREDENTIAL_PROXY));
+      const privateState = assertPrivateProxy(storeRoot, profile.id, HTTP_CREDENTIAL_PROXY);
       return {
-        errorCode: error.code,
-        detailRef: error.detailRef,
-        noWrite: true,
+        phase: "proxy-config",
+        action: "update",
+        protocol: updatedProfile.proxy.protocol,
+        savedSummary: updatedProfile.proxy.summary,
+        credentialState: updatedProfile.proxy.credentialState,
+        privateCredentialState: privateState.credentialState,
       };
     });
 
-    await runStep("store-redaction-scan", async () => {
-      const clean = assertProfilesJsonClean(storeRoot, profile.id, suspiciousIdentity);
-      const publicText = JSON.stringify(PUBLIC_EVENTS);
-      assertNoForbiddenText(publicText, "verify:s03 public output");
+    await runStep("reload-masked-http-credentials", async () => {
+      const list = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("reload-http-fixed"),
+          "profiles.list",
+          { storeRoot },
+        ),
+      );
+      const listedProfile = assertCollectionShape(list.result, profile.id);
+      assertPublicProxySummary(listedProfile.proxy, expectedSummary(HTTP_CREDENTIAL_PROXY));
       return {
-        storeVersion: clean.storeVersion,
-        profileCount: clean.profileCount,
-        forbiddenRuntimeFields: 0,
-        publicOutputLeaks: 0,
+        phase: "reload",
+        action: "list-after-credential-save",
+        savedSummary: listedProfile.proxy.summary,
+        credentialState: listedProfile.proxy.credentialState,
+        rawCredentialsRendered: false,
+      };
+    });
+
+    await runStep("profile-proxy-save-socks5-no-credentials", async () => {
+      const update = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("save-socks5-open"),
+          "profiles.proxy.update",
+          { storeRoot, profileId: profile.id, proxy: SOCKS5_NO_CREDENTIAL_PROXY },
+        ),
+      );
+      const updatedProfile = assertProxyMutationResult(update.result, profile.id, expectedSummary(SOCKS5_NO_CREDENTIAL_PROXY));
+      const privateState = assertPrivateProxy(storeRoot, profile.id, SOCKS5_NO_CREDENTIAL_PROXY);
+      finalSummary = cloneJson(updatedProfile.proxy);
+      return {
+        phase: "proxy-config",
+        action: "update",
+        protocol: updatedProfile.proxy.protocol,
+        savedSummary: updatedProfile.proxy.summary,
+        credentialState: updatedProfile.proxy.credentialState,
+        privateCredentialState: privateState.credentialState,
+      };
+    });
+
+    await runStep("reload-socks5-no-credentials", async () => {
+      const list = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("reload-socks5-open"),
+          "profiles.list",
+          { storeRoot },
+        ),
+      );
+      const listedProfile = assertCollectionShape(list.result, profile.id);
+      assertPublicProxySummary(listedProfile.proxy, expectedSummary(SOCKS5_NO_CREDENTIAL_PROXY));
+      finalSummary = cloneJson(listedProfile.proxy);
+      return {
+        phase: "reload",
+        action: "list-after-socks-save",
+        savedSummary: listedProfile.proxy.summary,
+        credentialState: listedProfile.proxy.credentialState,
+      };
+    });
+
+    await runStep("invalid-updates-no-write", async () => {
+      const invalidProxyCases = [
+        {
+          label: "pac-mode",
+          requestId: makeRequestId("invalid-pac-mode"),
+          expectedErrorCode: "PROXY_PAC_UNSUPPORTED",
+          proxy: {
+            proxyVersion: 1,
+            mode: "pac",
+            pacUrl: "https://proxy-s03-pac.example/proxy.pac",
+            credentials: { username: BAD_PROXY_USERNAME, password: BAD_PROXY_PASSWORD },
+          },
+        },
+        {
+          label: "system-mode",
+          requestId: makeRequestId("invalid-system-mode"),
+          expectedErrorCode: "PROXY_PAC_UNSUPPORTED",
+          proxy: { proxyVersion: 1, mode: "system" },
+        },
+        {
+          label: "url-style-field",
+          requestId: makeRequestId("invalid-url-style-field"),
+          expectedErrorCode: "PROXY_UNSUPPORTED_MODE",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy-s03-url.example",
+            port: 18081,
+            proxyUrl: "http://proxy-s03-url.example:18081",
+          },
+        },
+        {
+          label: "userinfo-host",
+          requestId: makeRequestId("invalid-userinfo-host"),
+          expectedErrorCode: "PROXY_INVALID",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "user:pass@proxy-s03-userinfo.example",
+            port: 18082,
+          },
+        },
+        {
+          label: "unsafe-launch-field",
+          requestId: makeRequestId("invalid-unsafe-launch-field"),
+          expectedErrorCode: "PROXY_INVALID",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy-s03-unsafe.example",
+            port: 18083,
+            argv: ["--remote-debugging-port=9222"],
+          },
+        },
+        {
+          label: "direct-fallback",
+          requestId: makeRequestId("invalid-direct-fallback"),
+          expectedErrorCode: "PROXY_UNSUPPORTED_MODE",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy-s03-fallback.example",
+            port: 18084,
+            directFallback: true,
+          },
+        },
+        {
+          label: "invalid-port",
+          requestId: makeRequestId("invalid-port"),
+          expectedErrorCode: "PROXY_INVALID",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy-s03-invalid-port.example",
+            port: 70000,
+          },
+        },
+        {
+          label: "incomplete-credentials",
+          requestId: makeRequestId("invalid-incomplete-pair"),
+          expectedErrorCode: "PROXY_INVALID",
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy-s03-incomplete-creds.example",
+            port: 18085,
+            credentials: { username: BAD_PROXY_USERNAME, password: "" },
+          },
+        },
+      ];
+      const outcomes = [];
+      for (const testCase of invalidProxyCases) {
+        const outcome = await runInvalidProxyUpdateNoWrite({
+          client,
+          expectedDiagnostics,
+          storeRoot,
+          profileId: profile.id,
+          requestId: testCase.requestId,
+          proxy: testCase.proxy,
+          expectedErrorCode: testCase.expectedErrorCode,
+        });
+        outcomes.push({ label: testCase.label, errorCode: outcome.errorCode, storeUnchanged: outcome.storeUnchanged });
+      }
+      return {
+        phase: "proxy-config",
+        action: "invalid-updates-no-write",
+        invalidCaseCount: outcomes.length,
+        outcomes,
+      };
+    });
+
+    await runStep("post-invalid-store-truth", async () => {
+      const list = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("post-invalid-list"),
+          "profiles.list",
+          { storeRoot },
+        ),
+      );
+      const listedProfile = assertCollectionShape(list.result, profile.id);
+      assertPublicProxySummary(listedProfile.proxy, expectedSummary(SOCKS5_NO_CREDENTIAL_PROXY));
+      const privateState = assertPrivateProxy(storeRoot, profile.id, SOCKS5_NO_CREDENTIAL_PROXY);
+      return {
+        phase: "proxy-config",
+        action: "verify-no-write-truth",
+        savedSummary: listedProfile.proxy.summary,
+        credentialState: listedProfile.proxy.credentialState,
+        privateCredentialState: privateState.credentialState,
+      };
+    });
+
+    await runStep("runtime-guard-boundary-status", async () => {
+      const status = trackStoredDiagnostic(
+        expectedDiagnostics,
+        await sidecarSuccess(
+          client,
+          makeRequestId("chromium-status-boundary"),
+          "chromium.status",
+          { storeRoot },
+        ),
+      );
+      assert(status.result.runningCount === 0, "Runtime guard boundary smoke expected no running Chromium profiles.", {
+        runningCount: status.result.runningCount,
+      });
+      assert(Array.isArray(status.result.profiles) && status.result.profiles.length === 0, "Runtime guard boundary smoke found running profile payloads.", {
+        runningProfiles: status.result.profiles?.length,
+      });
+      return {
+        phase: "runtime-guard-boundary",
+        action: "status-only",
+        runningCount: status.result.runningCount,
+        packagedUiGuardProof: "deferred-to-s06-and-react-tests",
+      };
+    });
+
+    await runStep("diagnostic-log-shape", async () => {
+      const diagnosticProof = assertStoredDiagnosticLogEntries(storeRoot, expectedDiagnostics);
+      return {
+        phase: "proxy-config",
+        action: "diagnostic-log-shape",
+        ...diagnosticProof,
+      };
+    });
+
+    await runStep("redaction-boundary", async () => {
+      const helperProof = assertVerifierRedactionHelpers();
+      const transcriptProof = assertTranscriptRedaction();
+      const eventProof = assertVerifierEventsRedacted();
+      return {
+        phase: "redaction",
+        action: "scan-public-output",
+        ...helperProof,
+        ...transcriptProof,
+        ...eventProof,
+        publicIpProof: "not-claimed",
+        webRtcProof: "not-claimed",
       };
     });
 
     await runStep("source-sidecar-stop", async () => {
       const stopped = await client.stop();
-      return { process: "source-sidecar", exitCode: stopped.exitCode, exitSignal: stopped.exitSignal };
+      return {
+        phase: "proxy-config",
+        action: "stop",
+        process: "source-sidecar",
+        exitCode: stopped.exitCode,
+        exitSignal: stopped.exitSignal,
+      };
     });
   } finally {
     await client.cleanup();
@@ -840,15 +1393,18 @@ async function runIdentityVerifier(storeRoot) {
 
   return {
     profileId: profile.id,
-    savedLabel: suspiciousIdentity.label,
-    presetId: TARGET_PRESET_ID,
+    finalSavedSummary: finalSummary?.summary ?? "unknown",
+    finalCredentialState: finalSummary?.credentialState ?? "unknown",
+    categories: ["proxy-config", "redaction", "reload", "runtime-guard-boundary"],
+    publicIpProof: "not-claimed",
+    webRtcProof: "not-claimed",
   };
 }
 
-const storeRoot = makeTempRoot("theprivator-s03-identity-");
+const storeRoot = makeTempRoot("theprivator-s03-proxy-");
 
 try {
-  const proof = await runIdentityVerifier(storeRoot);
+  const proof = await runProxyConfigVerifier(storeRoot);
   rmSync(storeRoot, { recursive: true, force: true });
   emit({
     status: "pass",
