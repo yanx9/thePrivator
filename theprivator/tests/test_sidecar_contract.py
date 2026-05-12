@@ -568,6 +568,143 @@ def test_profiles_proxy_update_invalid_input_preserves_store_and_persists_redact
     assert_no_proxy_secret_values(proc.stdout + proc.stderr + json.dumps(lookup, sort_keys=True))
 
 
+def test_profiles_proxy_check_direct_profile_returns_safe_not_proven_contract(tmp_path):
+    store_root = str(tmp_path / "proxy-check-direct-app-data-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-check-direct-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Proxy Check Direct"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-check-direct",
+                "method": "profiles.proxy.check",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "checkerUrl": "https://attacker.example.invalid/should-not-be-used",
+                },
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    assert response["id"] == "proxy-check-direct"
+    assert response["ok"] is True
+    result = response["result"]
+    assert set(result) == {"proxyCheckVersion", "profileId", "proxy", "routeProof", "ipHiding", "webRtc", "publicCheckers"}
+    assert result["proxyCheckVersion"] == 1
+    assert result["profileId"] == profile["id"]
+    assert result["routeProof"]["status"] == "not-run"
+    assert result["ipHiding"] == {
+        "status": "not-proven",
+        "basis": "direct-profile",
+        "scope": "not-applicable",
+        "publicExitIpClaimed": False,
+        "publicExitIp": None,
+        "localFixtureConclusion": "not-run",
+    }
+    assert result["publicCheckers"]["status"] == "advisory-only"
+    assert [page["id"] for page in result["publicCheckers"]["pages"]] == [
+        "cloudflare-trace",
+        "aws-checkip",
+        "webbrowsertools-webrtc",
+    ]
+    assert "attacker.example.invalid" not in proc.stdout
+    assert diagnostic["method"] == "profiles.proxy.check"
+    assert diagnostic["status"] == "ok"
+    assert diagnostic["errorCode"] is None
+    assert diagnostic["detailRef"] is None
+    assert_redacted_stderr(create_proc, proc, store_root=store_root, profile_name="Proxy Check Direct")
+
+    log_text = Path(store_root, "profile-store", "diagnostics", "events.jsonl").read_text(encoding="utf-8")
+    assert "profiles.proxy.check" in log_text
+    assert store_root not in log_text
+    combined = create_proc.stdout + create_proc.stderr + proc.stdout + proc.stderr + log_text
+    for marker in FORBIDDEN_PROXY_RUNTIME_MARKERS:
+        assert marker not in combined
+
+
+def test_profiles_proxy_check_socks_credentials_fail_with_persisted_diagnostic(tmp_path):
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    store_root = str(tmp_path / "proxy-check-socks-app-data-should-not-leak")
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-check-socks-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Proxy Check Socks"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-check-socks-update",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "socks5",
+                        "host": "proxy.example.invalid",
+                        "port": 9050,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+    assert parse_ndjson(update_proc.stdout)[0]["ok"] is True
+
+    proc = run_sidecar(
+        request_line(
+            {
+                "id": "proxy-check-socks",
+                "method": "profiles.proxy.check",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        )
+    )
+
+    response = parse_ndjson(proc.stdout)[0]
+    diagnostic = parse_ndjson(proc.stderr)[0]
+    error = assert_error_envelope(response, "PROXY_SOCKS_AUTH_UNSUPPORTED", "proxy-check-socks")
+    assert diagnostic["method"] == "profiles.proxy.check"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
+    assert lookup["found"] is True
+    assert len(lookup["entries"]) == 1
+    entry = lookup["entries"][0]
+    assert set(entry) == PERSISTED_REQUEST_DIAGNOSTIC_KEYS
+    assert entry["method"] == "profiles.proxy.check"
+    assert entry["requestId"] == "proxy-check-socks"
+    assert entry["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
+    assert entry["detailRef"] == error["detailRef"]
+    assert not Path(store_root, "profile-store", "runtime").exists()
+    combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + proc.stdout + proc.stderr
+    assert_no_proxy_secret_values(combined + json.dumps(lookup, sort_keys=True))
+    for marker in FORBIDDEN_PROXY_RUNTIME_MARKERS:
+        assert marker not in combined + json.dumps(lookup, sort_keys=True)
+
+
 def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocations(tmp_path):
     store_root = str(tmp_path / "app-data")
 

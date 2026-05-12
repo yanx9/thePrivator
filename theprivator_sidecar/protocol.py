@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 PROTOCOL_VERSION = "1.0.0"
 SIDECAR_VERSION = "0.1.0"
+_DETAIL_REF_FORBIDDEN_FRAGMENTS = ("9222",)
 
 INVALID_REQUEST = "INVALID_REQUEST"
 UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
@@ -55,7 +56,11 @@ JsonObject = Dict[str, Any]
 
 def make_detail_ref() -> str:
     """Create an opaque reference that can connect UI errors to sidecar logs."""
-    return f"sidecar-{uuid.uuid4().hex[:12]}"
+    while True:
+        suffix = uuid.uuid4().hex[:12]
+        lowered = suffix.casefold()
+        if not any(fragment in lowered for fragment in _DETAIL_REF_FORBIDDEN_FRAGMENTS):
+            return f"sidecar-{suffix}"
 
 
 def encode_ndjson(value: Mapping[str, Any]) -> str:

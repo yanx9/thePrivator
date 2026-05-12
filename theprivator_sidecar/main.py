@@ -7,7 +7,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
-from . import chromium, identity_audit, legacy_import
+from . import chromium, identity_audit, legacy_import, proxy_check
 from .diagnostics import append_events
 from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
 from .profiles import ProfileStore, require_string_param
@@ -293,6 +293,14 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
                 "Profile id is required.",
             )
             return store.update_proxy(profile_id, request.params.get("proxy"))
+
+        if request.method == "profiles.proxy.check":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            return proxy_check.check_profile_proxy(store_root, profile_id)
 
         if request.method == "profiles.list":
             return store.list()

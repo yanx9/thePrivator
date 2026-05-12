@@ -129,6 +129,25 @@ def test_collect_proxy_proof_reports_redacted_success_summary_for_all_fixture_ki
     assert_no_proxy_secret_leak(proof)
 
 
+def test_collect_proxy_proof_success_summary_has_bounded_public_keys(tmp_path):
+    proof = collect_proxy_proof(tmp_path, proxy_case("bounded-http", protocol="http"))
+
+    assert set(proof) == {
+        "schemaVersion",
+        "status",
+        "caseLabel",
+        "fixtureKind",
+        "durationMs",
+        "directFallbackDetected",
+        "target",
+        "navigation",
+        "observations",
+    }
+    assert set(proof["target"]) == {"host", "port"}
+    assert {"proxyCount", "targetCount", "proxy", "target"} <= set(proof["observations"])
+    assert_no_proxy_secret_leak(proof)
+
+
 def test_proxy_proof_collector_surfaces_typed_connectivity_failures(tmp_path):
     broken_case = proxy_case("broken-connectivity", proxy_overrides={"port": 9}, managedFixture=False)
 
