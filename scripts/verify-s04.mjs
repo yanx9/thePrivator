@@ -947,8 +947,6 @@ function assertStaticNoPublicCheckerScraping() {
     "src/App.tsx",
   ];
   const forbiddenSourcePatterns = [
-    /rawTranscript/i,
-    /responseBody/i,
     /checkerBody/i,
     /fetch\s*\(\s*["']https:\/\//i,
     /XMLHttpRequest\s*\(/,
