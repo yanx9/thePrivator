@@ -31,6 +31,11 @@ from .identity_runtime import (
     IdentityRuntimePlan,
     build_identity_runtime_plan,
 )
+from .proxy_auth_extension import (
+    ProxyAuthExtensionArtifact,
+    generate_proxy_auth_extension,
+    runtime_proxy_auth_extension_root,
+)
 from .profiles import STORE_DIR, ProfileRecord, ProfileStore, utc_now_iso
 from .protocol import (
     CHROMIUM_ALREADY_RUNNING,
@@ -254,13 +259,14 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         ) from exc
 
     extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
     args = build_launch_args(
         executable,
         user_data_path,
         "about:blank",
         extra_args=[
-            *_identity_launch_args(identity_plan, extension_artifact),
+            *_runtime_launch_args(identity_plan, extension_artifact, proxy_auth_artifact),
             *proxy_plan.launch_args,
         ],
     )
@@ -414,21 +420,67 @@ def _prepare_identity_extension(
     return generate_identity_extension(extension_root, profile.id, identity_plan)
 
 
+def _prepare_proxy_auth_extension(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    proxy_plan: ProxyRuntimePlan,
+) -> Optional[ProxyAuthExtensionArtifact]:
+    if not proxy_plan.requires_auth_helper:
+        return None
+    extension_root = runtime_proxy_auth_extension_root(store_root).resolve()
+    return generate_proxy_auth_extension(extension_root, profile.id, profile.proxy, proxy_plan)
+
+
+def _runtime_launch_args(
+    identity_plan: IdentityRuntimePlan,
+    extension_artifact: Optional[IdentityExtensionArtifact],
+    proxy_auth_artifact: Optional[ProxyAuthExtensionArtifact],
+    *,
+    force_remote_debugging: bool = False,
+) -> list[str]:
+    args: list[str] = []
+    args.extend(
+        _extension_launch_args(
+            [
+                artifact.extension_dir
+                for artifact in (extension_artifact, proxy_auth_artifact)
+                if artifact is not None
+            ]
+        )
+    )
+    if force_remote_debugging or identity_plan.requires_cdp:
+        args.append(_REMOTE_DEBUGGING_ARG)
+    args.extend(identity_plan.launch_flags)
+    return _validate_extra_launch_args(args)
+
+
 def _identity_launch_args(
     identity_plan: IdentityRuntimePlan,
     extension_artifact: Optional[IdentityExtensionArtifact],
     *,
     force_remote_debugging: bool = False,
 ) -> list[str]:
-    args: list[str] = []
-    if extension_artifact is not None:
-        extension_dir = str(extension_artifact.extension_dir)
-        args.append(f"{_LOAD_EXTENSION_PREFIX}{extension_dir}")
-        args.append(f"{_DISABLE_EXTENSIONS_EXCEPT_PREFIX}{extension_dir}")
-    if force_remote_debugging or identity_plan.requires_cdp:
-        args.append(_REMOTE_DEBUGGING_ARG)
-    args.extend(identity_plan.launch_flags)
-    return _validate_extra_launch_args(args)
+    return _runtime_launch_args(
+        identity_plan,
+        extension_artifact,
+        None,
+        force_remote_debugging=force_remote_debugging,
+    )
+
+
+def _extension_launch_args(extension_dirs: Sequence[Union[str, Path]]) -> list[str]:
+    safe_paths: list[str] = []
+    for extension_dir in extension_dirs:
+        safe_path = _validate_extension_arg_path(extension_dir)
+        if safe_path not in safe_paths:
+            safe_paths.append(safe_path)
+    if not safe_paths:
+        return []
+    value = ",".join(safe_paths)
+    return [
+        f"{_LOAD_EXTENSION_PREFIX}{value}",
+        f"{_DISABLE_EXTENSIONS_EXCEPT_PREFIX}{value}",
+    ]
 
 
 def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
@@ -454,7 +506,7 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
             safe_args.append(arg)
             continue
         if arg.startswith(_LOAD_EXTENSION_PREFIX) or arg.startswith(_DISABLE_EXTENSIONS_EXCEPT_PREFIX):
-            _validate_extension_arg_path(arg.split("=", 1)[1])
+            _validate_extension_arg_paths(arg.split("=", 1)[1])
             safe_args.append(arg)
             continue
         raise SidecarError(
@@ -488,19 +540,42 @@ def _is_allowed_identity_value_arg(arg: str) -> bool:
     return False
 
 
-def _validate_extension_arg_path(value: str) -> None:
+def _validate_extension_arg_paths(value: str) -> None:
+    if not isinstance(value, str) or not value:
+        _raise_launch_arg_error()
+    paths = value.split(",")
+    if not paths or any(not path for path in paths):
+        _raise_launch_arg_error()
+    for path in paths:
+        _validate_extension_arg_path(path)
+
+
+def _validate_extension_arg_path(value: Union[str, Path]) -> str:
     try:
-        path = Path(value)
+        raw_value = str(value)
+        path = Path(raw_value)
     except TypeError as exc:
         raise SidecarError(
             code=CHROMIUM_LAUNCH_FAILED,
             message="Chromium launch arguments could not be prepared.",
         ) from exc
-    if not value or not path.is_absolute() or "\x00" in value:
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium launch arguments could not be prepared.",
-        )
+    if (
+        not raw_value
+        or not path.is_absolute()
+        or not path.is_dir()
+        or "\x00" in raw_value
+        or "," in raw_value
+        or any(ord(character) < 32 for character in raw_value)
+    ):
+        _raise_launch_arg_error()
+    return raw_value
+
+
+def _raise_launch_arg_error() -> None:
+    raise SidecarError(
+        code=CHROMIUM_LAUNCH_FAILED,
+        message="Chromium launch arguments could not be prepared.",
+    )
 
 
 def discover_devtools_endpoint(user_data_dir: Union[str, Path], **kwargs: Any) -> Any:
@@ -608,15 +683,17 @@ def _launch_and_open_identity_audit_page(
         ) from exc
 
     extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
     args = build_launch_args(
         executable,
         user_data_path,
         "about:blank",
         extra_args=[
-            *_identity_launch_args(
+            *_runtime_launch_args(
                 identity_plan,
                 extension_artifact,
+                proxy_auth_artifact,
                 force_remote_debugging=True,
             ),
             *proxy_plan.launch_args,

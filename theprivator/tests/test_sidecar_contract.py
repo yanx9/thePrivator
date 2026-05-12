@@ -1205,6 +1205,179 @@ def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnos
     assert "missing-chromium-should-not-matter" not in combined
 
 
+def test_http_proxy_auth_chromium_launch_sidecar_contract_uses_helper_and_redacts_secrets(tmp_path):
+    store_root = str(tmp_path / "auth-proxy-launch-app-data-should-not-leak")
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "auth-proxy-argv-should-not-leak.json"
+    env = {
+        "THEPRIVATOR_CHROMIUM_PATH": str(fake_chromium),
+        "THEPRIVATOR_FAKE_CHROMIUM_ARGV": str(argv_capture),
+    }
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "auth-proxy-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Auth Proxy Launch"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "auth-proxy-update",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "http",
+                        "host": "proxy.example.invalid",
+                        "port": 18080,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+    assert parse_ndjson(update_proc.stdout)[0]["ok"] is True
+
+    try:
+        launch_proc = run_sidecar(
+            request_line(
+                {
+                    "id": "auth-proxy-launch",
+                    "method": "chromium.launch",
+                    "params": {"storeRoot": store_root, "profileId": profile["id"]},
+                }
+            ),
+            env=env,
+        )
+        response = parse_ndjson(launch_proc.stdout)[0]
+        diagnostic = parse_ndjson(launch_proc.stderr)[0]
+        assert response["ok"] is True
+        assert response["result"]["status"] == "running"
+        assert diagnostic["method"] == "chromium.launch"
+        assert diagnostic["status"] == "ok"
+        assert diagnostic["detailRef"] is None
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        proxy_args = [arg for arg in argv if arg.startswith("--proxy-server=")]
+        assert proxy_args == ["--proxy-server=http://proxy.example.invalid:18080"]
+        assert any(arg.startswith("--load-extension=") for arg in argv)
+        assert any(arg.startswith("--disable-extensions-except=") for arg in argv)
+        assert_no_proxy_secret_values("\n".join(argv))
+        assert "direct://" not in "\n".join(argv)
+
+        combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr
+        assert_no_proxy_secret_values(combined)
+        assert store_root not in combined
+        assert str(fake_chromium) not in combined
+        assert str(argv_capture) not in combined
+        assert "--proxy-server" not in combined
+        assert "--load-extension" not in combined
+        assert "proxy-auth-extensions" not in combined
+        assert "Traceback" not in combined
+    finally:
+        run_sidecar(
+            request_line(
+                {
+                    "id": "auth-proxy-cleanup",
+                    "method": "chromium.stop",
+                    "params": {"storeRoot": store_root, "profileId": profile["id"]},
+                }
+            )
+        )
+
+
+def test_http_proxy_auth_helper_generation_failure_is_typed_redacted_and_diagnostic(tmp_path):
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    store_root = str(tmp_path / "auth-helper-failure-app-data-should-not-leak")
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "auth-helper-failure-argv-should-not-exist.json"
+    create_proc = run_sidecar(
+        request_line(
+            {
+                "id": "auth-helper-profile-create",
+                "method": "profiles.create",
+                "params": {"storeRoot": store_root, "name": "Auth Helper Failure"},
+            }
+        )
+    )
+    profile = parse_ndjson(create_proc.stdout)[0]["result"]["profile"]
+    update_proc = run_sidecar(
+        request_line(
+            {
+                "id": "auth-helper-proxy-update",
+                "method": "profiles.proxy.update",
+                "params": {
+                    "storeRoot": store_root,
+                    "profileId": profile["id"],
+                    "proxy": {
+                        "proxyVersion": 1,
+                        "mode": "fixedServer",
+                        "protocol": "https",
+                        "host": "proxy.example.invalid",
+                        "port": 18443,
+                        "credentials": {
+                            "username": SENTINEL_USERNAME,
+                            "password": SENTINEL_PASSWORD,
+                        },
+                    },
+                },
+            }
+        )
+    )
+    assert parse_ndjson(update_proc.stdout)[0]["ok"] is True
+    runtime_dir = Path(store_root, "profile-store", "runtime")
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "proxy-auth-extensions").write_text("not-a-directory", encoding="utf-8")
+
+    launch_proc = run_sidecar(
+        request_line(
+            {
+                "id": "auth-helper-launch",
+                "method": "chromium.launch",
+                "params": {"storeRoot": store_root, "profileId": profile["id"]},
+            }
+        ),
+        env={
+            "THEPRIVATOR_CHROMIUM_PATH": str(fake_chromium),
+            "THEPRIVATOR_FAKE_CHROMIUM_ARGV": str(argv_capture),
+        },
+    )
+
+    response = parse_ndjson(launch_proc.stdout)[0]
+    diagnostic = parse_ndjson(launch_proc.stderr)[0]
+    error = assert_error_envelope(response, "PROXY_AUTH_HELPER_FAILED", "auth-helper-launch")
+    assert diagnostic["method"] == "chromium.launch"
+    assert diagnostic["status"] == "error"
+    assert diagnostic["errorCode"] == "PROXY_AUTH_HELPER_FAILED"
+    assert diagnostic["detailRef"] == error["detailRef"]
+    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
+    assert lookup["found"] is True
+    assert lookup["entries"][0]["method"] == "chromium.launch"
+    assert lookup["entries"][0]["errorCode"] == "PROXY_AUTH_HELPER_FAILED"
+    assert not argv_capture.exists()
+
+    combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr
+    assert_no_proxy_secret_values(combined + json.dumps(lookup, sort_keys=True))
+    assert store_root not in combined
+    assert str(fake_chromium) not in combined
+    assert str(argv_capture) not in combined
+    assert "proxy-auth-extensions" not in combined
+    assert "--proxy-server" not in combined
+    assert "--load-extension" not in combined
+    assert "Traceback" not in combined
+
+
 def test_chromium_launch_status_stop_sidecar_contract_redacts_runtime_details(tmp_path):
     store_root = str(tmp_path / "app-data-path-should-not-leak")
     fake_chromium = make_fake_chromium(tmp_path)

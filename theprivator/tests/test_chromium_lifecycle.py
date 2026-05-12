@@ -20,6 +20,7 @@ from theprivator_sidecar.protocol import (
     IDENTITY_EXTENSION_FAILED,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
+    PROXY_AUTH_HELPER_FAILED,
     PROXY_LAUNCH_ARG_UNSAFE,
     PROXY_SOCKS_AUTH_UNSUPPORTED,
     SidecarError,
@@ -62,6 +63,20 @@ def make_fake_chromium(tmp_path: Path) -> Path:
 
 def create_profile(tmp_path: Path, name: str = "Research") -> Mapping[str, Any]:
     return ProfileStore(tmp_path).create(name)["profile"]
+
+
+def authenticated_http_proxy(protocol: str = "http") -> Mapping[str, Any]:
+    return {
+        "proxyVersion": 1,
+        "mode": "fixedServer",
+        "protocol": protocol,
+        "host": "proxy.example.invalid",
+        "port": 18080 if protocol == "http" else 18443,
+        "credentials": {
+            "username": "proxy-auth-user-sentinel",
+            "password": "proxy-auth-password-sentinel",
+        },
+    }
 
 
 def audit_page_payload(page_id: str = "browserleaks-webgl") -> Mapping[str, Any]:
@@ -602,6 +617,37 @@ def test_extension_failure_happens_before_spawn_and_leaves_registry_empty(tmp_pa
 
     error = assert_sidecar_error(exc_info, IDENTITY_EXTENSION_FAILED)
     assert str(tmp_path) not in error.message
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_proxy_auth_extension_failure_happens_before_spawn_and_leaves_registry_empty(tmp_path, monkeypatch):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(profile["id"], authenticated_http_proxy("http"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+
+    def fail_generate_proxy_auth_extension(*args, **kwargs):
+        raise SidecarError(
+            code=PROXY_AUTH_HELPER_FAILED,
+            message="Proxy auth helper could not be prepared.",
+        )
+
+    def fail_if_spawned(*args, **kwargs):
+        raise AssertionError("Chromium must not spawn after proxy auth extension generation fails")
+
+    monkeypatch.setattr(chromium, "generate_proxy_auth_extension", fail_generate_proxy_auth_extension)
+    monkeypatch.setattr(chromium, "_spawn_chromium", fail_if_spawned)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, PROXY_AUTH_HELPER_FAILED)
+    encoded_error = json.dumps(error.to_dict(), sort_keys=True)
+    assert "proxy-auth-user-sentinel" not in encoded_error
+    assert "proxy-auth-password-sentinel" not in encoded_error
+    assert str(tmp_path) not in encoded_error
     assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
     assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
     assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
