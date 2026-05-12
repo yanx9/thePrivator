@@ -11,6 +11,7 @@ import pytest
 from theprivator_sidecar import chromium
 from theprivator_sidecar.identity import curated_preset
 from theprivator_sidecar.profiles import ProfileStore
+from theprivator_sidecar.proxy_proof import HttpsProxyCertificateStrategy
 from theprivator_sidecar.protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
@@ -22,6 +23,7 @@ from theprivator_sidecar.protocol import (
     PROFILE_NOT_FOUND,
     PROXY_AUTH_HELPER_FAILED,
     PROXY_LAUNCH_ARG_UNSAFE,
+    PROXY_PROOF_FAILED,
     PROXY_SOCKS_AUTH_UNSUPPORTED,
     SidecarError,
 )
@@ -305,6 +307,87 @@ def test_chromium_launch_arg_validator_rejects_unsafe_proxy_debug_and_path_args(
         encoded_error = json.dumps(error.to_dict(), sort_keys=True)
         assert "user:pass" not in encoded_error
         assert str(tmp_path) not in encoded_error
+
+
+def test_proxy_proof_spki_trust_is_env_gated_and_public_payload_redacted(tmp_path, monkeypatch):
+    strategy = HttpsProxyCertificateStrategy()
+    executable = tmp_path / "chromium"
+    executable.write_text("", encoding="utf-8")
+    user_data_dir = tmp_path / "user-data"
+
+    with pytest.raises(SidecarError) as unsafe_exc:
+        chromium.build_launch_args(
+            executable,
+            user_data_dir,
+            "about:blank",
+            extra_args=[strategy.to_chromium_arg()],
+        )
+    assert_sidecar_error(unsafe_exc, PROXY_LAUNCH_ARG_UNSAFE)
+
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(
+        profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "https",
+            "host": "proxy.example.invalid",
+            "port": 18443,
+        },
+    )
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "proxy-proof-spki-argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    monkeypatch.setenv(chromium.PROXY_PROOF_TRUST_ENABLED_ENV, "1")
+    monkeypatch.setenv(chromium.PROXY_PROOF_SPKI_SHA256_ENV, strategy.spki_sha256)
+
+    launch = chromium.launch(tmp_path, profile["id"])
+
+    try:
+        assert launch["status"] == "running"
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        assert strategy.to_chromium_arg() in argv
+        assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
+            "--proxy-server=https://proxy.example.invalid:18443"
+        ]
+        public_surfaces = json.dumps(
+            {
+                "launch": launch,
+                "status": chromium.status(tmp_path),
+                "registry": (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+                    encoding="utf-8"
+                ),
+            },
+            sort_keys=True,
+        )
+        assert strategy.spki_sha256 not in public_surfaces
+        assert "ignore-certificate-errors" not in public_surfaces
+        assert str(tmp_path) not in public_surfaces
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+    bad_profile = create_profile(tmp_path, name="Bad Proof Trust")
+    ProfileStore(tmp_path).update_proxy(
+        bad_profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "https",
+            "host": "proxy.example.invalid",
+            "port": 18443,
+        },
+    )
+    bad_capture = tmp_path / "bad-proof-spki-argv.json"
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(bad_capture))
+    monkeypatch.setenv(chromium.PROXY_PROOF_SPKI_SHA256_ENV, "not-a-valid-spki-pin")
+
+    with pytest.raises(SidecarError) as proof_exc:
+        chromium.launch(tmp_path, bad_profile["id"])
+
+    assert_sidecar_error(proof_exc, PROXY_PROOF_FAILED)
+    assert not bad_capture.exists()
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
 
 
 def test_masked_identity_launch_generates_extension_and_applies_cdp_before_registry_write(

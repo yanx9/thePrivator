@@ -9,6 +9,7 @@ lines, browser stdout/stderr, or environment values.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import platform
@@ -47,6 +48,7 @@ from .protocol import (
     INVALID_REQUEST,
     JsonObject,
     PROXY_LAUNCH_ARG_UNSAFE,
+    PROXY_PROOF_FAILED,
     SidecarError,
 )
 from .proxy_runtime import (
@@ -72,6 +74,8 @@ GRACEFUL_STOP_TIMEOUT_SECONDS = 3.0
 FORCE_STOP_TIMEOUT_SECONDS = 2.0
 LAUNCH_LIVENESS_SETTLE_SECONDS = 0.05
 CHROMIUM_EXECUTABLE_ENV = "THEPRIVATOR_CHROMIUM_PATH"
+PROXY_PROOF_TRUST_ENABLED_ENV = "THEPRIVATOR_ENABLE_PROXY_PROOF_TRUST"
+PROXY_PROOF_SPKI_SHA256_ENV = "THEPRIVATOR_PROXY_PROOF_SPKI_SHA256"
 CHROMIUM_EXECUTABLE_NAMES = (
     "chromium-browser",
     "chromium",
@@ -91,6 +95,7 @@ _SAFE_CHROMIUM_ARGS = (
     "--disable-features=TranslateUI",
 )
 _REMOTE_DEBUGGING_ARG = "--remote-debugging-port=0"
+_PROXY_PROOF_SPKI_ARG_PREFIX = "--ignore-certificate-errors-spki-list="
 _LOAD_EXTENSION_PREFIX = "--load-extension="
 _DISABLE_EXTENSIONS_EXCEPT_PREFIX = "--disable-extensions-except="
 _ALLOWED_IDENTITY_LAUNCH_FLAGS = {WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG}
@@ -268,6 +273,7 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         extra_args=[
             *_runtime_launch_args(identity_plan, extension_artifact, proxy_auth_artifact),
             *proxy_plan.launch_args,
+            *_proxy_proof_trust_args(),
         ],
     )
     if identity_plan.requires_cdp:
@@ -497,6 +503,9 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
         if arg.startswith(PROXY_SERVER_ARG_PREFIX):
             safe_args.append(validate_proxy_server_launch_arg(arg))
             continue
+        if _is_allowed_proxy_proof_trust_arg(arg):
+            safe_args.append(arg)
+            continue
         if is_rejected_launch_switch(arg):
             raise SidecarError(
                 code=PROXY_LAUNCH_ARG_UNSAFE,
@@ -514,6 +523,40 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
             message="Chromium launch arguments could not be prepared.",
         )
     return safe_args
+
+
+def _proxy_proof_trust_args() -> list[str]:
+    if os.environ.get(PROXY_PROOF_TRUST_ENABLED_ENV) != "1":
+        return []
+    pin = os.environ.get(PROXY_PROOF_SPKI_SHA256_ENV, "").strip()
+    if not _is_valid_spki_pin(pin):
+        raise SidecarError(
+            code=PROXY_PROOF_FAILED,
+            message="Proxy proof trust metadata could not be prepared.",
+        )
+    return [f"{_PROXY_PROOF_SPKI_ARG_PREFIX}{pin}"]
+
+
+def _is_allowed_proxy_proof_trust_arg(arg: str) -> bool:
+    if not isinstance(arg, str) or not arg.startswith(_PROXY_PROOF_SPKI_ARG_PREFIX):
+        return False
+    if os.environ.get(PROXY_PROOF_TRUST_ENABLED_ENV) != "1":
+        return False
+    pin = arg[len(_PROXY_PROOF_SPKI_ARG_PREFIX) :]
+    expected_pin = os.environ.get(PROXY_PROOF_SPKI_SHA256_ENV, "").strip()
+    return pin == expected_pin and _is_valid_spki_pin(pin)
+
+
+def _is_valid_spki_pin(value: str) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        return False
+    if "\x00" in value or any(character.isspace() for character in value):
+        return False
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except Exception:
+        return False
+    return len(decoded) == 32
 
 
 def _is_allowed_identity_value_arg(arg: str) -> bool:
@@ -697,6 +740,7 @@ def _launch_and_open_identity_audit_page(
                 force_remote_debugging=True,
             ),
             *proxy_plan.launch_args,
+            *_proxy_proof_trust_args(),
         ],
     )
     _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
@@ -1161,6 +1205,8 @@ def _reap_if_child(pid: int) -> bool:
 
 __all__ = [
     "CHROMIUM_EXECUTABLE_NAMES",
+    "PROXY_PROOF_SPKI_SHA256_ENV",
+    "PROXY_PROOF_TRUST_ENABLED_ENV",
     "GRACEFUL_STOP_TIMEOUT_SECONDS",
     "FORCE_STOP_TIMEOUT_SECONDS",
     "LAUNCH_LIVENESS_SETTLE_SECONDS",
