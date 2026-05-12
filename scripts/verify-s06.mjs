@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
+import { createInterface } from "node:readline";
 import {
   basename,
   delimiter as hostPathDelimiter,
@@ -34,6 +35,10 @@ const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SIDECAR_NAME = "theprivator-sidecar";
 const APP_BINARY_NAME = "theprivator";
 const SIDECAR_EXTERNAL_BIN = "binaries/theprivator-sidecar";
+const VENV_PYTHON = process.platform === "win32"
+  ? join(ROOT_DIR, ".venv", "Scripts", "python.exe")
+  : join(ROOT_DIR, ".venv", "bin", "python");
+const PYTHON = process.env.PYTHON ?? (existsSync(VENV_PYTHON) ? VENV_PYTHON : (process.platform === "win32" ? "python" : "python3"));
 const VERIFY_EVENT = "verify.s06";
 const BUILD_TIMEOUT_MS = Number(process.env.VERIFY_S06_BUILD_TIMEOUT_MS ?? 20 * 60_000);
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -67,7 +72,9 @@ const PROFILE_STORE_RELATIVE_PATH = "profile-store/profiles.json";
 const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
 const MAX_POST_SMOKE_SCAN_ENTRIES = 5_000;
 const MAX_DIAGNOSTIC_READ_BYTES = 512 * 1024;
-export const PACKAGED_SMOKE_PROFILE_PREFIX = "M002 Packaged Identity Smoke";
+const FIXTURE_READY_TIMEOUT_MS = Number(process.env.VERIFY_S06_FIXTURE_READY_TIMEOUT_MS ?? 8_000);
+const FIXTURE_COMMAND_TIMEOUT_MS = Number(process.env.VERIFY_S06_FIXTURE_COMMAND_TIMEOUT_MS ?? 5_000);
+export const PACKAGED_SMOKE_PROFILE_PREFIX = "M003 Packaged Proxy Smoke";
 export const PACKAGED_SMOKE_PRESET_ID = "ubuntu-linux-chrome-120";
 export const PACKAGED_SMOKE_PRESET_LABEL = "Ubuntu Linux Chrome 120";
 export const PACKAGED_SMOKE_EXPECTED_SURFACE_MODES = Object.freeze({
@@ -83,16 +90,20 @@ export const PACKAGED_SMOKE_EXPECTED_SURFACE_MODES = Object.freeze({
 export const PACKAGED_SMOKE_AUDIT_PAGE_ID = "browserleaks-webgl";
 export const PACKAGED_SMOKE_AUDIT_PAGE_LABEL = "BrowserLeaks WebGL";
 export const PACKAGED_SMOKE_AUDIT_PAGE_COUNT = 9;
+const PACKAGED_SMOKE_PROXY_USERNAME = "s06-proxy-user-sentinel";
+const PACKAGED_SMOKE_PROXY_PASSWORD = "s06-proxy-password-sentinel";
+const PACKAGED_SMOKE_PROXY_TARGET_HOST = "theprivator-proxy-proof.invalid";
+const PACKAGED_SMOKE_PROXY_TARGET_PATH = "/theprivator-proxy-proof";
 export const REQUIRED_DIAGNOSTIC_METHODS = Object.freeze([
   "profiles.create",
   "profiles.identity.applyPreset",
+  "profiles.proxy.update",
+  "profiles.proxy.check",
   "chromium.launch",
   "chromium.stop",
-  "identity.audit.plan",
-  "identity.audit.open",
 ]);
 const SUPPORTING_REGRESSION_COMMANDS = [
-  "npm run verify:s01",
+  "npm run verify:s02",
   "npm run verify:s03",
   "npm run verify:s04",
   "npm run verify:s05",
@@ -145,6 +156,10 @@ export const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
   "identityRuntimeRegistry",
   "runtimeRegistry",
   "cdpRuntime",
+  "proxyRuntime",
+  "proxyRuntimeRegistry",
+  "proxyAuthExtensionPath",
+  "proxyAuthorization",
 ]);
 const FORBIDDEN_DIAGNOSTIC_KEYS = new Set([
   "params",
@@ -160,6 +175,16 @@ const DIAGNOSTIC_ALLOWED_EVENTS = new Set(["sidecar.request"]);
 const DIAGNOSTIC_ALLOWED_STATUSES = new Set(["ok", "error"]);
 const FORBIDDEN_FINAL_EVIDENCE_FIELDS = new Set([
   ...FORBIDDEN_DIAGNOSTIC_KEYS,
+  "credentials",
+  "credential",
+  "username",
+  "password",
+  "proxyAuthorization",
+  "launchArgs",
+  "generatedAuthExtensionPath",
+  "appDataRoot",
+  "publicCheckerBodyText",
+  "fixtureTrust",
   "debugPort",
   "devtoolsPort",
   "remoteDebuggingPort",
@@ -194,6 +219,10 @@ const FORBIDDEN_FINAL_EVIDENCE_FIELDS = new Set([
   "identityRuntimeRegistry",
   "runtimeRegistry",
   "cdpRuntime",
+  "proxyRuntime",
+  "proxyRuntimeRegistry",
+  "proxyAuthExtensionPath",
+  "proxyAuthorization",
 ]);
 const UNSAFE_TEXT_PATTERNS = [
   { code: "S06_REDACTION_USER_DATA_DIR", pattern: /--user-data-dir(?:=|\s+)/i },
@@ -209,13 +238,112 @@ const UNSAFE_TEXT_PATTERNS = [
   { code: "S06_REDACTION_WEBSOCKET", pattern: /\b(?:websocketUrl|webSocketUrl|webSocketDebuggerUrl|browserWSEndpoint|wsEndpoint|wss?:\/\/)\b/i },
   { code: "S06_REDACTION_TARGET_ID", pattern: /\b(?:targetId|targetIds|cdpTargetId|activeTargetId)\b/i },
   { code: "S06_REDACTION_GENERATED_EXTENSION", pattern: /\b(?:extensionPath|extensionDir|extensionManifestPath|extensionConfigPath|generatedExtensionPath|generatedExtensionDir|generatedConfigPath|generatedConfigDir|chrome-extension:\/\/|manifest\.json)\b/i },
-  { code: "S06_REDACTION_PUBLIC_URL", pattern: /https?:\/\/[^\s\"']+/i },
 ];
 
-const GLOBAL_SENSITIVE_VALUES = new Set([ROOT_DIR]);
+const GLOBAL_SENSITIVE_VALUES = new Set([ROOT_DIR, PACKAGED_SMOKE_PROXY_USERNAME, PACKAGED_SMOKE_PROXY_PASSWORD]);
 if (process.env.THEPRIVATOR_CHROMIUM_PATH) {
   GLOBAL_SENSITIVE_VALUES.add(process.env.THEPRIVATOR_CHROMIUM_PATH);
 }
+
+const PROXY_FIXTURE_MANAGER = String.raw`
+import json
+import sys
+from urllib.parse import quote, urlunsplit
+
+from theprivator_sidecar.proxy_proof import (
+    DEFAULT_PROOF_TARGET_PORT,
+    PROXY_PROOF_PATH,
+    ProxyProofTargetServer,
+    create_proxy_fixture,
+)
+
+
+def emit(payload):
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True), flush=True)
+
+
+def credentials(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("credentials must be an object")
+    username = value.get("username")
+    password = value.get("password")
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise ValueError("credentials must be strings")
+    return (username, password)
+
+
+def target_url(host, port, path, label):
+    netloc = host if port == 80 else f"{host}:{port}"
+    return urlunsplit(("http", netloc, path, f"case={quote(label, safe='')}", ""))
+
+
+try:
+    raw_config = sys.stdin.readline()
+    if not raw_config:
+        raise ValueError("missing fixture config")
+    config = json.loads(raw_config)
+    kind = str(config.get("kind", "")).lower()
+    label = str(config.get("label", "s06-proxy-proof"))[:96]
+    target_host = str(config.get("targetHost") or "theprivator-proxy-proof.invalid").lower()
+    target_port = int(config.get("targetPort") or DEFAULT_PROOF_TARGET_PORT)
+    target_path = str(config.get("targetPath") or PROXY_PROOF_PATH)
+    fixture_credentials = credentials(config.get("fixtureCredentials"))
+
+    with ProxyProofTargetServer() as target:
+        fixture = create_proxy_fixture(
+            kind,
+            target_host=target_host,
+            target_port=target_port,
+            target_address=target.local_address,
+            credentials=fixture_credentials,
+        )
+        with fixture:
+            emit({
+                "ok": True,
+                "label": label,
+                "fixtureKind": kind,
+                "proxy": {
+                    "proxyVersion": 1,
+                    "mode": "fixedServer",
+                    "protocol": kind,
+                    "host": fixture.local_host,
+                    "port": fixture.local_port,
+                },
+                "target": {
+                    "host": target_host,
+                    "port": target_port,
+                    "path": target_path,
+                    "url": target_url(target_host, target_port, target_path, label),
+                },
+            })
+            for raw_line in sys.stdin:
+                if not raw_line.strip():
+                    continue
+                command = json.loads(raw_line)
+                cmd = command.get("cmd")
+                if cmd == "observations":
+                    emit({
+                        "ok": True,
+                        "proxy": fixture.observations(),
+                        "target": target.observations(),
+                    })
+                elif cmd == "stop":
+                    emit({"ok": True, "stopped": True})
+                    break
+                else:
+                    emit({"ok": False, "error": {"code": "PROXY_INVALID", "message": "Unknown fixture command."}})
+except Exception:
+    emit({
+        "ok": False,
+        "error": {
+            "code": "PROXY_CONNECTIVITY_FAILED",
+            "message": "Proxy fixture manager failed.",
+        },
+    })
+    raise SystemExit(2)
+`;
 
 export class VerifyFailure extends Error {
   constructor(message, details = undefined) {
@@ -1186,6 +1314,218 @@ async function stopChildProcess(child, timeoutMs = 5_000) {
   return result;
 }
 
+class LineProcess {
+  constructor(child, label, options = {}) {
+    this.child = child;
+    this.label = label;
+    this.options = options;
+    this.stderr = "";
+    this.lines = [];
+    this.waiters = [];
+    this.exited = false;
+    this.exitCode = null;
+    this.exitSignal = null;
+    this.readline = createInterface({ input: child.stdout });
+    this.readline.on("line", (line) => {
+      const waiter = this.waiters.shift();
+      if (waiter) {
+        waiter.resolve(line);
+      } else {
+        this.lines.push(line);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      this.stderr += chunk.toString("utf8");
+    });
+    child.on("exit", (code, signal) => {
+      this.exited = true;
+      this.exitCode = code;
+      this.exitSignal = signal;
+      while (this.waiters.length) {
+        const waiter = this.waiters.shift();
+        waiter.reject(new Error(`${label} exited before emitting the expected line.`));
+      }
+    });
+  }
+
+  readLine(timeoutMs) {
+    if (this.lines.length) {
+      return Promise.resolve(this.lines.shift());
+    }
+    if (this.exited) {
+      return Promise.reject(new Error(`${this.label} already exited.`));
+    }
+    return new Promise((resolveLine, rejectLine) => {
+      const timer = setTimeout(() => {
+        const index = this.waiters.findIndex((item) => item.resolve === resolveLine);
+        if (index >= 0) {
+          this.waiters.splice(index, 1);
+        }
+        rejectLine(new Error(`${this.label} timed out waiting for output.`));
+      }, timeoutMs);
+      this.waiters.push({
+        resolve: (line) => {
+          clearTimeout(timer);
+          resolveLine(line);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rejectLine(error);
+        },
+      });
+    });
+  }
+
+  async readJson(timeoutMs) {
+    let line;
+    try {
+      line = await this.readLine(timeoutMs);
+    } catch (error) {
+      fail(`${this.label} timed out or exited while waiting for JSON.`, {
+        code: "S06_FIXTURE_TIMEOUT",
+        label: this.label,
+        exitCode: this.exitCode,
+        signal: this.exitSignal,
+        stderrTail: normalizeOutputTail(this.stderr, this.options),
+        message: error instanceof Error ? error.message : String(error),
+      }, this.options);
+    }
+    try {
+      const payload = JSON.parse(line);
+      assert(payload && typeof payload === "object" && !Array.isArray(payload), `${this.label} emitted a malformed JSON payload.`, {
+        code: "S06_FIXTURE_MALFORMED",
+        label: this.label,
+        lineLength: line.length,
+      }, this.options);
+      return payload;
+    } catch (error) {
+      if (error instanceof VerifyFailure) {
+        throw error;
+      }
+      fail(`${this.label} emitted malformed JSON.`, {
+        code: "S06_FIXTURE_MALFORMED_JSON",
+        label: this.label,
+        lineLength: line?.length ?? 0,
+        message: error instanceof Error ? error.message : String(error),
+      }, this.options);
+    }
+  }
+
+  send(payload) {
+    if (this.exited) {
+      fail(`${this.label} is not running.`, {
+        code: "S06_FIXTURE_NOT_RUNNING",
+        label: this.label,
+        exitCode: this.exitCode,
+        signal: this.exitSignal,
+        stderrTail: normalizeOutputTail(this.stderr, this.options),
+      }, this.options);
+    }
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  async stop() {
+    if (this.exited) {
+      return { stopped: true, alreadyExited: true };
+    }
+    try {
+      this.send({ cmd: "stop" });
+      const response = await this.readJson(FIXTURE_COMMAND_TIMEOUT_MS);
+      this.child.stdin.end();
+      await withTimeout(new Promise((resolveExit) => this.child.once("exit", (code, signal) => resolveExit({ code, signal }))), 2_000, `${this.label} exit`);
+      return response;
+    } catch (error) {
+      this.child.kill("SIGTERM");
+      try {
+        await withTimeout(new Promise((resolveExit) => this.child.once("exit", (code, signal) => resolveExit({ code, signal }))), 1_000, `${this.label} terminate`);
+      } catch {
+        this.child.kill("SIGKILL");
+      }
+      if (error instanceof VerifyFailure) {
+        throw error;
+      }
+      fail(`${this.label} cleanup failed.`, {
+        code: "S06_FIXTURE_CLEANUP_FAILED",
+        label: this.label,
+        message: error instanceof Error ? error.message : String(error),
+        stderrTail: normalizeOutputTail(this.stderr, this.options),
+      }, this.options);
+    }
+  }
+}
+
+async function startProxyFixture(config, runtime) {
+  const redactionOptions = redactionOptionsForSmoke(runtime.rootDir, runtime.smokeContext);
+  const child = spawn(PYTHON, ["-u", "-c", PROXY_FIXTURE_MANAGER], {
+    cwd: runtime.rootDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: process.env,
+  });
+  const lineProcess = new LineProcess(child, `proxy fixture ${config.label}`, redactionOptions);
+  lineProcess.send(config);
+  const ready = await lineProcess.readJson(FIXTURE_READY_TIMEOUT_MS);
+  assert(ready.ok === true, "Proxy fixture did not become ready.", {
+    code: "S06_FIXTURE_READY_FAILED",
+    label: config.label,
+    error: ready.error,
+    stderrTail: normalizeOutputTail(lineProcess.stderr, redactionOptions),
+  }, redactionOptions);
+  assert(ready.proxy?.mode === "fixedServer" && ready.proxy?.protocol === "http" && typeof ready.proxy?.host === "string" && Number.isInteger(ready.proxy?.port), "Proxy fixture ready payload was malformed.", {
+    code: "S06_FIXTURE_READY_MALFORMED",
+    label: config.label,
+    ready: {
+      ok: ready.ok === true,
+      fixtureKind: ready.fixtureKind,
+      proxyMode: ready.proxy?.mode,
+      proxyProtocol: ready.proxy?.protocol,
+      hasHost: typeof ready.proxy?.host === "string",
+      hasPort: Number.isInteger(ready.proxy?.port),
+    },
+  }, redactionOptions);
+  const fixtureHandle = {
+    label: config.label,
+    process: lineProcess,
+    ready,
+    async observations() {
+      lineProcess.send({ cmd: "observations" });
+      const response = await lineProcess.readJson(FIXTURE_COMMAND_TIMEOUT_MS);
+      assert(response.ok === true && Array.isArray(response.proxy) && Array.isArray(response.target), "Proxy fixture observations payload was malformed.", {
+        code: "S06_FIXTURE_OBSERVATIONS_MALFORMED",
+        label: config.label,
+        ok: response.ok === true,
+        proxyCount: Array.isArray(response.proxy) ? response.proxy.length : null,
+        targetCount: Array.isArray(response.target) ? response.target.length : null,
+      }, redactionOptions);
+      return { proxy: response.proxy, target: response.target };
+    },
+    async stop() {
+      return lineProcess.stop();
+    },
+  };
+  return {
+    value: fixtureHandle,
+    log: {
+      label: config.label,
+      fixtureKind: ready.fixtureKind,
+      proxy: {
+        mode: ready.proxy.mode,
+        protocol: ready.proxy.protocol,
+        credentialState: "configured",
+      },
+      target: "managed-local-fixture",
+      ready: true,
+    },
+  };
+}
+
+async function fixtureObservationCounts(fixture) {
+  if (!fixture) {
+    return { proxy: 0, target: 0 };
+  }
+  const observations = await fixture.observations();
+  return { proxy: observations.proxy.length, target: observations.target.length };
+}
+
 async function withTimeout(promise, timeoutMs, label) {
   let timeoutId;
   const timeout = new Promise((_, reject) => {
@@ -1503,8 +1843,12 @@ async function createSmokeProfile(driver, runtime) {
   };
 }
 
+function profileRegionByAriaLabel(profileName, ariaLabel) {
+  return By.xpath(`${profileCardXPath(profileName)}//*[@aria-label=${xpathLiteral(ariaLabel)}]`);
+}
+
 async function waitForProfileSectionText(driver, profileName, ariaLabel, expectedText, runtime, options = {}) {
-  const selector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(ariaLabel)}][contains(normalize-space(.), ${xpathLiteral(expectedText)})]`);
+  const selector = By.xpath(`${profileCardXPath(profileName)}//*[@aria-label=${xpathLiteral(ariaLabel)}][contains(normalize-space(.), ${xpathLiteral(expectedText)})]`);
   await waitForVisibleElement(driver, selector, runtime, `${ariaLabel} text ${expectedText}`, {
     ...options,
     step: options.step ?? "profile-section-text",
@@ -1792,10 +2136,253 @@ async function assertRestartPersistence(driver, runtime) {
   await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-restart-persistence" });
   await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "packaged-restart-persistence" });
   const identitySummary = await assertSmokeIdentitySummary(driver, runtime, { step: "packaged-restart-persistence" });
+  const proxySummary = await assertSmokeProxySummary(driver, runtime, { step: "packaged-restart-persistence" });
   return {
     smokeProfileName: runtime.smokeContext.smokeProfileName,
     profileCard: "visible-after-restart",
     identitySummary,
+    proxySummary,
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+function proxyConfigSectionLabel(profileName) {
+  return `Configure proxy for ${profileName}`;
+}
+
+async function clickProxyPanelLabel(driver, runtime, labelText, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-proxy-configure";
+  const selector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(proxyConfigSectionLabel(profileName))}]//label[.//span[normalize-space()=${xpathLiteral(labelText)}] or normalize-space()=${xpathLiteral(labelText)}]`);
+  const label = await waitForVisibleElement(driver, selector, runtime, `${labelText} proxy label`, { step });
+  try {
+    await label.click();
+  } catch (error) {
+    await failUi(driver, runtime, `Failed to click the visible ${labelText} proxy control.`, {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      labelText,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return label;
+}
+
+async function setProxyPanelInput(driver, runtime, labelText, value, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-proxy-configure";
+  const selector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(proxyConfigSectionLabel(profileName))}]//label[normalize-space()=${xpathLiteral(labelText)}]/following-sibling::input[1]`);
+  const input = await waitForVisibleElement(driver, selector, runtime, `${labelText} proxy input`, { step });
+  try {
+    await input.clear();
+    await input.sendKeys(String(value));
+  } catch (error) {
+    await failUi(driver, runtime, `Failed to type the ${labelText} proxy value through the visible form.`, {
+      code: "S06_UI_INPUT_FAILED",
+      step,
+      labelText,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return input;
+}
+
+async function selectProxyProtocol(driver, runtime, protocol, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-proxy-configure";
+  const selectSelector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(proxyConfigSectionLabel(profileName))}]//label[normalize-space()='Protocol']/following-sibling::select[1]`);
+  const optionSelector = By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(proxyConfigSectionLabel(profileName))}]//label[normalize-space()='Protocol']/following-sibling::select[1]/option[@value=${xpathLiteral(protocol)}]`);
+  const select = await waitForVisibleElement(driver, selectSelector, runtime, "Protocol proxy select", { step });
+  const option = await waitForVisibleElement(driver, optionSelector, runtime, `${protocol} proxy protocol option`, { step });
+  try {
+    await select.click();
+    await option.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to choose the visible proxy protocol option.", {
+      code: "S06_UI_SELECT_FAILED",
+      step,
+      protocol,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function assertNoCredentialTextVisible(driver, runtime, step) {
+  const text = await getVisibleText(driver);
+  assertNoUnsafeText("packaged proxy UI visible text", text, {
+    ...redactionOptionsForSmoke(runtime.rootDir, runtime.smokeContext),
+    sensitiveValues: [PACKAGED_SMOKE_PROXY_USERNAME, PACKAGED_SMOKE_PROXY_PASSWORD],
+  });
+  return { step, redacted: true };
+}
+
+async function assertSmokeProxySummary(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  await waitForProfileSectionTexts(driver, profileName, `${profileName} saved proxy summary`, [
+    "M003 saved proxy",
+    "Fixed server",
+    "HTTP",
+    "configured (masked)",
+  ], runtime, { ...options, step: options.step ?? "packaged-proxy-summary" });
+  await assertNoCredentialTextVisible(driver, runtime, options.step ?? "packaged-proxy-summary");
+  return {
+    mode: "fixedServer",
+    protocol: "http",
+    credentialState: "configured",
+    summary: "visible-redacted",
+  };
+}
+
+async function configureSmokeProxy(driver, runtime, fixture) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, {
+    step: "packaged-proxy-configure",
+  });
+  try {
+    await configureButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Configure proxy button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-proxy-configure",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const panelLabel = proxyConfigSectionLabel(profileName);
+  await waitForVisibleElement(driver, profileSectionByAriaLabel(profileName, panelLabel), runtime, panelLabel, {
+    step: "packaged-proxy-configure",
+  });
+  await clickProxyPanelLabel(driver, runtime, "Fixed server", { step: "packaged-proxy-configure" });
+  await selectProxyProtocol(driver, runtime, "http", { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Host", fixture.ready.proxy.host, { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Port", fixture.ready.proxy.port, { step: "packaged-proxy-configure" });
+  await clickProxyPanelLabel(driver, runtime, "Replace credentials", { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Replacement username", PACKAGED_SMOKE_PROXY_USERNAME, { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Replacement password", PACKAGED_SMOKE_PROXY_PASSWORD, { step: "packaged-proxy-configure" });
+
+  const checkButton = await waitForProfileButton(driver, profileName, "Check proxy", runtime, { step: "packaged-proxy-check" });
+  try {
+    await checkButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Check proxy button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-proxy-check",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await waitForVisibleText(driver, "Proxy draft validation completed.", runtime, { step: "packaged-proxy-check" });
+  await waitForVisibleText(driver, "Proxy draft validation completed with 0 warnings.", runtime, { step: "packaged-proxy-check" });
+  await assertNoCredentialTextVisible(driver, runtime, "packaged-proxy-check");
+
+  const saveButton = await waitForProfileButton(driver, profileName, "Save proxy", runtime, { step: "packaged-proxy-save" });
+  try {
+    await saveButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Save proxy button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step: "packaged-proxy-save",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await waitForVisibleText(driver, "Proxy configuration saved.", runtime, { step: "packaged-proxy-save" });
+  await waitForVisibleText(driver, "Proxy configuration saved with redacted public profile truth", runtime, { step: "packaged-proxy-save" });
+  await waitForMetricValue(driver, `${profileName} proxy observability`, "Credential state", "configured (masked)", runtime, { step: "packaged-proxy-save" });
+  const summary = await assertSmokeProxySummary(driver, runtime, { step: "packaged-proxy-save" });
+  return {
+    smokeProfileName: profileName,
+    mode: "fixedServer",
+    protocol: "http",
+    credentialState: "configured",
+    summary: summary.summary,
+    fixture: {
+      status: "ready",
+      kind: fixture.ready.fixtureKind,
+      target: "local-fixture",
+    },
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function runSavedProxyProof(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-saved-proxy-proof";
+  const runButton = await waitForProfileButton(driver, profileName, "Run saved proxy proof", runtime, { step });
+  try {
+    await runButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Run saved proxy proof button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await waitForProfileSectionTexts(driver, profileName, "Saved proxy proof results", [
+    "Local fixture proved saved proxy routing.",
+    "The local fixture observed proxy routing",
+    "Deterministic local route proof",
+    "sidecar-managed local fixture saw the proxy path",
+    "IP-hiding conclusion",
+    "WebRTC / local-IP baseline",
+    "Public checker advisory pages",
+    "advisory-only",
+    "Not detected",
+  ], runtime, { step });
+  await waitForVisibleText(driver, "Saved proxy proof finished for request", runtime, { step });
+  await assertNoCredentialTextVisible(driver, runtime, step);
+  return {
+    proxyCheckVersion: 1,
+    profileId: "visible-ui-profile",
+    proxy: {
+      proxyVersion: 1,
+      mode: "fixedServer",
+      protocol: "http",
+      credentialState: "configured",
+      summary: "visible-redacted",
+    },
+    routeProof: {
+      status: "proved",
+      basis: "sidecar-managed-local-fixture",
+      scope: "local-fixture",
+      protocol: "http",
+      credentialState: "configured",
+      directFallbackDetected: false,
+      observationCounts: { proxy: "visible", target: "visible" },
+    },
+    ipHiding: {
+      status: "proved",
+      basis: "route-proof-succeeded",
+      scope: "local-fixture",
+      publicExitIpClaimed: false,
+    },
+    webRtc: {
+      status: "restricted",
+      basis: "profile-identity-policy",
+      mode: "masked",
+      policy: "disableNonProxiedUdp",
+    },
+    publicCheckers: {
+      status: "advisory-only",
+      basis: "fixed-https-allowlist",
+      networkDependency: "user-driven-external-pages",
+      pages: ["cloudflare-trace", "aws-checkip", "webbrowsertools-webrtc"],
+    },
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
+async function assertProxyRuntimeGuardWhileRunning(driver, runtime) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  await waitForProfileSectionTexts(driver, profileName, proxyConfigSectionLabel(profileName), [
+    "saved proxy edits apply on the next launch",
+  ], runtime, { step: "packaged-proxy-runtime-guard" });
+  await waitForProfileSectionTexts(driver, profileName, "Saved proxy proof results", [
+    "Local fixture proved saved proxy routing.",
+  ], runtime, { step: "packaged-proxy-runtime-guard" });
+  await assertNoCredentialTextVisible(driver, runtime, "packaged-proxy-runtime-guard");
+  return {
+    proxyEdits: "disabled-while-running",
+    savedProof: "previous-proof-preserved",
     smokeRoot: runtime.smokeContext.smokeRootRelative,
   };
 }
@@ -1820,6 +2407,7 @@ function assertNoUnsafeText(label, value, options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const sensitiveValues = new Set([
     rootDir,
+    ...GLOBAL_SENSITIVE_VALUES,
     ...(options.sensitiveValues ?? []),
   ]);
   if (options.smokeContext) {
@@ -2034,6 +2622,90 @@ function assertPackagedSmokeIdentity(identity, profileStorePath, rootDir, smokeC
   };
 }
 
+function sanitizePrivateProfileStoreForRedaction(value) {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizePrivateProfileStoreForRedaction(item));
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "credentials") {
+      output[key] = "<private-store-credentials>";
+    } else {
+      output[key] = sanitizePrivateProfileStoreForRedaction(child);
+    }
+  }
+  return output;
+}
+
+function assertPackagedSmokeProxy(proxy, profileStorePath, rootDir, smokeContext) {
+  assert(proxy && typeof proxy === "object" && !Array.isArray(proxy), "Smoke profile proxy metadata is missing.", {
+    code: "S06_PROFILE_PROXY_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(proxy.proxyVersion === 1, "Smoke profile proxy.proxyVersion must be v1.", {
+    code: "S06_PROFILE_PROXY_VERSION",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualProxyVersion: proxy.proxyVersion,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(proxy.mode === "fixedServer", "Smoke profile proxy must persist a fixed-server proxy.", {
+    code: "S06_PROFILE_PROXY_MODE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualMode: proxy.mode,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(proxy.protocol === "http", "Smoke profile proxy must persist the verifier HTTP fixture protocol.", {
+    code: "S06_PROFILE_PROXY_PROTOCOL",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualProtocol: proxy.protocol,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(typeof proxy.host === "string" && proxy.host.length > 0 && Number.isInteger(proxy.port), "Smoke profile proxy endpoint was malformed.", {
+    code: "S06_PROFILE_PROXY_ENDPOINT",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    hasHost: typeof proxy.host === "string" && proxy.host.length > 0,
+    hasPort: Number.isInteger(proxy.port),
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(proxy.credentialState === "configured", "Smoke profile proxy must persist configured masked credentials.", {
+    code: "S06_PROFILE_PROXY_CREDENTIAL_STATE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualCredentialState: proxy.credentialState,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(proxy.credentials && typeof proxy.credentials === "object" && !Array.isArray(proxy.credentials), "Smoke profile proxy credentials must remain private in the packaged store.", {
+    code: "S06_PROFILE_PROXY_CREDENTIALS_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    credentialState: proxy.credentialState,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(typeof proxy.summary === "string" && proxy.summary.length > 0 && !/@/.test(proxy.summary), "Smoke profile proxy summary must be public-safe and credential-free.", {
+    code: "S06_PROFILE_PROXY_SUMMARY_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  for (const token of DEFAULT_SENSITIVE_SUBSTRINGS) {
+    assert(!proxy.summary.includes(token), "Smoke profile proxy summary must not contain proxy credentials.", {
+      code: "S06_PROFILE_PROXY_SUMMARY_CREDENTIAL_LEAK",
+      profileStore: repoRelative(rootDir, profileStorePath),
+      smokeProfileName: smokeContext.smokeProfileName,
+      token,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  }
+
+  return {
+    proxyVersion: proxy.proxyVersion,
+    mode: proxy.mode,
+    protocol: proxy.protocol,
+    credentialState: proxy.credentialState,
+    summary: proxy.summary,
+  };
+}
+
 export function assertPostSmokeProfileStore(options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const smokeContext = options.smokeContext;
@@ -2042,14 +2714,15 @@ export function assertPostSmokeProfileStore(options = {}) {
   }, { rootDir });
 
   const { path, appDataRoot, payload, profile } = findSmokeProfileStore(rootDir, smokeContext);
-  assert(payload.storeVersion === 2, "profile-store/profiles.json must persist storeVersion: 2 for identity-aware packaged smoke.", {
+  assert(payload.storeVersion === 3, "profile-store/profiles.json must persist storeVersion: 3 for packaged proxy smoke.", {
     code: "S06_PROFILE_STORE_VERSION",
     profileStore: repoRelative(rootDir, path),
     smokeProfileName: smokeContext.smokeProfileName,
-    expectedStoreVersion: 2,
+    expectedStoreVersion: 3,
     actualStoreVersion: payload.storeVersion,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
   const identity = assertPackagedSmokeIdentity(profile.identity, path, rootDir, smokeContext);
+  const proxy = assertPackagedSmokeProxy(profile.proxy, path, rootDir, smokeContext);
   const storage = profile.storage;
   assert(storage && typeof storage === "object" && !Array.isArray(storage), "Smoke profile storage metadata is missing.", {
     code: "S06_PROFILE_STORAGE_MISSING",
@@ -2076,7 +2749,7 @@ export function assertPostSmokeProfileStore(options = {}) {
     runtimeFields,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 
-  assertNoUnsafeText("profile-store/profiles.json", payload, {
+  assertNoUnsafeText("profile-store/profiles.json", sanitizePrivateProfileStoreForRedaction(payload), {
     rootDir,
     smokeContext,
     sensitiveValues: [appDataRoot],
@@ -2091,6 +2764,7 @@ export function assertPostSmokeProfileStore(options = {}) {
     profileCount: payload.profiles.length,
     storeVersion: payload.storeVersion,
     identity,
+    proxy,
     storage: {
       profileDir: storage.profileDir,
       userDataDir: storage.userDataDir,
@@ -2284,7 +2958,7 @@ export function assertPostSmokeRedaction(options = {}) {
   const smokeContext = options.smokeContext;
   const { appDataRoot, payload } = findSmokeProfileStore(rootDir, smokeContext);
   const diagnosticsPath = join(appDataRoot, DIAGNOSTIC_RELATIVE_LOG_PATH);
-  assertNoUnsafeText("profile-store/profiles.json", payload, {
+  assertNoUnsafeText("profile-store/profiles.json", sanitizePrivateProfileStoreForRedaction(payload), {
     rootDir,
     smokeContext,
     sensitiveValues: [appDataRoot],
@@ -2322,6 +2996,58 @@ function stepByName(checks, name) {
   return checks.find((check) => check.name === name) ?? null;
 }
 
+function summarizeProfileStoreForEvidence(profileStore) {
+  if (!profileStore || typeof profileStore !== "object") {
+    return profileStore;
+  }
+  return {
+    smokeProfileName: profileStore.smokeProfileName,
+    smokeRoot: profileStore.smokeRoot,
+    profileId: profileStore.profileId,
+    profileCount: profileStore.profileCount,
+    storeVersion: profileStore.storeVersion,
+    persistedRuntimeFields: profileStore.persistedRuntimeFields,
+    storage: profileStore.storage ? "safe-relative-store-paths" : undefined,
+    proxy: profileStore.proxy,
+  };
+}
+
+function summarizePublicCheckerPages(publicCheckers) {
+  if (!publicCheckers || typeof publicCheckers !== "object" || !Array.isArray(publicCheckers.pages)) {
+    return publicCheckers;
+  }
+  return {
+    ...publicCheckers,
+    pages: publicCheckers.pages.map((page) => {
+      if (typeof page === "string") {
+        return page;
+      }
+      return {
+        id: page?.id,
+        label: page?.label,
+        surfaces: page?.surfaces,
+        advisory: page?.advisory ? "external-advisory" : undefined,
+      };
+    }),
+  };
+}
+
+function summarizeProxyCheckForEvidence(proxyCheck) {
+  if (!proxyCheck || typeof proxyCheck !== "object") {
+    return proxyCheck;
+  }
+  return {
+    proxyCheckVersion: proxyCheck.proxyCheckVersion,
+    profileId: proxyCheck.profileId,
+    requestId: proxyCheck.requestId,
+    proxy: proxyCheck.proxy,
+    routeProof: proxyCheck.routeProof,
+    ipHiding: proxyCheck.ipHiding,
+    webRtc: proxyCheck.webRtc,
+    publicCheckers: summarizePublicCheckerPages(proxyCheck.publicCheckers),
+  };
+}
+
 export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, platform = process.platform, arch = process.arch } = {}) {
   const packageInspection = stepByName(checks, "package-sidecar-shape")?.inspections ?? [];
   const identityProof = smoke?.identity ?? (smoke?.profileStore?.identity
@@ -2330,19 +3056,12 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
         persistence: "profile-store",
       }
     : undefined);
-  const diagnosticProof = smoke?.diagnostics?.required ?? {};
-  const auditPlanObserved = Boolean(diagnosticProof["identity.audit.plan"]);
-  const auditOpenObserved = Boolean(diagnosticProof["identity.audit.open"]);
-  const auditProof = smoke?.audit ?? (auditPlanObserved || auditOpenObserved
-    ? {
-        pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
-        pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
-        planDiagnostic: auditPlanObserved ? "observed" : "missing",
-        openDiagnostic: auditOpenObserved ? "observed" : "missing",
-        checkerContent: "not-inspected",
-        authority: "page-id-only",
-      }
-    : undefined);
+  const proxy = smoke?.proxy ?? smoke?.profileStore?.proxy;
+  const proxyCheck = summarizeProxyCheckForEvidence(smoke?.proxyCheck);
+  const routeProof = proxyCheck?.routeProof;
+  const ipHiding = proxyCheck?.ipHiding;
+  const webRtc = proxyCheck?.webRtc;
+  const publicCheckers = proxyCheck?.publicCheckers;
   return {
     os: { platform, arch },
     mode,
@@ -2363,7 +3082,12 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
       sourceSidecarSubprocess: false,
     },
     identity: identityProof,
-    audit: auditProof,
+    proxy,
+    proxyCheck,
+    routeProof,
+    ipHiding,
+    webRtc,
+    publicCheckers,
     observations: smoke?.observations ?? {
       running: stepByName(checks, "packaged-chromium-launch")
         ? { lifecycle: "running", runningCount: stepByName(checks, "packaged-chromium-launch")?.runningCount }
@@ -2373,9 +3097,10 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
         : undefined,
     },
     restartPersistence: smoke?.restartPersistence ?? smoke?.lifecycle,
-    profileStore: smoke?.profileStore,
+    profileStore: summarizeProfileStoreForEvidence(smoke?.profileStore),
     diagnostics: smoke?.diagnostics,
     redaction: smoke?.redaction,
+    cleanup: smoke?.cleanup,
     packageInspection,
     supportingRegressions: SUPPORTING_REGRESSION_COMMANDS,
   };
@@ -2507,10 +3232,22 @@ async function runPackagedUiSmoke(proof, options = {}) {
   const runtime = { rootDir, smokeContext, driverProcess: null };
   let driverProcess = null;
   let driver = null;
+  let fixture = null;
   let runningObserved = false;
   let smokeProof = null;
 
   try {
+    fixture = await runStepAsync("proxy-fixture-ready", async () => startProxyFixture({
+      kind: "http",
+      label: smokeContext.runId,
+      targetHost: PACKAGED_SMOKE_PROXY_TARGET_HOST,
+      targetPath: PACKAGED_SMOKE_PROXY_TARGET_PATH,
+      fixtureCredentials: {
+        username: PACKAGED_SMOKE_PROXY_USERNAME,
+        password: PACKAGED_SMOKE_PROXY_PASSWORD,
+      },
+    }, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+
     driverProcess = await runStepAsync("webdriver-driver-start", async () => startTauriDriverProcess({
       rootDir,
       smokeContext,
@@ -2531,8 +3268,11 @@ async function runPackagedUiSmoke(proof, options = {}) {
     await runStepAsync("packaged-profile-create", async () => createSmokeProfile(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const identityConfig = await runStepAsync("packaged-identity-config", async () => openSmokeIdentityConfig(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const identityApply = await runStepAsync("packaged-identity-apply", async () => applySmokeIdentityPreset(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const proxyConfig = await runStepAsync("packaged-proxy-configure-save", async () => configureSmokeProxy(driver, runtime, fixture), redactionOptionsForSmoke(rootDir, smokeContext));
+    const firstProxyCheck = await runStepAsync("packaged-saved-proxy-proof", async () => runSavedProxyProof(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     await runStepAsync("packaged-chromium-launch", async () => launchSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     runningObserved = true;
+    const runtimeGuard = await runStepAsync("packaged-proxy-runtime-guard", async () => assertProxyRuntimeGuardWhileRunning(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const firstStop = await runStepAsync("packaged-chromium-stop", async () => stopSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     runningObserved = false;
 
@@ -2546,19 +3286,16 @@ async function runPackagedUiSmoke(proof, options = {}) {
       smokeContext,
     }), redactionOptionsForSmoke(rootDir, smokeContext));
     const restartProof = await runStepAsync("packaged-restart-persistence", async () => assertRestartPersistence(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
-    const auditPlan = await runStepAsync("packaged-audit-plan", async () => openSmokeAuditGuide(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
-    const auditOpen = await runStepAsync("packaged-audit-open", async () => openSmokeAuditPage(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
-    runningObserved = true;
-    const auditStop = await runStepAsync("packaged-audit-cleanup-stop", async () => stopSmokeChromium(driver, runtime, { step: "packaged-audit-cleanup-stop" }), redactionOptionsForSmoke(rootDir, smokeContext));
-    runningObserved = false;
+    const restartProxyCheck = await runStepAsync("packaged-saved-proxy-proof-restart", async () => runSavedProxyProof(driver, runtime, { step: "packaged-saved-proxy-proof-restart" }), redactionOptionsForSmoke(rootDir, smokeContext));
     const profileStore = runStep("profile-store-persistence", () => assertPostSmokeProfileStore({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
     const diagnostics = runStep("diagnostics-correlation", () => assertPostSmokeDiagnostics({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
+    const fixtureCounts = await runStepAsync("proxy-fixture-observations", async () => fixtureObservationCounts(fixture), redactionOptionsForSmoke(rootDir, smokeContext));
 
     smokeProof = {
       application: proof.releaseExecutable,
       smokeProfileName: smokeContext.smokeProfileName,
       smokeRoot: smokeContext.smokeRootRelative,
-      lifecycle: "created-identity-launched-stopped-restarted-audit-opened-stopped",
+      lifecycle: "created-identity-proxy-checked-saved-proof-launched-stopped-restarted",
       legacyImportSurface: "visible",
       retainedSmokeRoot: true,
       identity: {
@@ -2566,16 +3303,11 @@ async function runPackagedUiSmoke(proof, options = {}) {
         persistence: "profile-store",
         configuredVia: "visible-ui",
       },
-      audit: {
-        pageId: PACKAGED_SMOKE_AUDIT_PAGE_ID,
-        pageLabel: PACKAGED_SMOKE_AUDIT_PAGE_LABEL,
-        pageCount: auditPlan.pageCount,
-        planDiagnostic: diagnostics.required["identity.audit.plan"] ? "observed" : "missing",
-        openDiagnostic: diagnostics.required["identity.audit.open"] ? "observed" : "missing",
-        checkerContent: "not-inspected",
-        authority: "page-id-only",
-        openSuccess: auditOpen.openSuccess,
-        launchMetadata: auditOpen.launchMetadata,
+      proxy: profileStore.proxy,
+      proxyCheck: {
+        ...restartProxyCheck,
+        profileId: profileStore.profileId,
+        proxy: profileStore.proxy,
       },
       observations: {
         identityConfig: {
@@ -2589,27 +3321,18 @@ async function runPackagedUiSmoke(proof, options = {}) {
           successCopy: identityApply.successCopy,
           summary: identityApply.summary,
         },
-        running: { lifecycle: "running", runningCount: 1, identity: "configured" },
+        proxyConfig,
+        savedProxyProof: firstProxyCheck,
+        running: { lifecycle: "running", runningCount: 1, identity: "configured", proxy: "configured" },
+        runtimeGuard,
         stopped: { lifecycle: firstStop.lifecycle, runningCount: firstStop.runningCount },
         restart: {
           profileCard: restartProof.profileCard,
           identitySummary: restartProof.identitySummary.summary,
+          proxySummary: restartProof.proxySummary.summary,
           presetId: restartProof.identitySummary.presetId,
         },
-        auditPlan: {
-          pageCount: auditPlan.pageCount,
-          pageId: auditPlan.pageId,
-          checkerContent: auditPlan.checkerContent,
-        },
-        auditOpen: {
-          pageId: auditOpen.pageId,
-          pageLabel: auditOpen.pageLabel,
-          openSuccess: auditOpen.openSuccess,
-          launchMetadata: auditOpen.launchMetadata,
-          runningCount: auditOpen.runningCount,
-          checkerContent: auditOpen.checkerContent,
-        },
-        auditCleanup: { lifecycle: auditStop.lifecycle, runningCount: auditStop.runningCount },
+        fixture: { observationCounts: fixtureCounts },
       },
       restartPersistence: restartProof.profileCard,
       profileStore,
@@ -2622,7 +3345,13 @@ async function runPackagedUiSmoke(proof, options = {}) {
     }), redactionOptionsForSmoke(rootDir, smokeContext));
     return smokeProof;
   } finally {
-    await cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved });
+    if (fixture) {
+      await runStepAsync("proxy-fixture-cleanup", async () => fixture.stop(), redactionOptionsForSmoke(rootDir, smokeContext));
+    }
+    const cleanup = await cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved });
+    if (smokeProof) {
+      smokeProof.cleanup = cleanup;
+    }
   }
 }
 
