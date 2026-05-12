@@ -39,6 +39,7 @@ pub fn run() {
             sidecar::profiles_identity_apply_preset,
             sidecar::profiles_identity_update,
             sidecar::profiles_proxy_update,
+            sidecar::profiles_proxy_check,
             sidecar::profiles_list,
             sidecar::profiles_create,
             sidecar::profiles_update,

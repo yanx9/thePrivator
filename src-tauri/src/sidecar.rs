@@ -24,6 +24,10 @@ const LEGACY_IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 // Identity audit open uses the same budget because it may launch Chromium and
 // open a curated page after CDP identity overrides are applied.
 const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+// Profile proxy checks run a deterministic local proof through Chromium-sized
+// machinery, so they need the same bounded long-command budget without allowing
+// unbounded queued UI clicks.
+const PROXY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
 const SIDECAR_PROCESS_ERROR: &str = "SIDECAR_PROCESS_ERROR";
@@ -220,6 +224,16 @@ pub async fn profiles_proxy_update(
     let store_root = resolve_profile_store_root(&app)?;
     let runner = TauriSidecarRunner::new(app);
     profiles_proxy_update_with_runner(&runner, store_root, profile_id, proxy).await
+}
+
+#[tauri::command]
+pub async fn profiles_proxy_check(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_proxy_check_with_runner(&runner, store_root, profile_id).await
 }
 
 #[tauri::command]
@@ -443,6 +457,23 @@ async fn profiles_proxy_update_with_runner<R: SidecarRunner>(
             "profileId": profile_id,
             "proxy": proxy,
         }),
+    )
+    .await
+}
+
+async fn profiles_proxy_check_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "profiles.proxy.check",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+        }),
+        PROXY_CHECK_TIMEOUT,
     )
     .await
 }
@@ -1390,6 +1421,18 @@ mod tests {
         ))
     }
 
+    fn run_profiles_proxy_check(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profiles_proxy_check_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+        ))
+    }
+
     fn run_profiles_list(
         runner: &FakeRunner,
         store_root: &str,
@@ -1814,6 +1857,85 @@ mod tests {
         let params = request["params"].as_object().expect("params object");
         assert_eq!(params.get("profile-store"), None);
         assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn profiles_proxy_check_injects_store_root_and_profile_id_only_with_proof_timeout() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profiles_proxy_check(&runner, "/app/data/root", "profile-id")
+            .expect("proxy check reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "profiles.proxy.check",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+            ],
+        );
+        let params = request["params"].as_object().expect("params object");
+        assert_eq!(params.get("proxy"), None);
+        assert_eq!(params.get("url"), None);
+        assert_eq!(params.get("argv"), None);
+        assert_eq!(params.get("checkerContent"), None);
+        assert_eq!(runner.last_timeout(), PROXY_CHECK_TIMEOUT);
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn profiles_proxy_check_error_is_passed_through_and_diagnostic_lookup_is_redacted() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::TypedError {
+                code: "PROXY_PROOF_FAILED",
+                message: "Proxy check proof could not be completed.",
+                detail_ref: "sidecar-proxy-check-detail",
+            },
+            store.clone(),
+        );
+
+        let error = run_profiles_proxy_check(&runner, "/app/data/root", "profile-id")
+            .expect_err("proxy check error surfaces");
+        let lookup = store.lookup(&error.detail_ref);
+        let log_text = diagnostics_log_text(&store);
+
+        assert_eq!(error.code, "PROXY_PROOF_FAILED");
+        assert_eq!(error.message, "Proxy check proof could not be completed.");
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "sidecar-proxy-check-detail");
+        assert!(lookup.found);
+        assert_eq!(lookup.entries[0]["method"], "profiles.proxy.check");
+        assert_eq!(lookup.entries[0]["errorCode"], "PROXY_PROOF_FAILED");
+        assert!(!log_text.contains("/app/data/root"));
+        assert!(!log_text.contains("--proxy-server"));
+        assert!(!log_text.contains("credentials"));
+    }
+
+    #[test]
+    fn profiles_proxy_check_timeout_maps_to_timeout_error_with_proof_budget() {
+        let runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+
+        let error = run_profiles_proxy_check(&runner, "/app/data/root", "profile-id")
+            .expect_err("proxy check timeout surfaces");
+
+        assert_eq!(error.code, SIDECAR_TIMEOUT);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "profiles.proxy.check");
+        assert_eq!(runner.last_timeout(), PROXY_CHECK_TIMEOUT);
+    }
+
+    #[test]
+    fn profiles_proxy_check_malformed_stdout_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_profiles_proxy_check(&runner, "/app/data/root", "profile-id")
+            .expect_err("proxy check malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert!(error.detail_ref.starts_with("bridge-"));
+        assert_eq!(runner.last_request()["method"], "profiles.proxy.check");
     }
 
     #[test]

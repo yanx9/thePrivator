@@ -6,6 +6,7 @@ import {
   getChromiumStatus,
   getIdentityAuditPlan,
   applyProfileIdentityPreset,
+  checkProfileProxy,
   getSidecarHealth,
   importLegacyProfiles,
   launchChromiumProfile,
@@ -29,6 +30,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const mockInvoke = vi.mocked(invoke);
+
+const PROXY_CHECK_PROFILE_ID = "11111111-1111-1111-1111-111111111111";
 
 function healthEnvelope(overrides: Record<string, unknown> = {}) {
   return {
@@ -203,6 +206,139 @@ function proxyEnvelope(result: unknown, overrides: Record<string, unknown> = {})
     requestId: "bridge-proxy-1",
     protocolVersion: "1.0.0",
     durationMs: 3.75,
+    result,
+    ...overrides,
+  };
+}
+
+function proxyCheckRouteProofDirect(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "not-run",
+    basis: "direct-profile",
+    scope: "not-applicable",
+    protocol: null,
+    credentialState: "none",
+    durationMs: 0,
+    fixture: null,
+    target: null,
+    directFallbackDetected: false,
+    observationCounts: { proxy: 0, target: 0 },
+    ...overrides,
+  };
+}
+
+function proxyCheckRouteProofProved(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "proved",
+    basis: "sidecar-managed-local-fixture",
+    scope: "local-fixture",
+    protocol: "http",
+    credentialState: "none",
+    durationMs: 245.5,
+    fixture: { kind: "http", managed: true },
+    target: { host: "198.51.100.20", port: 443 },
+    directFallbackDetected: false,
+    observationCounts: { proxy: 2, target: 1 },
+    ...overrides,
+  };
+}
+
+function proxyCheckIpHidingDirect(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "not-proven",
+    basis: "direct-profile",
+    scope: "not-applicable",
+    publicExitIpClaimed: false,
+    publicExitIp: null,
+    localFixtureConclusion: "not-run",
+    ...overrides,
+  };
+}
+
+function proxyCheckIpHidingProved(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "proved",
+    basis: "route-proof-succeeded",
+    scope: "local-fixture",
+    publicExitIpClaimed: false,
+    publicExitIp: null,
+    localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
+    ...overrides,
+  };
+}
+
+function proxyCheckWebRtcBaseline(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "baseline-real",
+    basis: "profile-identity-policy",
+    mode: "real",
+    policy: "real",
+    localIpExposure: "real-local-ip-baseline",
+    ...overrides,
+  };
+}
+
+function proxyCheckWebRtcRestricted(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "restricted",
+    basis: "profile-identity-policy",
+    mode: "masked",
+    policy: "disableNonProxiedUdp",
+    localIpExposure: "non-proxied-udp-disabled",
+    ...overrides,
+  };
+}
+
+function proxyCheckPublicCheckers(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "advisory-only",
+    basis: "fixed-https-allowlist",
+    networkDependency: "user-driven-external-pages",
+    pages: [
+      {
+        id: "cloudflare-trace",
+        label: "Cloudflare trace",
+        url: "https://www.cloudflare.com/cdn-cgi/trace",
+        surfaces: ["ip"],
+        advisory: "External IP guidance only; not used as ThePrivator proof.",
+      },
+      {
+        id: "aws-checkip",
+        label: "AWS checkip",
+        url: "https://checkip.amazonaws.com/",
+        surfaces: ["ip"],
+        advisory: "External IP guidance only; not used as ThePrivator proof.",
+      },
+      {
+        id: "webbrowsertools-webrtc",
+        label: "WebRTC leak test",
+        url: "https://webbrowsertools.com/webrtc-leak-test/",
+        surfaces: ["webrtc"],
+        advisory: "WebRTC guidance only; compare with the profile policy shown here.",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function proxyCheckResult(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyCheckVersion: 1,
+    profileId: PROXY_CHECK_PROFILE_ID,
+    proxy: directProxySummary(),
+    routeProof: proxyCheckRouteProofDirect(),
+    ipHiding: proxyCheckIpHidingDirect(),
+    webRtc: proxyCheckWebRtcBaseline(),
+    publicCheckers: proxyCheckPublicCheckers(),
+    ...overrides,
+  };
+}
+
+function proxyCheckEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-proxy-check-1",
+    protocolVersion: "1.0.0",
+    durationMs: 8.25,
     result,
     ...overrides,
   };
@@ -829,6 +965,177 @@ describe("sidecar client", () => {
     expect(updated.profiles).toEqual([profile]);
     expect(JSON.stringify(validation)).not.toMatch(/proxy-user|proxy-pass|"username"|"password"|"credentials"/i);
     expect(JSON.stringify(updated)).not.toMatch(/proxy-user|proxy-pass|"username"|"password"|"credentials"/i);
+  });
+
+  it("checks a profile proxy through a fixed command and parses direct/not-proven output", async () => {
+    const result = proxyCheckResult();
+    mockInvoke.mockResolvedValueOnce(proxyCheckEnvelope(result));
+
+    const snapshot = await checkProfileProxy(PROXY_CHECK_PROFILE_ID);
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_proxy_check", { profileId: PROXY_CHECK_PROFILE_ID });
+    expect(snapshot).toMatchObject({
+      proxyCheckVersion: 1,
+      profileId: PROXY_CHECK_PROFILE_ID,
+      requestId: "bridge-proxy-check-1",
+      protocolVersion: "1.0.0",
+      bridgeDurationMs: 8.25,
+      routeProof: { status: "not-run", basis: "direct-profile", directFallbackDetected: false },
+      ipHiding: { status: "not-proven", publicExitIpClaimed: false, publicExitIp: null },
+      webRtc: { status: "baseline-real", localIpExposure: "real-local-ip-baseline" },
+      publicCheckers: { status: "advisory-only", networkDependency: "user-driven-external-pages" },
+    });
+    expect(snapshot.publicCheckers.pages.map((page) => page.id)).toEqual([
+      "cloudflare-trace",
+      "aws-checkip",
+      "webbrowsertools-webrtc",
+    ]);
+    expect(JSON.stringify(snapshot)).not.toMatch(/storeRoot|proxy-user|proxy-pass|"username"|"password"|"credentials"|debugPort|webSocketDebuggerUrl|checkerContent|rawContent/i);
+  });
+
+  it("parses proved proxy-check output with WebRTC restriction as advisory public-checker guidance", async () => {
+    const fixedSummary = fixedProxySummary();
+    const result = proxyCheckResult({
+      proxy: fixedSummary,
+      routeProof: proxyCheckRouteProofProved(),
+      ipHiding: proxyCheckIpHidingProved(),
+      webRtc: proxyCheckWebRtcRestricted(),
+    });
+    mockInvoke.mockResolvedValueOnce(proxyCheckEnvelope(result));
+
+    const snapshot = await checkProfileProxy(PROXY_CHECK_PROFILE_ID);
+
+    expect(snapshot.proxy).toEqual(fixedSummary);
+    expect(snapshot.routeProof).toMatchObject({
+      status: "proved",
+      basis: "sidecar-managed-local-fixture",
+      protocol: "http",
+      fixture: { kind: "http", managed: true },
+      target: { host: "198.51.100.20", port: 443 },
+      observationCounts: { proxy: 2, target: 1 },
+    });
+    expect(snapshot.ipHiding).toMatchObject({
+      status: "proved",
+      publicExitIpClaimed: false,
+      publicExitIp: null,
+      localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
+    });
+    expect(snapshot.webRtc).toMatchObject({
+      status: "restricted",
+      policy: "disableNonProxiedUdp",
+      localIpExposure: "non-proxied-udp-disabled",
+    });
+  });
+
+  it.each([
+    ["empty profile id", ""],
+    ["path-like profile id", "profile/../secret"],
+    ["URL-like profile id", "https://example.invalid/profile"],
+  ])("rejects invalid proxy-check profile id inputs before invoking Tauri: %s", async (_caseName, profileId) => {
+    await expect(checkProfileProxy(profileId)).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["non-object result", proxyCheckEnvelope("not-object")],
+    ["unknown root key", proxyCheckEnvelope(proxyCheckResult({ checkerContent: "raw public checker transcript" }))],
+    ["profile id mismatch", proxyCheckEnvelope(proxyCheckResult({ profileId: "22222222-2222-2222-2222-222222222222" }))],
+    ["unknown route status", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofDirect({ status: "maybe" }) }))],
+    ["proved route missing fixture", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofProved({ fixture: null }) }))],
+    ["direct route has non-zero observations", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofDirect({ observationCounts: { proxy: 1, target: 0 } }) }))],
+    ["ip hiding public claim", proxyCheckEnvelope(proxyCheckResult({ ipHiding: proxyCheckIpHidingProved({ publicExitIpClaimed: true, publicExitIp: "203.0.113.1" }) }))],
+    ["malformed WebRTC warning", proxyCheckEnvelope(proxyCheckResult({ webRtc: proxyCheckWebRtcRestricted({ policy: "block", localIpExposure: "non-proxied-udp-disabled" }) }))],
+    ["HTTP checker URL", () => {
+      const result = cloneJson(proxyCheckResult()) as { publicCheckers: { pages: Array<Record<string, unknown>> } };
+      result.publicCheckers.pages[0].url = "http://www.cloudflare.com/cdn-cgi/trace";
+      return proxyCheckEnvelope(result);
+    }],
+    ["duplicate checker ids", () => {
+      const result = cloneJson(proxyCheckResult()) as { publicCheckers: { pages: Array<Record<string, unknown>> } };
+      result.publicCheckers.pages[1].id = result.publicCheckers.pages[0].id;
+      return proxyCheckEnvelope(result);
+    }],
+    ["missing checker id", () => {
+      const result = cloneJson(proxyCheckResult()) as { publicCheckers: { pages: Array<Record<string, unknown>> } };
+      result.publicCheckers.pages = result.publicCheckers.pages.slice(0, 2);
+      return proxyCheckEnvelope(result);
+    }],
+    ["raw checker transcript field", () => {
+      const result = cloneJson(proxyCheckResult()) as { publicCheckers: { pages: Array<Record<string, unknown>> } };
+      result.publicCheckers.pages[0].rawTranscript = "HTTP/2 200 raw checker body";
+      return proxyCheckEnvelope(result);
+    }],
+  ] as Array<[string, unknown | (() => unknown)]>)("maps malformed proxy-check payloads to protocol errors: %s", async (_caseName, envelopeOrFactory) => {
+    mockInvoke.mockResolvedValueOnce(typeof envelopeOrFactory === "function" ? envelopeOrFactory() : envelopeOrFactory);
+
+    await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each(["credentials", "username", "password", "storeRoot", "userDataDir", "debugPort", "argv", "webSocketDebuggerUrl", "rawCheckerContent"])(
+    "rejects forbidden proxy-check field %s before UI state sees it",
+    async (field) => {
+      mockInvoke.mockResolvedValueOnce(proxyCheckEnvelope(proxyCheckResult({ [field]: "unsafe-runtime-or-secret-detail" })));
+
+      await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({
+        code: SIDECAR_PROTOCOL_ERROR,
+        source: "protocol",
+        phase: "bridge-error",
+      });
+    },
+  );
+
+  it("preserves typed sidecar and bridge errors for proxy-check calls", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "PROXY_PROOF_FAILED",
+        message: "Proxy check proof could not be completed.",
+        recoverable: true,
+        detailRef: "sidecar-proxy-check-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "SIDECAR_TIMEOUT",
+        message: "The Python sidecar did not respond before the bridge timeout.",
+        recoverable: true,
+        detailRef: "bridge-proxy-check-timeout",
+      })
+      .mockRejectedValueOnce({
+        code: SIDECAR_PROTOCOL_ERROR,
+        message: "The Python sidecar returned malformed JSON.",
+        recoverable: true,
+        detailRef: "bridge-proxy-check-protocol",
+      });
+
+    await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({
+      code: "PROXY_PROOF_FAILED",
+      message: "Proxy check proof could not be completed.",
+      recoverable: true,
+      detailRef: "sidecar-proxy-check-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({
+      code: "SIDECAR_TIMEOUT",
+      source: "bridge",
+      phase: "bridge-error",
+      detailRef: "bridge-proxy-check-timeout",
+    });
+    await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: "bridge-proxy-check-protocol",
+    });
   });
 
   it.each([

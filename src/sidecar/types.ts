@@ -193,6 +193,97 @@ export interface ProxyValidationSnapshot extends ProxyValidationResult {
   receivedAt: string;
 }
 
+export type ProxyCheckRouteProofStatus = "not-run" | "proved";
+export type ProxyCheckRouteProofBasis = "direct-profile" | "sidecar-managed-local-fixture";
+export type ProxyCheckProofScope = "not-applicable" | "local-fixture";
+export type ProxyCheckIpHidingStatus = "not-proven" | "proved";
+export type ProxyCheckIpHidingBasis = "direct-profile" | "route-proof-succeeded";
+export type ProxyCheckLocalFixtureConclusion = "not-run" | "direct target IP hidden from the proof target by the managed fixture";
+export type ProxyCheckWebRtcStatus = "baseline-real" | "restricted";
+export type ProxyCheckWebRtcExposure = "real-local-ip-baseline" | "blocked" | "non-proxied-udp-disabled";
+export type ProxyCheckPublicCheckerStatus = "advisory-only";
+export type ProxyCheckPublicCheckerBasis = "fixed-https-allowlist";
+export type ProxyCheckPublicCheckerNetworkDependency = "user-driven-external-pages";
+export type ProxyCheckPublicCheckerSurface = "ip" | "webrtc";
+
+export interface ProxyCheckObservationCounts {
+  proxy: number;
+  target: number;
+}
+
+export interface ProxyCheckFixture {
+  kind: ProxyProtocol;
+  managed: true;
+}
+
+export interface ProxyCheckTarget {
+  host: string;
+  port: number;
+}
+
+export interface ProxyCheckRouteProof {
+  status: ProxyCheckRouteProofStatus;
+  basis: ProxyCheckRouteProofBasis;
+  scope: ProxyCheckProofScope;
+  protocol: ProxyProtocol | null;
+  credentialState: ProxyCredentialState;
+  durationMs: number;
+  fixture: ProxyCheckFixture | null;
+  target: ProxyCheckTarget | null;
+  directFallbackDetected: false;
+  observationCounts: ProxyCheckObservationCounts;
+}
+
+export interface ProxyCheckIpHiding {
+  status: ProxyCheckIpHidingStatus;
+  basis: ProxyCheckIpHidingBasis;
+  scope: ProxyCheckProofScope;
+  publicExitIpClaimed: false;
+  publicExitIp: null;
+  localFixtureConclusion: ProxyCheckLocalFixtureConclusion;
+}
+
+export interface ProxyCheckWebRtc {
+  status: ProxyCheckWebRtcStatus;
+  basis: "profile-identity-policy";
+  mode: IdentityMaskingMode;
+  policy: WebRtcPolicy;
+  localIpExposure: ProxyCheckWebRtcExposure;
+}
+
+export interface ProxyCheckPublicCheckerPage {
+  id: "cloudflare-trace" | "aws-checkip" | "webbrowsertools-webrtc";
+  label: string;
+  url: string;
+  surfaces: ProxyCheckPublicCheckerSurface[];
+  advisory: string;
+}
+
+export interface ProxyCheckPublicCheckers {
+  status: ProxyCheckPublicCheckerStatus;
+  basis: ProxyCheckPublicCheckerBasis;
+  networkDependency: ProxyCheckPublicCheckerNetworkDependency;
+  pages: ProxyCheckPublicCheckerPage[];
+}
+
+export interface ProxyCheckResult {
+  proxyCheckVersion: 1;
+  profileId: string;
+  proxy: ProfileProxySummary;
+  routeProof: ProxyCheckRouteProof;
+  ipHiding: ProxyCheckIpHiding;
+  webRtc: ProxyCheckWebRtc;
+  publicCheckers: ProxyCheckPublicCheckers;
+}
+
+export interface ProxyCheckSnapshot extends ProxyCheckResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface IdentityRealSurface {
   mode: "real";
 }

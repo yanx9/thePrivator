@@ -44,6 +44,14 @@ import type {
   ProfileProxyMode,
   ProfileProxyMutationSnapshot,
   ProfileProxySummary,
+  ProxyCheckIpHiding,
+  ProxyCheckPublicCheckerPage,
+  ProxyCheckPublicCheckerSurface,
+  ProxyCheckPublicCheckers,
+  ProxyCheckResult,
+  ProxyCheckRouteProof,
+  ProxyCheckSnapshot,
+  ProxyCheckWebRtc,
   ProxyCredentialState,
   ProxyProtocol,
   ProxyValidationResult,
@@ -154,6 +162,97 @@ const IDENTITY_AUDIT_CATALOG = [
 const IDENTITY_AUDIT_CATALOG_BY_ID = new Map<string, (typeof IDENTITY_AUDIT_CATALOG)[number]>(
   IDENTITY_AUDIT_CATALOG.map((page) => [page.id, page]),
 );
+
+const PROXY_CHECK_PUBLIC_CATALOG = [
+  {
+    id: "cloudflare-trace",
+    label: "Cloudflare trace",
+    url: "https://www.cloudflare.com/cdn-cgi/trace",
+    surfaces: ["ip"],
+  },
+  {
+    id: "aws-checkip",
+    label: "AWS checkip",
+    url: "https://checkip.amazonaws.com/",
+    surfaces: ["ip"],
+  },
+  {
+    id: "webbrowsertools-webrtc",
+    label: "WebRTC leak test",
+    url: "https://webbrowsertools.com/webrtc-leak-test/",
+    surfaces: ["webrtc"],
+  },
+] as const;
+
+const PROXY_CHECK_PUBLIC_CATALOG_BY_ID = new Map<string, (typeof PROXY_CHECK_PUBLIC_CATALOG)[number]>(
+  PROXY_CHECK_PUBLIC_CATALOG.map((page) => [page.id, page]),
+);
+
+const FORBIDDEN_PROXY_CHECK_FIELD_TOKENS = new Set([
+  "auth",
+  "authorization",
+  "authcredentials",
+  "binarypath",
+  "body",
+  "certificate",
+  "certificatetrust",
+  "checkercontent",
+  "command",
+  "content",
+  "credential",
+  "credentials",
+  "debugport",
+  "devtoolsactiveport",
+  "executable",
+  "executablepath",
+  "extensiondir",
+  "launchargs",
+  "password",
+  "path",
+  "profiledir",
+  "proxyauthorization",
+  "proxypass",
+  "proxypassword",
+  "proxyuser",
+  "proxyusername",
+  "rawcheckercontent",
+  "rawcontent",
+  "rawtranscript",
+  "remotedebuggingport",
+  "responsebody",
+  "runtimepath",
+  "storeroot",
+  "transcript",
+  "username",
+  "userdata",
+  "userdatadir",
+  "websocketdebuggerurl",
+  "args",
+  "argv",
+]);
+
+const FORBIDDEN_PROXY_CHECK_TEXT_MARKERS = [
+  "proxy-authorization",
+  "proxy_authorization",
+  "proxy password",
+  "proxypassword",
+  "proxy-password",
+  "proxy username",
+  "proxyusername",
+  "proxy-username",
+  "authcredentials",
+  "--proxy-server",
+  "--user-data-dir",
+  "--remote-debugging-port",
+  "--load-extension",
+  "devtoolsactiveport",
+  "profile-store/",
+  "traceback",
+  "private key",
+  "certificateTrust",
+  "ws://",
+  "wss://",
+];
 
 const FORBIDDEN_AUDIT_FIELDS = new Set([
   "pid",
@@ -328,6 +427,19 @@ export async function updateProfileProxy(
       throw makeProtocolError("The sidecar profile proxy update result did not match the requested profileId.");
     }
     return snapshot;
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function checkProfileProxy(profileId: string): Promise<ProxyCheckSnapshot> {
+  try {
+    const safeProfileId = requireProfileClientId(profileId, "profileId");
+    const envelope = await invoke<unknown>("profiles_proxy_check", { profileId: safeProfileId });
+    return parseProxyCheckEnvelope(envelope, new Date().toISOString(), safeProfileId);
   } catch (error) {
     if (isSidecarClientError(error)) {
       throw error;
@@ -728,6 +840,20 @@ function parseProxyValidationEnvelope(value: unknown, receivedAt: string): Proxy
   };
 }
 
+function parseProxyCheckEnvelope(value: unknown, receivedAt: string, requestedProfileId: string): ProxyCheckSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProxyCheckResult(envelope.result, requestedProfileId);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseIdentityAuditPlanEnvelope(value: unknown, receivedAt: string): IdentityAuditPlanSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityAuditPlanResult(envelope.result);
@@ -998,6 +1124,264 @@ function parseProxyValidationResult(value: unknown): ProxyValidationResult {
     proxy: parseProfileProxySummary(record.proxy, "proxy"),
     warnings,
   };
+}
+
+function parseProxyCheckResult(value: unknown, requestedProfileId: string): ProxyCheckResult {
+  const record = requireRecord(value, "The sidecar proxy check result must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "proxyCheck");
+  requireExactProxyCheckKeys(record, ["proxyCheckVersion", "profileId", "proxy", "routeProof", "ipHiding", "webRtc", "publicCheckers"], "proxyCheck");
+  requireLiteralNumber(record.proxyCheckVersion, "proxyCheckVersion", 1);
+  const profileId = requireProfileClientId(record.profileId, "profileId");
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar proxy check result did not match the requested profileId.");
+  }
+
+  return {
+    proxyCheckVersion: 1,
+    profileId,
+    proxy: parseProfileProxySummary(record.proxy, "proxy"),
+    routeProof: parseProxyCheckRouteProof(record.routeProof),
+    ipHiding: parseProxyCheckIpHiding(record.ipHiding),
+    webRtc: parseProxyCheckWebRtc(record.webRtc),
+    publicCheckers: parseProxyCheckPublicCheckers(record.publicCheckers),
+  };
+}
+
+function parseProxyCheckRouteProof(value: unknown): ProxyCheckRouteProof {
+  const record = requireRecord(value, "The sidecar proxy check routeProof result must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "routeProof");
+  requireExactProxyCheckKeys(
+    record,
+    ["status", "basis", "scope", "protocol", "credentialState", "durationMs", "fixture", "target", "directFallbackDetected", "observationCounts"],
+    "routeProof",
+  );
+  const status = requireProxyCheckRouteProofStatus(record.status, "routeProof.status");
+  const basis = requireProxyCheckRouteProofBasis(record.basis, "routeProof.basis");
+  const scope = requireProxyCheckScope(record.scope, "routeProof.scope");
+  const protocol = record.protocol === null ? null : requireProxyProtocol(record.protocol, "routeProof.protocol");
+  const credentialState = requireProxyCredentialState(record.credentialState, "routeProof.credentialState");
+  const durationMs = requireNonNegativeNumber(record.durationMs, "routeProof.durationMs");
+  const fixture = parseProxyCheckFixture(record.fixture, protocol, status);
+  const target = parseProxyCheckTarget(record.target, status);
+  const directFallbackDetected = requireLiteralBoolean(record.directFallbackDetected, "routeProof.directFallbackDetected", false);
+  const observationCounts = parseProxyCheckObservationCounts(record.observationCounts, status);
+
+  if (status === "not-run") {
+    if (basis !== "direct-profile" || scope !== "not-applicable" || protocol !== null || fixture !== null || target !== null || durationMs !== 0) {
+      throw makeProtocolError("The sidecar proxy check direct routeProof result was malformed.");
+    }
+  } else if (basis !== "sidecar-managed-local-fixture" || scope !== "local-fixture" || protocol === null || fixture === null || target === null) {
+    throw makeProtocolError("The sidecar proxy check proved routeProof result was malformed.");
+  }
+
+  return {
+    status,
+    basis,
+    scope,
+    protocol,
+    credentialState,
+    durationMs,
+    fixture,
+    target,
+    directFallbackDetected,
+    observationCounts,
+  };
+}
+
+function parseProxyCheckFixture(value: unknown, routeProtocol: ProxyProtocol | null, status: string): ProxyCheckRouteProof["fixture"] {
+  if (status === "not-run") {
+    if (value !== null) {
+      throw makeProtocolError("The sidecar proxy check routeProof.fixture must be null for direct profiles.");
+    }
+    return null;
+  }
+
+  const record = requireRecord(value, "The sidecar proxy check routeProof.fixture must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "routeProof.fixture");
+  requireExactProxyCheckKeys(record, ["kind", "managed"], "routeProof.fixture");
+  const kind = requireProxyProtocol(record.kind, "routeProof.fixture.kind");
+  if (routeProtocol !== null && kind !== routeProtocol) {
+    throw makeProtocolError("The sidecar proxy check routeProof.fixture.kind must match routeProof.protocol.");
+  }
+  return {
+    kind,
+    managed: requireLiteralBoolean(record.managed, "routeProof.fixture.managed", true),
+  };
+}
+
+function parseProxyCheckTarget(value: unknown, status: string): ProxyCheckRouteProof["target"] {
+  if (status === "not-run") {
+    if (value !== null) {
+      throw makeProtocolError("The sidecar proxy check routeProof.target must be null for direct profiles.");
+    }
+    return null;
+  }
+
+  const record = requireRecord(value, "The sidecar proxy check routeProof.target must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "routeProof.target");
+  requireExactProxyCheckKeys(record, ["host", "port"], "routeProof.target");
+  return {
+    host: requireProxyCheckHost(record.host, "routeProof.target.host"),
+    port: requireProxyPort(record.port, "routeProof.target.port"),
+  };
+}
+
+function parseProxyCheckObservationCounts(value: unknown, status: string): ProxyCheckRouteProof["observationCounts"] {
+  const record = requireRecord(value, "The sidecar proxy check routeProof.observationCounts must be an object.");
+  requireExactProxyCheckKeys(record, ["proxy", "target"], "routeProof.observationCounts");
+  const counts = {
+    proxy: requireNonNegativeInteger(record.proxy, "routeProof.observationCounts.proxy"),
+    target: requireNonNegativeInteger(record.target, "routeProof.observationCounts.target"),
+  };
+  if (status === "not-run") {
+    if (counts.proxy !== 0 || counts.target !== 0) {
+      throw makeProtocolError("The sidecar proxy check direct routeProof observation counts must be zero.");
+    }
+  } else if (counts.proxy < 1 || counts.target < 1) {
+    throw makeProtocolError("The sidecar proxy check proved routeProof observation counts must be positive.");
+  }
+  return counts;
+}
+
+function parseProxyCheckIpHiding(value: unknown): ProxyCheckIpHiding {
+  const record = requireRecord(value, "The sidecar proxy check ipHiding result must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "ipHiding");
+  requireExactProxyCheckKeys(record, ["status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "localFixtureConclusion"], "ipHiding");
+  const status = requireProxyCheckIpHidingStatus(record.status, "ipHiding.status");
+  const basis = requireProxyCheckIpHidingBasis(record.basis, "ipHiding.basis");
+  const scope = requireProxyCheckScope(record.scope, "ipHiding.scope");
+  const publicExitIpClaimed = requireLiteralBoolean(record.publicExitIpClaimed, "ipHiding.publicExitIpClaimed", false);
+  if (record.publicExitIp !== null) {
+    throw makeProtocolError("The sidecar proxy check ipHiding.publicExitIp must be null because public exit IP is advisory-only.");
+  }
+  const localFixtureConclusion = requireProxyCheckLocalFixtureConclusion(record.localFixtureConclusion, "ipHiding.localFixtureConclusion");
+
+  if (status === "not-proven") {
+    if (basis !== "direct-profile" || scope !== "not-applicable" || localFixtureConclusion !== "not-run") {
+      throw makeProtocolError("The sidecar proxy check direct ipHiding result was malformed.");
+    }
+  } else if (basis !== "route-proof-succeeded" || scope !== "local-fixture" || localFixtureConclusion !== "direct target IP hidden from the proof target by the managed fixture") {
+    throw makeProtocolError("The sidecar proxy check proved ipHiding result was malformed.");
+  }
+
+  return {
+    status,
+    basis,
+    scope,
+    publicExitIpClaimed,
+    publicExitIp: null,
+    localFixtureConclusion,
+  };
+}
+
+function parseProxyCheckWebRtc(value: unknown): ProxyCheckWebRtc {
+  const record = requireRecord(value, "The sidecar proxy check webRtc result must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "webRtc");
+  requireExactProxyCheckKeys(record, ["status", "basis", "mode", "policy", "localIpExposure"], "webRtc");
+  const status = requireProxyCheckWebRtcStatus(record.status, "webRtc.status");
+  const basis = requireLiteral(record.basis, "webRtc.basis", "profile-identity-policy");
+  const mode = requireIdentityMaskingMode(record.mode, "webRtc.mode");
+  const policy = requireWebRtcPolicy(record.policy, "webRtc.policy");
+  const localIpExposure = requireProxyCheckWebRtcExposure(record.localIpExposure, "webRtc.localIpExposure");
+
+  if (status === "baseline-real") {
+    if (mode !== "real" || policy !== "real" || localIpExposure !== "real-local-ip-baseline") {
+      throw makeProtocolError("The sidecar proxy check baseline WebRTC result was malformed.");
+    }
+  } else if (policy === "real" || (localIpExposure !== "blocked" && localIpExposure !== "non-proxied-udp-disabled")) {
+    throw makeProtocolError("The sidecar proxy check restricted WebRTC result was malformed.");
+  }
+  if (policy === "block" && localIpExposure !== "blocked") {
+    throw makeProtocolError("The sidecar proxy check blocked WebRTC result was malformed.");
+  }
+  if (policy === "disableNonProxiedUdp" && localIpExposure !== "non-proxied-udp-disabled") {
+    throw makeProtocolError("The sidecar proxy check disableNonProxiedUdp result was malformed.");
+  }
+
+  return {
+    status,
+    basis,
+    mode,
+    policy,
+    localIpExposure,
+  };
+}
+
+function parseProxyCheckPublicCheckers(value: unknown): ProxyCheckPublicCheckers {
+  const record = requireRecord(value, "The sidecar proxy check publicCheckers result must be an object.");
+  assertNoForbiddenProxyCheckFields(record, "publicCheckers");
+  requireExactProxyCheckKeys(record, ["status", "basis", "networkDependency", "pages"], "publicCheckers");
+  const status = requireLiteral(record.status, "publicCheckers.status", "advisory-only");
+  const basis = requireLiteral(record.basis, "publicCheckers.basis", "fixed-https-allowlist");
+  const networkDependency = requireLiteral(record.networkDependency, "publicCheckers.networkDependency", "user-driven-external-pages");
+  const pages = parseProxyCheckPublicCheckerPages(record.pages);
+  return {
+    status,
+    basis,
+    networkDependency,
+    pages,
+  };
+}
+
+function parseProxyCheckPublicCheckerPages(value: unknown): ProxyCheckPublicCheckerPage[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar proxy check publicCheckers.pages field must be an array.");
+  }
+  if (value.length !== PROXY_CHECK_PUBLIC_CATALOG.length) {
+    throw makeProtocolError("The sidecar proxy check public checker catalog count does not match the fixed catalog.");
+  }
+  const seen = new Set<string>();
+  const pages = value.map((item, index) => {
+    const page = parseProxyCheckPublicCheckerPage(item, `publicCheckers.pages[${index}]`);
+    if (seen.has(page.id)) {
+      throw makeProtocolError("The sidecar proxy check public checker catalog contains duplicate page ids.");
+    }
+    seen.add(page.id);
+    return page;
+  });
+  for (const expected of PROXY_CHECK_PUBLIC_CATALOG) {
+    if (!seen.has(expected.id)) {
+      throw makeProtocolError("The sidecar proxy check public checker catalog is missing a fixed page id.");
+    }
+  }
+  return pages;
+}
+
+function parseProxyCheckPublicCheckerPage(value: unknown, field: string): ProxyCheckPublicCheckerPage {
+  const record = requireRecord(value, `The sidecar proxy check field ${field} must be an object.`);
+  assertNoForbiddenProxyCheckFields(record, field);
+  requireExactProxyCheckKeys(record, ["id", "label", "url", "surfaces", "advisory"], field);
+  const id = requireProxyCheckPublicCheckerId(record.id, `${field}.id`);
+  const expected = PROXY_CHECK_PUBLIC_CATALOG_BY_ID.get(id);
+  if (!expected) {
+    throw makeProtocolError(`The sidecar proxy check field ${field}.id is not in the fixed catalog.`);
+  }
+  const surfaces = parseProxyCheckPublicCheckerSurfaces(record.surfaces, `${field}.surfaces`);
+  if (record.label !== expected.label || record.url !== expected.url || !sameStringArray(surfaces, [...expected.surfaces])) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} does not match fixed catalog metadata.`);
+  }
+  return {
+    id,
+    label: requireProxyCheckSafeText(record.label, `${field}.label`, { maxLength: 128 }),
+    url: requireProxyCheckPublicCheckerUrl(record.url, expected.url, `${field}.url`),
+    surfaces,
+    advisory: requireProxyCheckSafeText(record.advisory, `${field}.advisory`, { maxLength: 256 }),
+  };
+}
+
+function parseProxyCheckPublicCheckerSurfaces(value: unknown, field: string): ProxyCheckPublicCheckerSurface[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be a bounded non-empty array.`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const surface = requireProxyCheckPublicCheckerSurface(item, `${field}[${index}]`);
+    if (seen.has(surface)) {
+      throw makeProtocolError(`The sidecar proxy check field ${field} contains duplicate surfaces.`);
+    }
+    seen.add(surface);
+    return surface;
+  });
 }
 
 function parseIdentityAuditPlanResult(value: unknown): IdentityAuditPlanResult {
@@ -1913,6 +2297,177 @@ function containsUnsafeAuditText(value: string): boolean {
     return true;
   }
   return false;
+}
+
+function requireExactProxyCheckKeys(record: Record<string, unknown>, keys: string[], field: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      throw makeProtocolError(`The sidecar proxy check field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of keys) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar proxy check field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function assertNoForbiddenProxyCheckFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenProxyCheckFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    if (typeof value === "string" && containsUnsafeProxyCheckText(value)) {
+      throw makeProtocolError(`The sidecar proxy check field ${field} must not expose credentials, runtime details, or raw checker content.`);
+    }
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_PROXY_CHECK_FIELD_TOKENS.has(fieldToken(key))) {
+      throw makeProtocolError(`The sidecar proxy check field ${field}.${key} must not expose credentials, runtime details, or raw checker content.`);
+    }
+    assertNoForbiddenProxyCheckFields(item, `${field}.${key}`);
+  }
+}
+
+function containsUnsafeProxyCheckText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (FORBIDDEN_PROXY_CHECK_TEXT_MARKERS.some((marker) => lowered.includes(marker.toLowerCase()))) {
+    return true;
+  }
+  if (/\b(?:file|ws|wss):\/\//i.test(value)) {
+    return true;
+  }
+  if (/(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /(?:^|\s)[A-Za-z]:[\\/][^\s]+/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function requireProfileClientId(value: unknown, field: string): string {
+  const id = requireNonBlankString(value, field);
+  if (id.length > 128 || isPathLikeOrUrl(id) || containsControlCharacters(id) || !/^[A-Za-z0-9_.:-]+$/.test(id)) {
+    throw makeProtocolError(`The sidecar profile field ${field} must be an opaque safe id.`);
+  }
+  return id;
+}
+
+function requireProxyCheckRouteProofStatus(value: unknown, field: string): ProxyCheckRouteProof["status"] {
+  if (value === "not-run" || value === "proved") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known route proof status.`);
+}
+
+function requireProxyCheckRouteProofBasis(value: unknown, field: string): ProxyCheckRouteProof["basis"] {
+  if (value === "direct-profile" || value === "sidecar-managed-local-fixture") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known route proof basis.`);
+}
+
+function requireProxyCheckScope(value: unknown, field: string): ProxyCheckRouteProof["scope"] {
+  if (value === "not-applicable" || value === "local-fixture") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known proof scope.`);
+}
+
+function requireProxyCheckIpHidingStatus(value: unknown, field: string): ProxyCheckIpHiding["status"] {
+  if (value === "not-proven" || value === "proved") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known IP-hiding status.`);
+}
+
+function requireProxyCheckIpHidingBasis(value: unknown, field: string): ProxyCheckIpHiding["basis"] {
+  if (value === "direct-profile" || value === "route-proof-succeeded") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known IP-hiding basis.`);
+}
+
+function requireProxyCheckLocalFixtureConclusion(value: unknown, field: string): ProxyCheckIpHiding["localFixtureConclusion"] {
+  if (value === "not-run" || value === "direct target IP hidden from the proof target by the managed fixture") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known local-fixture conclusion.`);
+}
+
+function requireProxyCheckWebRtcStatus(value: unknown, field: string): ProxyCheckWebRtc["status"] {
+  if (value === "baseline-real" || value === "restricted") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known WebRTC status.`);
+}
+
+function requireProxyCheckWebRtcExposure(value: unknown, field: string): ProxyCheckWebRtc["localIpExposure"] {
+  if (value === "real-local-ip-baseline" || value === "blocked" || value === "non-proxied-udp-disabled") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known WebRTC exposure classification.`);
+}
+
+function requireProxyCheckPublicCheckerId(value: unknown, field: string): ProxyCheckPublicCheckerPage["id"] {
+  if (value === "cloudflare-trace" || value === "aws-checkip" || value === "webbrowsertools-webrtc") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be in the fixed public checker catalog.`);
+}
+
+function requireProxyCheckPublicCheckerSurface(value: unknown, field: string): ProxyCheckPublicCheckerSurface {
+  if (value === "ip" || value === "webrtc") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar proxy check field ${field} must be a known public checker surface.`);
+}
+
+function requireProxyCheckPublicCheckerUrl(value: unknown, expectedUrl: string, field: string): string {
+  const url = requireString(value, field);
+  if (url !== expectedUrl) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must match the fixed HTTPS checker catalog URL.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be a valid URL.`);
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be a safe public HTTPS URL.`);
+  }
+  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "0.0.0.0") {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must not target loopback.`);
+  }
+  return url;
+}
+
+function requireProxyCheckHost(value: unknown, field: string): string {
+  const host = requireNonBlankString(value, field).trim();
+  if (host.length > 253 || containsControlCharacters(host) || /\s/.test(host) || /:\/\/|[\\/?#@]/.test(host)) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be a safe host.`);
+  }
+  if (!/^[A-Za-z0-9.:-]+$/.test(host)) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be a safe host.`);
+  }
+  return host;
+}
+
+function requireProxyCheckSafeText(value: unknown, field: string, options: { maxLength: number }): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > options.maxLength || containsControlCharacters(text) || containsUnsafeProxyCheckText(text)) {
+    throw makeProtocolError(`The sidecar proxy check field ${field} must be safe UI copy.`);
+  }
+  return text;
+}
+
+function requireLiteralBoolean<T extends boolean>(value: unknown, field: string, expected: T): T {
+  if (value !== expected) {
+    throw makeProtocolError(`The sidecar response field ${field} must be ${expected}.`);
+  }
+  return expected;
 }
 
 function requireExactAuditKeys(record: Record<string, unknown>, keys: string[], field: string): void {
