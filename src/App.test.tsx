@@ -139,6 +139,139 @@ function proxyEnvelope(result: unknown, overrides: Record<string, unknown> = {})
   };
 }
 
+function proxyCheckRouteProofDirect(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "not-run",
+    basis: "direct-profile",
+    scope: "not-applicable",
+    protocol: null,
+    credentialState: "none",
+    durationMs: 0,
+    fixture: null,
+    target: null,
+    directFallbackDetected: false,
+    observationCounts: { proxy: 0, target: 0 },
+    ...overrides,
+  };
+}
+
+function proxyCheckRouteProofProved(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "proved",
+    basis: "sidecar-managed-local-fixture",
+    scope: "local-fixture",
+    protocol: "http",
+    credentialState: "none",
+    durationMs: 245.5,
+    fixture: { kind: "http", managed: true },
+    target: { host: "198.51.100.20", port: 443 },
+    directFallbackDetected: false,
+    observationCounts: { proxy: 2, target: 1 },
+    ...overrides,
+  };
+}
+
+function proxyCheckIpHidingDirect(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "not-proven",
+    basis: "direct-profile",
+    scope: "not-applicable",
+    publicExitIpClaimed: false,
+    publicExitIp: null,
+    localFixtureConclusion: "not-run",
+    ...overrides,
+  };
+}
+
+function proxyCheckIpHidingProved(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "proved",
+    basis: "route-proof-succeeded",
+    scope: "local-fixture",
+    publicExitIpClaimed: false,
+    publicExitIp: null,
+    localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
+    ...overrides,
+  };
+}
+
+function proxyCheckWebRtcBaseline(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "baseline-real",
+    basis: "profile-identity-policy",
+    mode: "real",
+    policy: "real",
+    localIpExposure: "real-local-ip-baseline",
+    ...overrides,
+  };
+}
+
+function proxyCheckWebRtcRestricted(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "restricted",
+    basis: "profile-identity-policy",
+    mode: "masked",
+    policy: "disableNonProxiedUdp",
+    localIpExposure: "non-proxied-udp-disabled",
+    ...overrides,
+  };
+}
+
+function proxyCheckPublicCheckers(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "advisory-only",
+    basis: "fixed-https-allowlist",
+    networkDependency: "user-driven-external-pages",
+    pages: [
+      {
+        id: "cloudflare-trace",
+        label: "Cloudflare trace",
+        url: "https://www.cloudflare.com/cdn-cgi/trace",
+        surfaces: ["ip"],
+        advisory: "External IP guidance only; not used as ThePrivator proof.",
+      },
+      {
+        id: "aws-checkip",
+        label: "AWS checkip",
+        url: "https://checkip.amazonaws.com/",
+        surfaces: ["ip"],
+        advisory: "External IP guidance only; not used as ThePrivator proof.",
+      },
+      {
+        id: "webbrowsertools-webrtc",
+        label: "WebRTC leak test",
+        url: "https://webbrowsertools.com/webrtc-leak-test/",
+        surfaces: ["webrtc"],
+        advisory: "WebRTC guidance only; compare with the profile policy shown here.",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function proxyCheckResult(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyCheckVersion: 1,
+    profileId: "11111111-1111-1111-1111-111111111111",
+    proxy: directProxySummary(),
+    routeProof: proxyCheckRouteProofDirect(),
+    ipHiding: proxyCheckIpHidingDirect(),
+    webRtc: proxyCheckWebRtcBaseline(),
+    publicCheckers: proxyCheckPublicCheckers(),
+    ...overrides,
+  };
+}
+
+function proxyCheckEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-proxy-check-1",
+    protocolVersion: "1.0.0",
+    durationMs: 8.25,
+    result,
+    ...overrides,
+  };
+}
+
 function identityPreset(label: string, presetId: string, overrides: Record<string, unknown> = {}) {
   return defaultIdentity({ label, presetId, ...overrides });
 }
@@ -672,7 +805,7 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.change(within(panel).getByLabelText(/^Replacement password$/i), { target: { value: "proxy-pass-should-not-leak" } });
     fireEvent.click(within(panel).getByRole("button", { name: /check proxy/i }));
 
-    await waitFor(() => expect(panel).toHaveTextContent(/Proxy check completed with 0 warnings/i));
+    await waitFor(() => expect(panel).toHaveTextContent(/Proxy draft validation completed with 0 warnings/i));
     expect(panel).toHaveTextContent(/socks5:\/\/proxy\.example:1080/i);
     expect(panel).toHaveTextContent(/Requestbridge-proxy-1/i);
     expect(panel).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak/i);

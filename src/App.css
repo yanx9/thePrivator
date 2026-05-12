@@ -227,6 +227,7 @@ label {
 .legacy-import-panel,
 .proxy-summary-panel,
 .proxy-config-panel,
+.proxy-check-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel,
@@ -956,6 +957,7 @@ p {
 
 .proxy-summary-panel,
 .proxy-config-panel,
+.proxy-check-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel {
@@ -973,12 +975,17 @@ p {
   border-color: rgba(154, 178, 111, 0.34);
 }
 
+.proxy-check-panel {
+  border-color: rgba(240, 198, 109, 0.32);
+}
+
 .identity-audit-summary-panel {
   border-color: rgba(240, 198, 109, 0.3);
 }
 
 .proxy-summary-panel__header,
 .proxy-config-panel__header,
+.proxy-check-panel__header,
 .identity-summary-panel__header,
 .identity-audit-summary-panel__header,
 .identity-config-panel__header,
@@ -993,6 +1000,7 @@ p {
 
 .proxy-summary-panel h4,
 .proxy-config-panel h4,
+.proxy-check-panel h4,
 .identity-summary-panel h4,
 .identity-audit-summary-panel h4,
 .identity-config-panel h4,
@@ -1003,6 +1011,7 @@ p {
 
 .proxy-summary-panel p,
 .proxy-config-panel p,
+.proxy-check-panel p,
 .proxy-muted-copy,
 .proxy-field-hint,
 .identity-summary-panel p,
@@ -1025,6 +1034,7 @@ p {
 }
 
 .proxy-config-panel,
+.proxy-check-panel,
 .identity-config-panel {
   border-color: rgba(240, 198, 109, 0.32);
 }
@@ -1161,12 +1171,17 @@ p {
 }
 
 .proxy-config-observability,
+.proxy-check-observability,
 .proxy-status,
+.proxy-check-status,
 .proxy-draft-editor,
+.proxy-check-section,
 .proxy-mode-group,
 .proxy-credential-group,
 .proxy-error-feedback,
+.proxy-check-error,
 .proxy-success-feedback,
+.proxy-check-success,
 .identity-config-observability,
 .identity-status,
 .identity-preset-apply,
@@ -1183,13 +1198,21 @@ p {
 }
 
 .proxy-status,
+.proxy-check-status,
 .identity-status {
   border-color: rgba(240, 198, 109, 0.42);
   color: #ffe6a6;
   background: var(--warning-soft);
 }
 
+.proxy-check-status--success {
+  border-color: rgba(154, 178, 111, 0.44);
+  color: #def4b2;
+  background: var(--sage-soft);
+}
+
 .proxy-error-feedback,
+.proxy-check-error,
 .identity-error-feedback {
   border-color: rgba(230, 120, 95, 0.46);
   background:
@@ -1198,6 +1221,7 @@ p {
 }
 
 .proxy-success-feedback,
+.proxy-check-success,
 .identity-success-feedback {
   border-color: rgba(154, 178, 111, 0.44);
   background:
@@ -1205,22 +1229,61 @@ p {
     rgba(0, 0, 0, 0.14);
 }
 
+.proxy-check-success--not-proven {
+  border-color: rgba(240, 198, 109, 0.42);
+  background:
+    linear-gradient(180deg, rgba(240, 198, 109, 0.13), rgba(240, 198, 109, 0.05)),
+    rgba(0, 0, 0, 0.14);
+}
+
 .proxy-error-feedback > strong,
+.proxy-check-error > strong,
 .identity-error-feedback > strong {
   color: #ffe0d7;
 }
 
 .proxy-success-feedback > strong,
+.proxy-check-success > strong,
 .identity-success-feedback > strong {
   color: #def4b2;
 }
 
 .proxy-draft-editor,
+.proxy-check-results,
+.proxy-check-page-list,
 .proxy-field,
 .proxy-endpoint-grid,
 .proxy-credential-fields {
   display: grid;
   gap: 10px;
+}
+
+.proxy-check-section,
+.proxy-check-success,
+.proxy-check-error {
+  display: grid;
+  gap: 10px;
+}
+
+.proxy-check-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed rgba(242, 234, 219, 0.18);
+  border-radius: 18px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.11);
+}
+
+.proxy-check-page-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(242, 234, 219, 0.11);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.13);
+}
+
+.proxy-check-page-card strong {
+  color: var(--ink);
 }
 
 .proxy-mode-group,

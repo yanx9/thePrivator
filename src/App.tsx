@@ -48,6 +48,7 @@ import {
   updateProfileProxy,
   validateIdentity,
   validateProxy,
+  checkProfileProxy,
 } from "./sidecar/client";
 import type {
   ChromiumRunningProfileState,
@@ -71,6 +72,7 @@ import type {
   ProfileMutationSnapshot,
   ProfileProxySummary,
   ProfileRecord,
+  ProxyCheckSnapshot,
   ProxyProtocol,
   SidecarClientError,
   SidecarHealthSnapshot,
@@ -212,6 +214,40 @@ type ProxyConfigPanelState = {
   currentAction: ProxyConfigAction | null;
   error: ProxyConfigError | null;
   success: ProxyConfigSuccess | null;
+};
+
+type ProxyCheckPhase = "idle" | "running" | "success" | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+type ProxyCheckAction = "saved-proof";
+
+type ProxyCheckError = {
+  profileId: string;
+  action: ProxyCheckAction;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+
+type ProxyCheckPanelState = {
+  phase: ProxyCheckPhase;
+  currentAction: ProxyCheckAction | null;
+  snapshot: ProxyCheckSnapshot | null;
+  error: ProxyCheckError | null;
+  requestedAt: string | null;
+};
+
+type ProxyCheckStateByProfile = Record<string, ProxyCheckPanelState>;
+
+type ProxyCheckRuntimeGuard = {
+  isKnown: boolean;
+  reason: string | null;
+};
+
+const INITIAL_PROXY_CHECK_PANEL_STATE: ProxyCheckPanelState = {
+  phase: "idle",
+  currentAction: null,
+  snapshot: null,
+  error: null,
+  requestedAt: null,
 };
 
 type LegacySelectionState = Record<string, boolean>;
@@ -369,6 +405,18 @@ const PROXY_CONFIG_ACTION_LABELS: Record<ProxyConfigAction, string> = {
   save: "Save proxy configuration",
 };
 
+const PROXY_CHECK_PHASE_LABELS: Record<ProxyCheckPhase, string> = {
+  idle: "Saved proxy proof not run",
+  running: "Running saved proxy proof",
+  success: "Saved proxy proof complete",
+  "recoverable-error": "Recoverable saved proxy proof error",
+  "bridge-error": "Saved proxy proof bridge error",
+};
+
+const PROXY_CHECK_ACTION_LABELS: Record<ProxyCheckAction, string> = {
+  "saved-proof": "Run saved proxy proof",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -429,6 +477,7 @@ export function App() {
   const [proxyCurrentAction, setProxyCurrentAction] = useState<ProxyConfigAction | null>(null);
   const [proxyConfigError, setProxyConfigError] = useState<ProxyConfigError | null>(null);
   const [proxyConfigSuccess, setProxyConfigSuccess] = useState<ProxyConfigSuccess | null>(null);
+  const [proxyCheckByProfile, setProxyCheckByProfile] = useState<ProxyCheckStateByProfile>({});
 
   const healthInFlightRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -437,10 +486,32 @@ export function App() {
   const identityConfigRequestIdRef = useRef(0);
   const identityAuditRequestIdRef = useRef(0);
   const proxyConfigRequestIdRef = useRef(0);
+  const proxyCheckRequestIdRef = useRef(0);
+  const proxyCheckRequestByProfileRef = useRef<Record<string, number>>({});
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
+  const profileIdsRef = useRef<Set<string>>(new Set());
 
   const applyProfileSnapshot = useCallback((snapshot: ProfileListSnapshot | ProfileMutationSnapshot) => {
+    const nextProfileIds = new Set(snapshot.profiles.map((profile) => profile.id));
+    profileIdsRef.current = nextProfileIds;
+    Object.keys(proxyCheckRequestByProfileRef.current).forEach((profileId) => {
+      if (!nextProfileIds.has(profileId)) {
+        delete proxyCheckRequestByProfileRef.current[profileId];
+      }
+    });
+    setProxyCheckByProfile((current) => {
+      let changed = false;
+      const next: ProxyCheckStateByProfile = {};
+      Object.entries(current).forEach(([profileId, state]) => {
+        if (nextProfileIds.has(profileId)) {
+          next[profileId] = state;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
     setProfiles(snapshot.profiles);
     setLastListSnapshot(snapshot);
     setProfilePhase("ready");
@@ -1040,6 +1111,24 @@ export function App() {
     setProxyCurrentAction(action);
   }, []);
 
+  const recordProxyCheckError = useCallback((profileId: string, error: SidecarClientError) => {
+    setProxyCheckByProfile((current) => ({
+      ...current,
+      [profileId]: {
+        phase: error.phase,
+        currentAction: "saved-proof",
+        snapshot: null,
+        error: {
+          profileId,
+          action: "saved-proof",
+          error,
+          occurredAt: new Date().toISOString(),
+        },
+        requestedAt: current[profileId]?.requestedAt ?? new Date().toISOString(),
+      },
+    }));
+  }, []);
+
   const closeProxyConfig = useCallback(() => {
     proxyConfigRequestIdRef.current += 1;
     setProxyPanelProfileId(null);
@@ -1124,6 +1213,63 @@ export function App() {
       setProxyCurrentAction(null);
     },
     [proxyPanelProfileId],
+  );
+
+  const handleSavedProxyProofCheck = useCallback(
+    async (profile: ProfileRecord) => {
+      const currentState = proxyCheckByProfile[profile.id];
+      const lifecycleMutation = chromiumMutationRef.current;
+      if (
+        currentState?.phase === "running" ||
+        isProfileLoading ||
+        mutationPhase !== "idle" ||
+        chromiumPhase !== "ready" ||
+        chromiumRuntimeByProfileRef.current[profile.id] ||
+        lifecycleMutation !== null
+      ) {
+        return;
+      }
+
+      const requestId = proxyCheckRequestIdRef.current + 1;
+      proxyCheckRequestIdRef.current = requestId;
+      proxyCheckRequestByProfileRef.current[profile.id] = requestId;
+      const requestedAt = new Date().toISOString();
+      setProxyCheckByProfile((current) => ({
+        ...current,
+        [profile.id]: {
+          phase: "running",
+          currentAction: "saved-proof",
+          snapshot: null,
+          error: null,
+          requestedAt,
+        },
+      }));
+
+      try {
+        const snapshot = await checkProfileProxy(profile.id);
+        if (proxyCheckRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        setProxyCheckByProfile((current) => ({
+          ...current,
+          [profile.id]: {
+            phase: "success",
+            currentAction: null,
+            snapshot,
+            error: null,
+            requestedAt,
+          },
+        }));
+      } catch (error) {
+        if (proxyCheckRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        recordProxyCheckError(profile.id, error as SidecarClientError);
+      }
+    },
+    [chromiumPhase, isProfileLoading, mutationPhase, proxyCheckByProfile, recordProxyCheckError],
   );
 
   const handleCheckProxy = useCallback(
@@ -1800,6 +1946,11 @@ export function App() {
                     error: proxyConfigError?.profileId === profile.id ? proxyConfigError : null,
                     success: proxyConfigSuccess?.profileId === profile.id ? proxyConfigSuccess : null,
                   }}
+                  proxyCheckState={proxyCheckByProfile[profile.id] ?? null}
+                  proxyCheckRuntimeGuard={{
+                    isKnown: chromiumPhase === "ready",
+                    reason: chromiumPhase === "ready" ? null : `Chromium runtime status is ${chromiumPhase}; saved proxy proof fails closed until status refresh confirms no conflicting browser is running.`,
+                  }}
                   isLifecycleActionBusy={chromiumMutation !== null}
                   isProfileBusy={isProfileBusy}
                   lifecycleError={chromiumErrorsByProfile[profile.id] ?? chromiumStatusError}
@@ -1834,6 +1985,7 @@ export function App() {
                   onProxyDraftCredentialModeChange={handleProxyDraftCredentialModeChange}
                   onProxyDraftFieldChange={handleProxyDraftFieldChange}
                   onProxyDraftModeChange={handleProxyDraftModeChange}
+                  onProxyProofCheck={handleSavedProxyProofCheck}
                   onProxySave={handleSaveProxy}
                   onRefreshStatus={() => void refreshChromiumStatus("manual")}
                   onRenameCancel={() => setEditing(null)}
@@ -2458,6 +2610,8 @@ function ProfileCard({
   identityConfigState,
   identityAuditState,
   proxyConfigState,
+  proxyCheckRuntimeGuard,
+  proxyCheckState,
   isLifecycleActionBusy,
   isProfileBusy,
   lifecycleError,
@@ -2489,6 +2643,7 @@ function ProfileCard({
   onProxyDraftCredentialModeChange,
   onProxyDraftFieldChange,
   onProxyDraftModeChange,
+  onProxyProofCheck,
   onProxySave,
   onRefreshStatus,
   onRenameCancel,
@@ -2505,6 +2660,8 @@ function ProfileCard({
   identityConfigState: IdentityConfigPanelState;
   identityAuditState: IdentityAuditPanelState;
   proxyConfigState: ProxyConfigPanelState;
+  proxyCheckRuntimeGuard: ProxyCheckRuntimeGuard;
+  proxyCheckState: ProxyCheckPanelState | null;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
   lifecycleError: ChromiumLifecycleError | null;
@@ -2536,6 +2693,7 @@ function ProfileCard({
   onProxyDraftCredentialModeChange: (profileId: string, credentialMode: ProxyCredentialDraftMode) => void;
   onProxyDraftFieldChange: (profileId: string, field: Extract<ProxyDraftFieldPath, "protocol" | "host" | "port">, value: string) => void;
   onProxyDraftModeChange: (profileId: string, mode: string) => void;
+  onProxyProofCheck: (profile: ProfileRecord) => void;
   onProxySave: (profile: ProfileRecord) => void;
   onRefreshStatus: () => void;
   onRenameCancel: () => void;
@@ -2564,6 +2722,9 @@ function ProfileCard({
     : null;
   const proxyRuntimeProtectionReason = isRuntimeProtected
     ? `Proxy changes are disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium before checking or saving; saved proxy edits apply on the next launch.`
+    : null;
+  const proxyProofRuntimeProtectionReason = isRuntimeProtected
+    ? `Saved proxy proof is disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium and wait for lifecycle state to settle before proving routing against saved profile truth.`
     : null;
 
   const retryLifecycle = () => {
@@ -2646,6 +2807,18 @@ function ProfileCard({
           onSaveProxy={onProxySave}
         />
       ) : null}
+
+      <SavedProxyProofPanel
+        diagnosticLookupState={diagnosticLookupState}
+        isLifecycleActionBusy={isLifecycleActionBusy}
+        isProfileBusy={isProfileBusy}
+        profile={profile}
+        runtimeGuard={proxyCheckRuntimeGuard}
+        runtimeProtectionReason={proxyProofRuntimeProtectionReason}
+        state={proxyCheckState}
+        onDiagnosticLookup={onDiagnosticLookup}
+        onRunProof={onProxyProofCheck}
+      />
 
       <ProfileIdentityAuditSummary
         diagnosticLookupState={diagnosticLookupState}
@@ -3257,9 +3430,9 @@ function ProxyConfigErrorFeedback({
 }
 
 function ProxyConfigSuccessFeedback({ state }: { state: ProxyConfigSuccess }) {
-  const heading = state.action === "check" ? "Proxy check completed." : "Proxy configuration saved.";
+  const heading = state.action === "check" ? "Proxy draft validation completed." : "Proxy configuration saved.";
   const copy = state.action === "check"
-    ? `Proxy check completed with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. Save is still an explicit profile-store mutation.`
+    ? `Proxy draft validation completed with ${state.warningCount} warning${state.warningCount === 1 ? "" : "s"}. This uses proxy.validate only; run saved proxy proof separately after saving to assess routing/IP-hiding.`
     : "Proxy configuration saved with redacted public profile truth and will apply on the next Chromium launch.";
 
   return (
@@ -3276,6 +3449,241 @@ function ProxyConfigSuccessFeedback({ state }: { state: ProxyConfigSuccess }) {
         <Metric label="Warnings" value={state.warningCount} />
         <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
       </dl>
+    </section>
+  );
+}
+
+function SavedProxyProofPanel({
+  diagnosticLookupState,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runtimeGuard,
+  runtimeProtectionReason,
+  state,
+  onDiagnosticLookup,
+  onRunProof,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runtimeGuard: ProxyCheckRuntimeGuard;
+  runtimeProtectionReason: string | null;
+  state: ProxyCheckPanelState | null;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onRunProof: (profile: ProfileRecord) => void;
+}) {
+  const currentState = state ?? INITIAL_PROXY_CHECK_PANEL_STATE;
+  const isRunning = currentState.phase === "running";
+  const headingId = `proxy-check-heading-${profile.id}`;
+  const actionHintId = `proxy-check-action-hint-${profile.id}`;
+  const disabledReason = runtimeProtectionReason
+    ?? (!runtimeGuard.isKnown
+      ? runtimeGuard.reason ?? "Chromium runtime status is unknown; saved proxy proof fails closed until status refresh succeeds."
+      : isProfileBusy
+        ? "Profile loading or mutation is in progress; wait before running saved proxy proof."
+        : isLifecycleActionBusy
+          ? "A Chromium lifecycle action is in progress; saved proxy proof fails closed until runtime state settles."
+          : isRunning
+            ? "Saved proxy proof is already running for this profile."
+            : null);
+  const canRunProof = disabledReason === null;
+
+  return (
+    <section className="proxy-check-panel" aria-labelledby={headingId}>
+      <div className="proxy-check-panel__header">
+        <div>
+          <p className="signal-label">Saved proxy proof</p>
+          <h4 id={headingId}>Deterministic local route proof</h4>
+          <p>
+            Run <code>profiles.proxy.check</code> against the saved profile proxy. This is separate from draft validation and proves only the deterministic local fixture boundary.
+          </p>
+        </div>
+        <button type="button" aria-describedby={actionHintId} disabled={!canRunProof} onClick={() => onRunProof(profile)}>
+          {isRunning ? "Running proof…" : "Run saved proxy proof"}
+        </button>
+      </div>
+
+      <dl className="metric-list metric-list--inline proxy-check-observability" aria-label={`${profile.name} proxy-check observability`}>
+        <Metric label="Proxy check phase" value={`${currentState.phase} · ${PROXY_CHECK_PHASE_LABELS[currentState.phase]}`} />
+        <Metric label="Current action" value={currentState.currentAction ? PROXY_CHECK_ACTION_LABELS[currentState.currentAction] : "No active proxy check"} />
+        <Metric label="Method" value="profiles.proxy.check" />
+        <Metric label="Request" value={currentState.snapshot?.requestId} />
+        <Metric label="Bridge duration" value={currentState.snapshot ? formatDuration(currentState.snapshot.bridgeDurationMs) : undefined} />
+        <Metric label="detailRef" value={currentState.error?.error.detailRef} />
+        <Metric label="Requested" value={currentState.requestedAt ? formatProfileTimestamp(currentState.requestedAt) : undefined} />
+      </dl>
+
+      {isRunning ? (
+        <div className="proxy-check-status" role="status" aria-live="polite" aria-atomic="true">
+          Running saved proxy proof through <code>profiles.proxy.check</code>. Duplicate requests are disabled until this response settles.
+        </div>
+      ) : currentState.phase === "success" && currentState.snapshot ? (
+        <div className="proxy-check-status proxy-check-status--success" role="status" aria-live="polite" aria-atomic="true">
+          Saved proxy proof finished for request <code>{currentState.snapshot.requestId}</code>.
+        </div>
+      ) : null}
+
+      <p id={actionHintId} className="proxy-muted-copy" role="status" aria-live="polite">
+        {disabledReason
+          ?? "Runs the saved-profile proof only; use Configure proxy for draft validation or saving. Public checker pages remain manual advisory references."}
+      </p>
+
+      <section className="proxy-check-section" aria-label={`${profile.name} saved proxy proof input`}>
+        <div className="identity-panel-subhead">
+          <strong>Saved proxy input</strong>
+          <span>{profile.proxy.mode === "fixedServer" ? "Fixed endpoint" : "Direct mode"}</span>
+        </div>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Saved summary" value={profile.proxy.summary} />
+          <Metric label="Mode" value={formatProxyMode(profile.proxy.mode)} />
+          <Metric label="Protocol" value={profile.proxy.mode === "fixedServer" ? formatProxyProtocol(profile.proxy.protocol) : "Not applicable"} />
+          <Metric label="Credential state" value={formatProxyCredentialState(profile.proxy.credentialState)} />
+        </dl>
+        <p className="proxy-muted-copy">Credentials, auth headers, launch arguments, runtime paths, WebSocket URLs, and public checker page bodies are not rendered by this panel.</p>
+      </section>
+
+      {currentState.snapshot ? <ProxyCheckResultDetails snapshot={currentState.snapshot} /> : null}
+      {!currentState.snapshot && !currentState.error && !isRunning ? (
+        <p className="proxy-check-empty">No saved proxy proof has run yet. Direct profiles can complete as “not proven”; fixed proxies need a successful local fixture proof before IP-hiding is proven.</p>
+      ) : null}
+
+      {currentState.error ? (
+        <ProxyCheckErrorFeedback
+          diagnosticLookupState={diagnosticLookupState}
+          state={currentState.error}
+          onDiagnosticLookup={onDiagnosticLookup}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ProxyCheckResultDetails({ snapshot }: { snapshot: ProxyCheckSnapshot }) {
+  const routeProof = snapshot.routeProof;
+  const ipHiding = snapshot.ipHiding;
+  const webRtc = snapshot.webRtc;
+  const publicCheckers = snapshot.publicCheckers;
+  const provedLocalFixture = routeProof.status === "proved" && ipHiding.status === "proved";
+
+  return (
+    <div className="proxy-check-results" aria-label="Saved proxy proof results">
+      <section className={`proxy-check-success proxy-check-success--${provedLocalFixture ? "proved" : "not-proven"}`} role="status" aria-live="polite" aria-atomic="true">
+        <strong>{provedLocalFixture ? "Local fixture proved saved proxy routing." : "Saved proxy proof completed without proving IP hiding."}</strong>
+        <p>{formatProxyCheckConclusion(snapshot)}</p>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Profile" value={snapshot.profileId} />
+          <Metric label="Route proof" value={formatProxyCheckStatus(routeProof.status)} />
+          <Metric label="IP hiding" value={formatProxyCheckStatus(ipHiding.status)} />
+          <Metric label="Received" value={formatProfileTimestamp(snapshot.receivedAt)} />
+        </dl>
+      </section>
+
+      <section className="proxy-check-section" aria-label="Deterministic local route proof">
+        <div className="identity-panel-subhead">
+          <strong>Deterministic local route proof</strong>
+          <span>{formatProxyCheckStatus(routeProof.status)}</span>
+        </div>
+        <p>{formatProxyCheckRouteCopy(snapshot)}</p>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Status" value={formatProxyCheckStatus(routeProof.status)} />
+          <Metric label="Basis" value={formatLiteral(routeProof.basis)} />
+          <Metric label="Scope" value={formatLiteral(routeProof.scope)} />
+          <Metric label="Protocol" value={routeProof.protocol ? formatProxyProtocol(routeProof.protocol) : "Not applicable"} />
+          <Metric label="Credential state" value={formatProxyCredentialState(routeProof.credentialState)} />
+          <Metric label="Duration" value={formatDuration(routeProof.durationMs)} />
+          <Metric label="Fixture" value={formatProxyCheckFixture(routeProof)} />
+          <Metric label="Target" value={formatProxyCheckTarget(routeProof)} />
+          <Metric label="Observations" value={formatProxyCheckObservations(routeProof)} />
+          <Metric label="Direct fallback" value={routeProof.directFallbackDetected ? "Detected" : "Not detected"} />
+        </dl>
+      </section>
+
+      <section className="proxy-check-section" aria-label="IP-hiding conclusion">
+        <div className="identity-panel-subhead">
+          <strong>IP-hiding conclusion</strong>
+          <span>{formatProxyCheckStatus(ipHiding.status)}</span>
+        </div>
+        <p>{formatProxyCheckIpCopy(snapshot)}</p>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Status" value={formatProxyCheckStatus(ipHiding.status)} />
+          <Metric label="Basis" value={formatLiteral(ipHiding.basis)} />
+          <Metric label="Scope" value={formatLiteral(ipHiding.scope)} />
+          <Metric label="Local conclusion" value={formatLiteral(ipHiding.localFixtureConclusion)} />
+          <Metric label="Public exit IP claim" value={ipHiding.publicExitIpClaimed ? "Claimed" : "Not claimed"} />
+          <Metric label="Public exit IP" value={ipHiding.publicExitIp ?? "Not collected"} />
+        </dl>
+      </section>
+
+      <section className="proxy-check-section" aria-label="WebRTC local-IP baseline">
+        <div className="identity-panel-subhead">
+          <strong>WebRTC / local-IP baseline</strong>
+          <span>{formatProxyCheckStatus(webRtc.status)}</span>
+        </div>
+        <p>{formatProxyCheckWebRtcCopy(snapshot)}</p>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Status" value={formatProxyCheckStatus(webRtc.status)} />
+          <Metric label="Basis" value={formatLiteral(webRtc.basis)} />
+          <Metric label="Identity mode" value={formatIdentityMode(webRtc.mode)} />
+          <Metric label="Policy" value={formatLiteral(webRtc.policy)} />
+          <Metric label="Local IP exposure" value={formatLiteral(webRtc.localIpExposure)} />
+        </dl>
+      </section>
+
+      <section className="proxy-check-section" aria-label="Public checker advisory pages">
+        <div className="identity-panel-subhead">
+          <strong>Public checker advisory pages</strong>
+          <span>{formatProxyCheckStatus(publicCheckers.status)}</span>
+        </div>
+        <p>
+          These pages are manual advisory references only. Checker labels, scoring, availability, and network instability are external signals; ThePrivator does not promise a hidden public IP or a checker pass.
+        </p>
+        <dl className="metric-list metric-list--inline">
+          <Metric label="Status" value={formatProxyCheckStatus(publicCheckers.status)} />
+          <Metric label="Basis" value={formatLiteral(publicCheckers.basis)} />
+          <Metric label="Network dependency" value={formatLiteral(publicCheckers.networkDependency)} />
+          <Metric label="Page count" value={publicCheckers.pages.length} />
+        </dl>
+        <div className="proxy-check-page-list" role="list" aria-label="Advisory public checker pages">
+          {publicCheckers.pages.map((page) => (
+            <article key={page.id} className="proxy-check-page-card" role="listitem">
+              <div className="identity-audit-page-card__header">
+                <strong>{page.label}</strong>
+                <span className="identity-audit-page-card__surface-count">{formatSurfaces(page.surfaces)}</span>
+              </div>
+              <p className="identity-audit-url">{page.url}</p>
+              <p>{page.advisory}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProxyCheckErrorFeedback({
+  diagnosticLookupState,
+  state,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: ProxyCheckError;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
+  return (
+    <section className="proxy-check-error" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>{PROXY_CHECK_ACTION_LABELS[state.action]} failed safely.</strong>
+      <p>{state.error.message}</p>
+      <p className="proxy-muted-copy">The saved profile/proxy record was not changed. Malformed or partial proof responses are discarded before any result sections render.</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={state.error.code} />
+        <Metric label="Source" value={state.error.source} />
+        <Metric label="Recoverable" value={state.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={state.error.detailRef} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      <DiagnosticReference detailRef={state.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
     </section>
   );
 }
@@ -4498,6 +4906,91 @@ function formatProxyProtocol(value: ProxyProtocol | string): string {
 
 function formatProxyCredentialState(value: ProfileProxySummary["credentialState"]): string {
   return value === "configured" ? "configured (masked)" : "none";
+}
+
+function formatProxyCheckConclusion(snapshot: ProxyCheckSnapshot): string {
+  if (snapshot.routeProof.status === "proved" && snapshot.ipHiding.status === "proved") {
+    return "The local fixture observed proxy routing and concluded the proof target did not see the direct target IP. This does not collect or assert a public exit IP.";
+  }
+
+  if (snapshot.proxy.mode === "direct") {
+    return "Direct mode is valid profile truth, but no proxy route was run and IP hiding is not proven.";
+  }
+
+  return "The proof completed without a local-fixture IP-hiding conclusion; treat the saved proxy as not proven until a successful fixed-proxy proof runs.";
+}
+
+function formatProxyCheckRouteCopy(snapshot: ProxyCheckSnapshot): string {
+  if (snapshot.routeProof.status === "proved") {
+    return "The sidecar-managed local fixture saw the proxy path and no direct fallback. The proof scope is local-fixture only.";
+  }
+
+  return "No route proof is run for Direct mode, so this is a successful app state rather than a proxy/IP-hiding proof.";
+}
+
+function formatProxyCheckIpCopy(snapshot: ProxyCheckSnapshot): string {
+  if (snapshot.ipHiding.status === "proved") {
+    return "The local fixture conclusion proves target-IP hiding only for the deterministic fixture; no public exit IP is claimed or stored.";
+  }
+
+  return "IP hiding is not proven for this saved profile. Public checker pages may be used manually as advisory context, not as app-side proof.";
+}
+
+function formatProxyCheckWebRtcCopy(snapshot: ProxyCheckSnapshot): string {
+  if (snapshot.webRtc.status === "restricted") {
+    return "The saved identity policy restricts WebRTC local-IP exposure before any public checker comparison.";
+  }
+
+  return "Baseline-real WebRTC behavior may expose local IP candidates; this is an expected baseline unless the saved identity policy blocks or disables non-proxied UDP.";
+}
+
+function formatProxyCheckStatus(value: string): string {
+  if (value === "not-run") {
+    return "Not run";
+  }
+  if (value === "not-proven") {
+    return "Not proven";
+  }
+  if (value === "advisory-only") {
+    return "Advisory only";
+  }
+  if (value === "baseline-real") {
+    return "Baseline real";
+  }
+
+  return formatLiteral(value);
+}
+
+function formatProxyCheckFixture(routeProof: ProxyCheckSnapshot["routeProof"]): string {
+  if (!routeProof.fixture) {
+    return "Not applicable";
+  }
+
+  return `${formatProxyProtocol(routeProof.fixture.kind)} managed fixture`;
+}
+
+function formatProxyCheckTarget(routeProof: ProxyCheckSnapshot["routeProof"]): string {
+  if (!routeProof.target) {
+    return "Not applicable";
+  }
+
+  return `${routeProof.target.host}:${routeProof.target.port}`;
+}
+
+function formatProxyCheckObservations(routeProof: ProxyCheckSnapshot["routeProof"]): string {
+  return `proxy ${routeProof.observationCounts.proxy} · target ${routeProof.observationCounts.target}`;
+}
+
+function formatSurfaces(surfaces: string[]): string {
+  return surfaces.map(formatLiteral).join(" · ");
+}
+
+function formatLiteral(value: string): string {
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function formatIdentityAuditCategory(value: IdentityAuditPage["category"]): string {
