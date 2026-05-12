@@ -3596,7 +3596,7 @@ function ProxyCheckResultDetails({ snapshot }: { snapshot: ProxyCheckSnapshot })
           <Metric label="Fixture" value={formatProxyCheckFixture(routeProof)} />
           <Metric label="Target" value={formatProxyCheckTarget(routeProof)} />
           <Metric label="Observations" value={formatProxyCheckObservations(routeProof)} />
-          <Metric label="Direct fallback" value={routeProof.directFallbackDetected ? "Detected" : "Not detected"} />
+          <Metric label="Fallback route" value={routeProof.directFallbackDetected ? "Detected" : "Not detected"} />
         </dl>
       </section>
 
@@ -4922,7 +4922,7 @@ function formatProxyCheckConclusion(snapshot: ProxyCheckSnapshot): string {
 
 function formatProxyCheckRouteCopy(snapshot: ProxyCheckSnapshot): string {
   if (snapshot.routeProof.status === "proved") {
-    return "The sidecar-managed local fixture saw the proxy path and no direct fallback. The proof scope is local-fixture only.";
+    return "The sidecar-managed local fixture saw the proxy path without bypass evidence. The proof scope is local-fixture only.";
   }
 
   return "No route proof is run for Direct mode, so this is a successful app state rather than a proxy/IP-hiding proof.";
