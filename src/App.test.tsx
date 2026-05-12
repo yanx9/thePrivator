@@ -601,6 +601,37 @@ describe("ThePrivator profile library UI", () => {
     expect(fixedCard).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|username|password/i);
   });
 
+  it("opens a reloaded masked fixed proxy with empty replacement fields and no fake credential placeholders", async () => {
+    const profile = profileRecord({
+      name: "Masked Research",
+      proxy: fixedProxySummary({ credentialState: "configured", summary: "https://proxy.example:9443", protocol: "https", port: 9443 }),
+    });
+    mockStartup([profile]);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /masked research/i });
+    expect(card).toHaveTextContent(/https:\/\/proxy\.example:9443/i);
+    expect(card).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(card).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|••••|placeholder/i);
+
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for masked research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for masked research/i });
+    expect(within(panel).getByLabelText(/Saved masked credentials/i)).toBeChecked();
+    expect(within(panel).queryByLabelText(/^Replacement username$/i)).not.toBeInTheDocument();
+    expect(within(panel).queryByLabelText(/^Replacement password$/i)).not.toBeInTheDocument();
+    expect(panel).toHaveTextContent(/Visible only as credentialState configured/i);
+    expect(panel).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|••••|placeholder/i);
+
+    fireEvent.click(within(panel).getByLabelText(/Replace credentials/i));
+    expect(within(panel).getByLabelText(/^Replacement username$/i)).toHaveValue("");
+    expect(within(panel).getByLabelText(/^Replacement password$/i)).toHaveValue("");
+    expect(within(panel).getByLabelText(/^Replacement username$/i)).not.toHaveAttribute("placeholder");
+    expect(within(panel).getByLabelText(/^Replacement password$/i)).not.toHaveAttribute("placeholder");
+    expect(commandCalls("proxy_validate")).toHaveLength(0);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(0);
+  });
+
   it("checks and saves a fixed proxy draft through typed sidecar wrappers without rendering raw credentials", async () => {
     const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
     const checkedProxy = fixedProxySummary({
@@ -686,10 +717,27 @@ describe("ThePrivator profile library UI", () => {
     expect(commandCalls("profiles_proxy_update")).toHaveLength(1);
   });
 
-  it("keeps previous proxy truth and editable draft visible when save returns a typed sidecar error", async () => {
+  it.each([
+    {
+      code: "PROXY_INVALID",
+      message: "Proxy endpoint failed validation.",
+      detailRef: "sidecar-proxy-save-detail",
+      method: "profiles.proxy.update",
+    },
+    {
+      code: "PROXY_PAC_UNSUPPORTED",
+      message: "PAC proxy configuration is not supported by the fixed-server profile proxy contract.",
+      detailRef: "sidecar-proxy-pac-detail",
+      method: "profiles.proxy.update",
+    },
+  ])("keeps previous proxy truth and diagnostic lookup visible when save returns $code", async ({ code, message, detailRef, method }) => {
     const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
     mockStartup([profile]);
-    mockInvoke.mockRejectedValueOnce(profileError("PROXY_INVALID", "Proxy endpoint failed validation.", "sidecar-proxy-save-detail"));
+    mockInvoke
+      .mockRejectedValueOnce(profileError(code, message, detailRef))
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: code, method })],
+      }));
 
     render(<App />);
 
@@ -703,15 +751,22 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "8080" } });
     fireEvent.click(within(panel).getByRole("button", { name: /save proxy/i }));
 
-    await waitFor(() => expect(panel).toHaveTextContent(/PROXY_INVALID/i));
-    expect(panel).toHaveTextContent(/Proxy endpoint failed validation/i);
-    expect(panel).toHaveTextContent(/sidecar-proxy-save-detail/i);
-    expect(within(panel).getByRole("button", { name: /lookup diagnostics for sidecar-proxy-save-detail/i })).toBeEnabled();
+    await waitFor(() => expect(panel).toHaveTextContent(code));
+    expect(panel).toHaveTextContent(message);
+    expect(panel).toHaveTextContent(detailRef);
     expect(within(panel).getByLabelText(/Host/i)).toHaveValue("proxy.example");
     expect(summary).toHaveTextContent(/Direct connection/i);
     expect(summary).not.toHaveTextContent(/proxy\.example/i);
     expect(commandCalls("profiles_proxy_update")).toHaveLength(1);
     expect(commandCalls("profiles_list")).toHaveLength(1);
+
+    fireEvent.click(within(panel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(code);
+    expect(lookupPanel).toHaveTextContent(method);
+    expect(lookupPanel).toHaveTextContent(detailRef);
+    expect(commandCalls("diagnostics_lookup")).toHaveLength(1);
   });
 
   it("blocks proxy check and save while Chromium is running", async () => {
@@ -725,9 +780,11 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
     const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
 
+    const directMode = within(panel).getByLabelText(/Direct/i);
     const fixedMode = within(panel).getByLabelText(/Fixed server/i);
     const checkProxyButton = within(panel).getByRole("button", { name: /check proxy/i });
     const saveProxyButton = within(panel).getByRole("button", { name: /save proxy/i });
+    expect(directMode).toBeDisabled();
     expect(fixedMode).toBeDisabled();
     expect(checkProxyButton).toBeDisabled();
     expect(checkProxyButton).toHaveAccessibleDescription(/saved proxy edits apply on the next launch/i);
@@ -765,6 +822,8 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
     const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
 
+    expect(within(panel).getByLabelText(/Direct/i)).toBeDisabled();
+    expect(within(panel).getByLabelText(/Fixed server/i)).toBeDisabled();
     expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
     expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
     expect(panel).toHaveTextContent(/Proxy changes are disabled while Chromium is launching/i);
@@ -805,6 +864,8 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
     const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
 
+    expect(within(panel).getByLabelText(/Direct/i)).toBeDisabled();
+    expect(within(panel).getByLabelText(/Fixed server/i)).toBeDisabled();
     expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
     expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
     expect(panel).toHaveTextContent(/Proxy changes are disabled while Chromium is stopping/i);
@@ -817,7 +878,7 @@ describe("ThePrivator profile library UI", () => {
     });
   });
 
-  it("shows local proxy draft errors and blocks sidecar calls until fixed", async () => {
+  it("shows local proxy draft errors for malformed host, port, and replacement credentials while blocking sidecar calls", async () => {
     const profile = profileRecord({ name: "Research", proxy: directProxySummary() });
     mockStartup([profile]);
 
@@ -831,6 +892,22 @@ describe("ThePrivator profile library UI", () => {
     fireEvent.change(within(panel).getByLabelText(/Host/i), { target: { value: "https://proxy.example/path" } });
     expect(within(panel).getByLabelText(/Host/i)).toHaveAttribute("aria-invalid", "true");
     expect(panel).toHaveTextContent(/not a URL, path, argv, or userinfo/i);
+    expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
+
+    fireEvent.change(within(panel).getByLabelText(/Host/i), { target: { value: "proxy.example" } });
+    fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "0" } });
+    expect(within(panel).getByLabelText(/Port/i)).toHaveAttribute("aria-invalid", "true");
+    expect(panel).toHaveTextContent(/whole-number TCP port from 1 to 65535/i);
+    expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
+
+    fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "8080" } });
+    fireEvent.click(within(panel).getByLabelText(/Replace credentials/i));
+    fireEvent.change(within(panel).getByLabelText(/^Replacement username$/i), { target: { value: "proxy-user-should-not-leak" } });
+    expect(within(panel).getByLabelText(/^Replacement username$/i)).toHaveAttribute("aria-invalid", "true");
+    expect(within(panel).getByLabelText(/^Replacement password$/i)).toHaveAttribute("aria-invalid", "true");
+    expect(panel).toHaveTextContent(/username and password are both required/i);
     expect(within(panel).getByRole("button", { name: /check proxy/i })).toBeDisabled();
     expect(within(panel).getByRole("button", { name: /save proxy/i })).toBeDisabled();
     expect(commandCalls("proxy_validate")).toHaveLength(0);
@@ -2522,6 +2599,8 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("openIdentityAuditPage");
     expect(source).toContain("validateProxy");
     expect(source).toContain("updateProfileProxy");
+    expect(source).not.toMatch(/value=\"pac\"|value='pac'|value=\"system\"|value='system'|value=\"directFallback\"|value='directFallback'/);
+    expect(source).not.toMatch(/PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/);
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs|shell)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
