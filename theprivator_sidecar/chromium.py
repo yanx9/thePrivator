@@ -32,7 +32,6 @@ from .identity_runtime import (
     build_identity_runtime_plan,
 )
 from .profiles import STORE_DIR, ProfileRecord, ProfileStore, utc_now_iso
-from .proxy import DIRECT_PROXY_MODE
 from .protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
@@ -42,8 +41,15 @@ from .protocol import (
     IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
-    PROXY_LAUNCH_UNSUPPORTED,
+    PROXY_LAUNCH_ARG_UNSAFE,
     SidecarError,
+)
+from .proxy_runtime import (
+    PROXY_SERVER_ARG_PREFIX,
+    ProxyRuntimePlan,
+    build_proxy_runtime_plan,
+    is_rejected_launch_switch,
+    validate_proxy_server_launch_arg,
 )
 
 try:  # pragma: no cover - exercised through the available dependency in CI/dev.
@@ -222,7 +228,7 @@ def status(store_root: Union[str, Path]) -> JsonObject:
 def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Launch Chromium for a stored profile and record only transient runtime state."""
     profile = _load_profile(store_root, profile_id)
-    _ensure_proxy_launch_supported(profile)
+    proxy_plan = build_proxy_runtime_plan(profile.proxy)
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
     records = registry.read()
@@ -253,7 +259,10 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         executable,
         user_data_path,
         "about:blank",
-        extra_args=_identity_launch_args(identity_plan, extension_artifact),
+        extra_args=[
+            *_identity_launch_args(identity_plan, extension_artifact),
+            *proxy_plan.launch_args,
+        ],
     )
     if identity_plan.requires_cdp:
         _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
@@ -294,6 +303,7 @@ def open_identity_audit_page(
 ) -> JsonObject:
     """Open one curated public checker page through the internal CDP boundary."""
     profile = _load_profile(store_root, profile_id)
+    proxy_plan = build_proxy_runtime_plan(profile.proxy)
     audit_page = _safe_audit_page_metadata(page)
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
@@ -317,6 +327,7 @@ def open_identity_audit_page(
         store_root,
         profile,
         identity_plan,
+        proxy_plan,
         audit_page,
         audit_version=audit_version,
         active=active,
@@ -431,6 +442,14 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
         if arg == _REMOTE_DEBUGGING_ARG or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
             safe_args.append(arg)
             continue
+        if arg.startswith(PROXY_SERVER_ARG_PREFIX):
+            safe_args.append(validate_proxy_server_launch_arg(arg))
+            continue
+        if is_rejected_launch_switch(arg):
+            raise SidecarError(
+                code=PROXY_LAUNCH_ARG_UNSAFE,
+                message="Chromium proxy launch arguments could not be prepared.",
+            )
         if _is_allowed_identity_value_arg(arg):
             safe_args.append(arg)
             continue
@@ -571,13 +590,13 @@ def _launch_and_open_identity_audit_page(
     store_root: Union[str, Path],
     profile: ProfileRecord,
     identity_plan: IdentityRuntimePlan,
+    proxy_plan: ProxyRuntimePlan,
     audit_page: JsonObject,
     *,
     audit_version: int,
     active: Mapping[str, RuntimeRecord],
     registry: RuntimeRegistry,
 ) -> JsonObject:
-    _ensure_proxy_launch_supported(profile)
     executable = discover_executable()
     user_data_path = resolve_user_data_path(store_root, profile)
     try:
@@ -594,11 +613,14 @@ def _launch_and_open_identity_audit_page(
         executable,
         user_data_path,
         "about:blank",
-        extra_args=_identity_launch_args(
-            identity_plan,
-            extension_artifact,
-            force_remote_debugging=True,
-        ),
+        extra_args=[
+            *_identity_launch_args(
+                identity_plan,
+                extension_artifact,
+                force_remote_debugging=True,
+            ),
+            *proxy_plan.launch_args,
+        ],
     )
     _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
     process = _spawn_chromium(args, owner_token=owner_token)
@@ -802,17 +824,6 @@ def _load_profile(store_root: Union[str, Path], profile_id: str) -> ProfileRecor
             message="Chromium profileId is required.",
         )
     return ProfileStore(store_root).get(profile_id)
-
-
-
-def _ensure_proxy_launch_supported(profile: ProfileRecord) -> None:
-    proxy = profile.proxy if isinstance(profile.proxy, Mapping) else {}
-    if proxy.get("mode") == DIRECT_PROXY_MODE:
-        return
-    raise SidecarError(
-        code=PROXY_LAUNCH_UNSUPPORTED,
-        message="Saved proxy configurations cannot launch Chromium until runtime proxy support is implemented.",
-    )
 
 
 

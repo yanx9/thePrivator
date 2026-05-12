@@ -1136,7 +1136,7 @@ def test_profiles_malformed_params_return_invalid_request(payload):
     assert "Traceback" not in proc.stderr
 
 
-def test_fixed_proxy_chromium_launch_fails_before_direct_runtime_fallback_with_diagnostic(tmp_path):
+def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnostic(tmp_path):
     from theprivator_sidecar.diagnostics import lookup_by_detail_ref
 
     store_root = str(tmp_path / "fixed-proxy-launch-app-data-should-not-leak")
@@ -1161,9 +1161,9 @@ def test_fixed_proxy_chromium_launch_fails_before_direct_runtime_fallback_with_d
                     "proxy": {
                         "proxyVersion": 1,
                         "mode": "fixedServer",
-                        "protocol": "http",
+                        "protocol": "socks5",
                         "host": "proxy.example.invalid",
-                        "port": 8080,
+                        "port": 9050,
                         "credentials": {
                             "username": SENTINEL_USERNAME,
                             "password": SENTINEL_PASSWORD,
@@ -1188,15 +1188,15 @@ def test_fixed_proxy_chromium_launch_fails_before_direct_runtime_fallback_with_d
 
     response = parse_ndjson(launch_proc.stdout)[0]
     diagnostic = parse_ndjson(launch_proc.stderr)[0]
-    error = assert_error_envelope(response, "PROXY_LAUNCH_UNSUPPORTED", "fixed-proxy-chromium-launch")
+    error = assert_error_envelope(response, "PROXY_SOCKS_AUTH_UNSUPPORTED", "fixed-proxy-chromium-launch")
     assert diagnostic["method"] == "chromium.launch"
     assert diagnostic["status"] == "error"
-    assert diagnostic["errorCode"] == "PROXY_LAUNCH_UNSUPPORTED"
+    assert diagnostic["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
     assert diagnostic["detailRef"] == error["detailRef"]
     lookup = lookup_by_detail_ref(store_root, error["detailRef"])
     assert lookup["found"] is True
     assert lookup["entries"][0]["method"] == "chromium.launch"
-    assert lookup["entries"][0]["errorCode"] == "PROXY_LAUNCH_UNSUPPORTED"
+    assert lookup["entries"][0]["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
     assert lookup["entries"][0]["detailRef"] == error["detailRef"]
     assert not Path(store_root, "profile-store", "runtime").exists()
     combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr

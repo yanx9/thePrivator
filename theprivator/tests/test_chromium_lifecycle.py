@@ -20,7 +20,8 @@ from theprivator_sidecar.protocol import (
     IDENTITY_EXTENSION_FAILED,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
-    PROXY_LAUNCH_UNSUPPORTED,
+    PROXY_LAUNCH_ARG_UNSAFE,
+    PROXY_SOCKS_AUTH_UNSUPPORTED,
     SidecarError,
 )
 
@@ -110,16 +111,16 @@ def assert_no_runtime_truth(profile: Mapping[str, Any]) -> None:
     assert forbidden.isdisjoint(profile.keys())
 
 
-def test_fixed_proxy_launch_fails_before_executable_discovery_or_spawn(tmp_path, monkeypatch):
+def test_socks_proxy_credentials_fail_before_executable_discovery_or_spawn(tmp_path, monkeypatch):
     profile = create_profile(tmp_path)
     ProfileStore(tmp_path).update_proxy(
         profile["id"],
         {
             "proxyVersion": 1,
             "mode": "fixedServer",
-            "protocol": "http",
+            "protocol": "socks5",
             "host": "proxy.example.invalid",
-            "port": 8080,
+            "port": 9050,
             "credentials": {
                 "username": "proxy-user-sentinel-e2e33f73",
                 "password": "proxy-password-sentinel-74d86415",
@@ -128,10 +129,10 @@ def test_fixed_proxy_launch_fails_before_executable_discovery_or_spawn(tmp_path,
     )
 
     def fail_discover_executable():
-        raise AssertionError("fixed-proxy launch must fail before executable discovery")
+        raise AssertionError("SOCKS credential failure must happen before executable discovery")
 
     def fail_spawn(*args, **kwargs):
-        raise AssertionError("fixed-proxy launch must fail before spawning Chromium")
+        raise AssertionError("SOCKS credential failure must happen before spawning Chromium")
 
     monkeypatch.setattr(chromium, "discover_executable", fail_discover_executable)
     monkeypatch.setattr(chromium, "_spawn_chromium", fail_spawn)
@@ -139,7 +140,7 @@ def test_fixed_proxy_launch_fails_before_executable_discovery_or_spawn(tmp_path,
     with pytest.raises(SidecarError) as exc_info:
         chromium.launch(tmp_path, profile["id"])
 
-    error = assert_sidecar_error(exc_info, PROXY_LAUNCH_UNSUPPORTED)
+    error = assert_sidecar_error(exc_info, PROXY_SOCKS_AUTH_UNSUPPORTED)
     encoded_error = json.dumps(error.to_dict(), sort_keys=True)
     assert "proxy-user-sentinel" not in encoded_error
     assert "proxy-password-sentinel" not in encoded_error
@@ -182,6 +183,8 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
         assert "--disable-extensions-except" not in "\n".join(argv)
         assert "--remote-debugging-port" not in "\n".join(argv)
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" not in argv
+        assert not any(arg.startswith("--proxy-server=") for arg in argv)
+        assert "direct://" not in "\n".join(argv)
 
         status = chromium.status(tmp_path)
         assert status["runningCount"] == 1
@@ -218,11 +221,92 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
     assert_no_runtime_truth(stored_profile)
 
 
+@pytest.mark.parametrize(
+    ("protocol", "port", "expected_arg"),
+    [
+        ("http", 8080, "--proxy-server=http://proxy.example.invalid:8080"),
+        ("https", 8443, "--proxy-server=https://proxy.example.invalid:8443"),
+        ("socks4", 9040, "--proxy-server=socks4://proxy.example.invalid:9040"),
+        ("socks5", 9050, "--proxy-server=socks5://proxy.example.invalid:9050"),
+    ],
+)
+def test_fixed_server_no_auth_launch_adds_one_safe_proxy_arg_without_direct_fallback(
+    tmp_path,
+    monkeypatch,
+    protocol,
+    port,
+    expected_arg,
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(
+        profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": protocol,
+            "host": "proxy.example.invalid",
+            "port": port,
+        },
+    )
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / f"argv-{protocol}.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+
+    launch = chromium.launch(tmp_path, profile["id"])
+
+    try:
+        assert launch["status"] == "running"
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        proxy_args = [arg for arg in argv if arg.startswith("--proxy-server=")]
+        assert proxy_args == [expected_arg]
+        joined = "\n".join(argv)
+        assert "direct://" not in joined
+        assert "--proxy-bypass-list" not in joined
+        assert "username" not in joined
+        assert "password" not in joined
+        assert "@" not in expected_arg
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_chromium_launch_arg_validator_rejects_unsafe_proxy_debug_and_path_args(tmp_path):
+    executable = tmp_path / "chromium"
+    executable.write_text("", encoding="utf-8")
+    user_data_dir = tmp_path / "user-data"
+    unsafe_args = [
+        "--proxy-server=http://user:pass@proxy.example.invalid:8080",
+        "--proxy-server=direct://",
+        "--proxy-bypass-list=<-loopback>",
+        "--remote-debugging-port=9222",
+        f"--user-data-dir={tmp_path}",
+    ]
+
+    for unsafe_arg in unsafe_args:
+        with pytest.raises(SidecarError) as exc_info:
+            chromium.build_launch_args(executable, user_data_dir, "about:blank", extra_args=[unsafe_arg])
+
+        error = assert_sidecar_error(exc_info, PROXY_LAUNCH_ARG_UNSAFE)
+        encoded_error = json.dumps(error.to_dict(), sort_keys=True)
+        assert "user:pass" not in encoded_error
+        assert str(tmp_path) not in encoded_error
+
+
 def test_masked_identity_launch_generates_extension_and_applies_cdp_before_registry_write(
     tmp_path, monkeypatch
 ):
     profile = create_profile(tmp_path)
     ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    ProfileStore(tmp_path).update_proxy(
+        profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "socks5",
+            "host": "127.0.0.1",
+            "port": 9050,
+        },
+    )
     fake_chromium = make_fake_chromium(tmp_path)
     argv_capture = tmp_path / "argv.json"
     monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
@@ -268,6 +352,11 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
         joined_argv = "\n".join(argv)
         assert "--remote-debugging-port=0" in argv
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
+        assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
+            "--proxy-server=socks5://127.0.0.1:9050"
+        ]
+        assert "direct://" not in joined_argv
+        assert "--proxy-bypass-list" not in joined_argv
         load_extension = next(arg for arg in argv if arg.startswith("--load-extension="))
         disable_except = next(arg for arg in argv if arg.startswith("--disable-extensions-except="))
         assert load_extension.split("=", 1)[1] == disable_except.split("=", 1)[1]
@@ -305,6 +394,16 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
     tmp_path, monkeypatch
 ):
     profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(
+        profile["id"],
+        {
+            "proxyVersion": 1,
+            "mode": "fixedServer",
+            "protocol": "http",
+            "host": "proxy.example.invalid",
+            "port": 18080,
+        },
+    )
     fake_chromium = make_fake_chromium(tmp_path)
     argv_capture = tmp_path / "argv.json"
     monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
@@ -366,6 +465,11 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
 
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         assert "--remote-debugging-port=0" in argv
+        assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
+            "--proxy-server=http://proxy.example.invalid:18080"
+        ]
+        assert "direct://" not in "\n".join(argv)
+        assert "--proxy-bypass-list" not in "\n".join(argv)
         assert not any(arg.startswith("--load-extension=") for arg in argv)
         assert chromium.status(tmp_path)["runningCount"] == 1
         assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])

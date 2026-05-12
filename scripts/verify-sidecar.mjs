@@ -539,9 +539,9 @@ function assertPersistedProxyCredentials(storeRoot, profileId) {
   assert(proxy?.mode === "fixedServer", "Persisted proxy did not use fixedServer mode.", {
     proxyMode: proxy?.mode,
   });
-  assert(proxy?.protocol === "http", "Persisted proxy did not keep the expected protocol.");
+  assert(proxy?.protocol === "socks5", "Persisted proxy did not keep the expected protocol.");
   assert(proxy?.host === "proxy.s01-smoke.example", "Persisted proxy did not keep the expected host.");
-  assert(proxy?.port === 18080, "Persisted proxy did not keep the expected port.");
+  assert(proxy?.port === 19050, "Persisted proxy did not keep the expected port.");
   assert(proxy?.credentials?.username === PROXY_USERNAME_SENTINEL, "Persisted proxy username sentinel was not found at the targeted store path.", {
     hasCredentialsObject: Boolean(proxy?.credentials),
   });
@@ -572,14 +572,14 @@ function assertChromiumLaunchGuardEnvelope(response, diagnostic) {
   assert(response.id === "verify-chromium-fixed-proxy-guard", "Chromium launch guard did not echo request id.");
   assert(response.ok === false, "Chromium launch guard did not return ok:false.");
   assert(
-    response.error?.code === "PROXY_LAUNCH_UNSUPPORTED",
-    "Chromium launch guard did not return PROXY_LAUNCH_UNSUPPORTED.",
+    response.error?.code === "PROXY_SOCKS_AUTH_UNSUPPORTED",
+    "Chromium launch guard did not return PROXY_SOCKS_AUTH_UNSUPPORTED.",
     { actualErrorCode: response.error?.code },
   );
   assert(response.error?.recoverable === true, "Chromium launch guard error is not recoverable.");
   assert(response.error?.detailRef, "Chromium launch guard error is missing detailRef.");
   assert(diagnostic.status === "error", "Chromium launch guard diagnostic did not report error status.");
-  assert(diagnostic.errorCode === "PROXY_LAUNCH_UNSUPPORTED", "Chromium launch guard diagnostic lost errorCode.");
+  assert(diagnostic.errorCode === "PROXY_SOCKS_AUTH_UNSUPPORTED", "Chromium launch guard diagnostic lost errorCode.");
   assert(diagnostic.detailRef === response.error.detailRef, "Chromium launch guard detailRef mismatch.");
   assertNoProxyCredentialSentinels(response, "Chromium launch guard public response");
   assertNoProxyCredentialSentinels(diagnostic, "Chromium launch guard stderr diagnostic");
@@ -737,9 +737,9 @@ try {
   const fixedProxyDraft = {
     proxyVersion: 1,
     mode: "fixedServer",
-    protocol: "http",
+    protocol: "socks5",
     host: "proxy.s01-smoke.example",
-    port: 18080,
+    port: 19050,
     credentials: {
       username: PROXY_USERNAME_SENTINEL,
       password: PROXY_PASSWORD_SENTINEL,
@@ -747,11 +747,11 @@ try {
   };
   const fixedProxySummary = {
     mode: "fixedServer",
-    protocol: "http",
+    protocol: "socks5",
     host: "proxy.s01-smoke.example",
-    port: 18080,
+    port: 19050,
     credentialState: "configured",
-    summary: "http://proxy.s01-smoke.example:18080",
+    summary: "socks5://proxy.s01-smoke.example:19050",
   };
   const directProxySummary = {
     mode: "direct",

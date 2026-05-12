@@ -501,7 +501,7 @@ function assertPresetList(result) {
 }
 
 function assertAppliedIdentity(result, profile, preset) {
-  assert(result.storeVersion === 2, "Identity apply did not preserve store v2.", {
+  assert(result.storeVersion === 3, "Identity apply did not preserve store v3.", {
     storeVersion: result.storeVersion,
   });
   assert(Array.isArray(result.warnings), "Identity apply did not return warnings array.");
@@ -657,7 +657,7 @@ function assertProfilesJsonClean(storeRoot, profileId) {
   const profilesPath = join(storeRoot, "profile-store", "profiles.json");
   assert(existsSync(profilesPath), "profiles.json was not written for the S02 proof profile.");
   const payload = JSON.parse(readFileSync(profilesPath, "utf8"));
-  assert(payload.storeVersion === 2, "profiles.json did not remain store v2.", {
+  assert(payload.storeVersion === 3, "profiles.json did not remain store v3.", {
     storeVersion: payload.storeVersion,
   });
   assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");
@@ -826,7 +826,7 @@ function runRealChromiumIdentityProof() {
         "profiles.create",
         { storeRoot, name: SMOKE_PROFILE_NAME },
       )).result;
-      assert(create.storeVersion === 2, "Profile create did not return store v2.", {
+      assert(create.storeVersion === 3, "Profile create did not return store v3.", {
         storeVersion: create.storeVersion,
       });
       const createdProfile = assertProfileShape(create.profile);
