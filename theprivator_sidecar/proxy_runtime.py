@@ -44,6 +44,8 @@ _REJECTED_RUNTIME_SWITCH_PREFIXES = (
     "--remote-debugging-address",
     "--remote-debugging-port",
     "--user-data-dir",
+    "--ignore-certificate-errors",
+    "--ignore-certificate-errors-spki-list",
 )
 
 

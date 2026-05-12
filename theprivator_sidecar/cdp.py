@@ -373,6 +373,29 @@ def _validate_public_target_url(url: str) -> None:
         raise _cdp_error()
 
 
+def _is_allowed_navigation_url(url: str, *, allowed_urls: Optional[Collection[str]]) -> bool:
+    if isinstance(url, str) and url.startswith("http://127.0.0.1:"):
+        return True
+    if allowed_urls is None:
+        return False
+    if not isinstance(url, str) or not url or any(ord(character) < 32 for character in url):
+        return False
+    if url not in allowed_urls:
+        return False
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        return False
+    if not parsed.hostname or parsed.hostname in _LOOPBACK_HOSTS:
+        return False
+    if port is not None and (port <= 0 or port > 65535):
+        return False
+    return not parsed.fragment
+
+
 class CdpClient:
     """Tiny JSON-RPC wrapper over ``websocket-client`` for allowlisted helpers."""
 
@@ -588,8 +611,9 @@ def page_navigate(
     url: str,
     *,
     timeout_seconds: Optional[float] = None,
+    allowed_urls: Optional[Collection[str]] = None,
 ) -> JsonObject:
-    if not isinstance(url, str) or not url.startswith("http://127.0.0.1:"):
+    if not _is_allowed_navigation_url(url, allowed_urls=allowed_urls):
         raise _cdp_error()
     result = client.command("Page.navigate", {"url": url}, timeout_seconds=timeout_seconds)
     if not isinstance(result, Mapping) or isinstance(result.get("errorText"), str):

@@ -186,9 +186,11 @@ def test_proxy_launch_arg_validator_rejects_unsafe_proxy_server_values(arg):
         "--no-proxy-server",
         "--remote-debugging-port=9222",
         "--user-data-dir=/tmp/profile",
+        "--ignore-certificate-errors",
+        "--ignore-certificate-errors-spki-list=proof-only-pin",
     ],
 )
-def test_reserved_proxy_debug_and_path_switches_are_classified_as_rejected(arg):
+def test_reserved_proxy_debug_path_and_certificate_switches_are_classified_as_rejected(arg):
     assert is_rejected_launch_switch(arg) is True
 
 
