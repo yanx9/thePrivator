@@ -292,5 +292,36 @@ def test_identity_and_proxy_auth_extensions_compose_with_webrtc_and_cdp_flags(tm
         for sentinel in SENTINEL_VALUES:
             assert sentinel not in joined
         assert "direct://" not in joined
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        assert status["profiles"] == [
+            {
+                "profileId": profile["id"],
+                "status": "running",
+                "pid": launch["pid"],
+                "startedAt": launch["startedAt"],
+                "userDataDir": profile["storage"]["userDataDir"],
+            }
+        ]
+        encoded_status = json.dumps(status, sort_keys=True)
+        encoded_registry = (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+            encoding="utf-8"
+        )
+        redacted_runtime_surfaces = [encoded_status, encoded_registry]
+        for surface in redacted_runtime_surfaces:
+            assert "ws://" not in surface
+            assert "--remote-debugging-port" not in surface
+            assert "proxy-auth-extensions" not in surface
+            for extension_dir in extension_dirs:
+                assert str(extension_dir) not in surface
+            for sentinel in SENTINEL_VALUES:
+                assert sentinel not in surface
+
+        stopped = chromium.stop(tmp_path, profile["id"])
+        assert stopped["status"] == "stopped"
+        assert stopped["termination"] in {"graceful", "reconciled"}
+        assert stopped["runningCount"] == 0
+        assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
     finally:
         chromium.stop(tmp_path, profile["id"])

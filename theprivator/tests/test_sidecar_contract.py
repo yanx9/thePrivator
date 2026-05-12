@@ -16,6 +16,34 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SENTINEL_USERNAME = "proxy-user-sentinel-e2e33f73"
 SENTINEL_PASSWORD = "proxy-password-sentinel-74d86415"
 SENTINEL_VALUES = (SENTINEL_USERNAME, SENTINEL_PASSWORD)
+FORBIDDEN_PROXY_RUNTIME_MARKERS = (
+    *SENTINEL_VALUES,
+    "proxy-auth-extensions",
+    "--proxy-server",
+    "proxy-server",
+    "--load-extension",
+    "load-extension",
+    "--remote-debugging-port",
+    "remote-debugging",
+    "DevToolsActivePort",
+    "debugPort",
+    "ws://",
+    "wss://",
+    "argv-should-not-leak",
+)
+PERSISTED_REQUEST_DIAGNOSTIC_KEYS = {
+    "schemaVersion",
+    "ts",
+    "source",
+    "event",
+    "status",
+    "logPath",
+    "requestId",
+    "method",
+    "durationMs",
+    "errorCode",
+    "detailRef",
+}
 
 
 def run_sidecar(input_text, env=None):
@@ -131,6 +159,24 @@ def assert_redacted_stderr(*procs, store_root, profile_name=None):
     assert "proxy-user-sentinel" not in stderr
     assert "proxy-password-sentinel" not in stderr
     assert "Traceback" not in stderr
+
+
+def assert_proxy_failure_lookup_entry(entry, *, request_id, code, detail_ref):
+    assert set(entry) == PERSISTED_REQUEST_DIAGNOSTIC_KEYS
+    assert entry["schemaVersion"] == 1
+    assert entry["source"] == "python-sidecar"
+    assert entry["event"] == "sidecar.request"
+    assert entry["status"] == "error"
+    assert entry["requestId"] == request_id
+    assert entry["method"] == "chromium.launch"
+    assert isinstance(entry["durationMs"], (int, float))
+    assert entry["durationMs"] >= 0
+    assert entry["errorCode"] == code
+    assert entry["detailRef"] == detail_ref
+    assert entry["logPath"] == "profile-store/diagnostics/events.jsonl"
+    encoded = json.dumps(entry, sort_keys=True)
+    for marker in FORBIDDEN_PROXY_RUNTIME_MARKERS:
+        assert marker not in encoded
 
 
 def test_health_status_success_returns_runtime_metadata_and_diagnostics():
@@ -1136,6 +1182,68 @@ def test_profiles_malformed_params_return_invalid_request(payload):
     assert "Traceback" not in proc.stderr
 
 
+def test_proxy_runtime_diagnostics_keep_only_safe_failure_metadata(tmp_path):
+    from theprivator_sidecar.diagnostics import append_events, lookup_by_detail_ref
+
+    store_root = tmp_path / "proxy-runtime-diagnostics"
+    failure_codes = [
+        "PROXY_SOCKS_AUTH_UNSUPPORTED",
+        "PROXY_AUTH_HELPER_FAILED",
+        "PROXY_CONNECTIVITY_FAILED",
+        "PROXY_PROOF_FAILED",
+    ]
+    safe_events = [
+        {
+            "event": "sidecar.request",
+            "requestId": f"proxy-runtime-safe-{index}",
+            "method": "chromium.launch",
+            "status": "error",
+            "durationMs": 1.5 + index,
+            "errorCode": code,
+            "detailRef": f"sidecar-proxy-safe-{index}",
+        }
+        for index, code in enumerate(failure_codes)
+    ]
+    unsafe_detail_refs = [
+        "sidecar-proxy-server",
+        "sidecar-proxy-auth-extensions",
+        "sidecar-load-extension",
+        "sidecar-remote-debugging-port",
+        "sidecar-DevToolsActivePort",
+        "sidecar-debugPort",
+        "sidecar-argv",
+    ]
+    unsafe_events = [
+        {**safe_events[0], "requestId": f"unsafe-proxy-runtime-{index}", "detailRef": detail_ref}
+        for index, detail_ref in enumerate(unsafe_detail_refs)
+    ]
+
+    result = append_events(store_root, [*safe_events, *unsafe_events])
+
+    assert result == {"ok": True, "written": len(safe_events), "skipped": False}
+    for event in safe_events:
+        lookup = lookup_by_detail_ref(store_root, event["detailRef"])
+        assert lookup["found"] is True
+        assert lookup["logPath"] == "profile-store/diagnostics/events.jsonl"
+        assert len(lookup["entries"]) == 1
+        assert_proxy_failure_lookup_entry(
+            lookup["entries"][0],
+            request_id=event["requestId"],
+            code=event["errorCode"],
+            detail_ref=event["detailRef"],
+        )
+    for detail_ref in unsafe_detail_refs:
+        assert lookup_by_detail_ref(store_root, detail_ref) == {
+            "found": False,
+            "logPath": "profile-store/diagnostics/events.jsonl",
+            "entries": [],
+        }
+
+    log_text = Path(store_root, "profile-store", "diagnostics", "events.jsonl").read_text(encoding="utf-8")
+    for marker in FORBIDDEN_PROXY_RUNTIME_MARKERS:
+        assert marker not in log_text
+
+
 def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnostic(tmp_path):
     from theprivator_sidecar.diagnostics import lookup_by_detail_ref
 
@@ -1195,9 +1303,13 @@ def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnos
     assert diagnostic["detailRef"] == error["detailRef"]
     lookup = lookup_by_detail_ref(store_root, error["detailRef"])
     assert lookup["found"] is True
-    assert lookup["entries"][0]["method"] == "chromium.launch"
-    assert lookup["entries"][0]["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
-    assert lookup["entries"][0]["detailRef"] == error["detailRef"]
+    assert len(lookup["entries"]) == 1
+    assert_proxy_failure_lookup_entry(
+        lookup["entries"][0],
+        request_id="fixed-proxy-chromium-launch",
+        code="PROXY_SOCKS_AUTH_UNSUPPORTED",
+        detail_ref=error["detailRef"],
+    )
     assert not Path(store_root, "profile-store", "runtime").exists()
     combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr
     assert_no_proxy_secret_values(combined + json.dumps(lookup, sort_keys=True))
@@ -1363,8 +1475,13 @@ def test_http_proxy_auth_helper_generation_failure_is_typed_redacted_and_diagnos
     assert diagnostic["detailRef"] == error["detailRef"]
     lookup = lookup_by_detail_ref(store_root, error["detailRef"])
     assert lookup["found"] is True
-    assert lookup["entries"][0]["method"] == "chromium.launch"
-    assert lookup["entries"][0]["errorCode"] == "PROXY_AUTH_HELPER_FAILED"
+    assert len(lookup["entries"]) == 1
+    assert_proxy_failure_lookup_entry(
+        lookup["entries"][0],
+        request_id="auth-helper-launch",
+        code="PROXY_AUTH_HELPER_FAILED",
+        detail_ref=error["detailRef"],
+    )
     assert not argv_capture.exists()
 
     combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + launch_proc.stdout + launch_proc.stderr
