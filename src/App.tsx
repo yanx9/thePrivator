@@ -2362,7 +2362,7 @@ function ProfileCard({
         <h4>Typed defaults</h4>
         <dl className="defaults-grid">
           <Metric label="Browser" value={formatBrowser(profile.defaults.browser)} />
-          <Metric label="Proxy" value={`${profile.defaults.proxyMode} proxy`} />
+          <Metric label="Proxy" value={profile.proxy.summary} />
           <Metric label="Fingerprint" value={`${profile.defaults.fingerprintMode} fingerprinting`} />
           <Metric label="Start URL" value={profile.defaults.startUrl} />
           <Metric label="User-data target" value={profile.storage.userDataDir} />

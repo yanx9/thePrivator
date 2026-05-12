@@ -40,6 +40,14 @@ import type {
   IdentityWarning,
   ProfileIdentity,
   ProfileIdentityMutationSnapshot,
+  ProfileProxyDraft,
+  ProfileProxyMode,
+  ProfileProxyMutationSnapshot,
+  ProfileProxySummary,
+  ProxyCredentialState,
+  ProxyProtocol,
+  ProxyValidationResult,
+  ProxyValidationSnapshot,
   WebRtcPolicy,
   LegacyImportCopyStatus,
   LegacyImportOutcome,
@@ -166,6 +174,33 @@ const FORBIDDEN_AUDIT_FIELDS = new Set([
   "DevToolsActivePort",
 ]);
 
+const FORBIDDEN_PUBLIC_PROXY_FIELD_TOKENS = new Set([
+  "auth",
+  "authorization",
+  "authcredentials",
+  "binarypath",
+  "command",
+  "credential",
+  "credentials",
+  "debugport",
+  "devtoolsactiveport",
+  "executable",
+  "executablepath",
+  "launchargs",
+  "password",
+  "path",
+  "proxyauthorization",
+  "proxypass",
+  "proxypassword",
+  "proxyuser",
+  "proxyusername",
+  "remotedebuggingport",
+  "username",
+  "websocketdebuggerurl",
+  "args",
+  "argv",
+]);
+
 let detailCounter = 0;
 
 export async function getSidecarHealth(): Promise<SidecarHealthSnapshot> {
@@ -266,6 +301,37 @@ export async function validateIdentity(identity: ProfileIdentity): Promise<Ident
     const envelope = await invoke<unknown>("identity_validate", { identity });
     return parseIdentityValidationEnvelope(envelope, new Date().toISOString());
   } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function validateProxy(proxy: ProfileProxyDraft): Promise<ProxyValidationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("proxy_validate", { proxy });
+    return parseProxyValidationEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function updateProfileProxy(
+  profileId: string,
+  proxy: ProfileProxyDraft,
+): Promise<ProfileProxyMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_proxy_update", { profileId, proxy });
+    const snapshot = parseProfileProxyMutationEnvelope(envelope, new Date().toISOString());
+    if (snapshot.profile.id !== profileId) {
+      throw makeProtocolError("The sidecar profile proxy update result did not match the requested profileId.");
+    }
+    return snapshot;
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
     throw normalizeSidecarError(error);
   }
 }
@@ -597,6 +663,29 @@ function parseProfileIdentityMutationEnvelope(value: unknown, receivedAt: string
   };
 }
 
+function parseProfileProxyMutationEnvelope(value: unknown, receivedAt: string): ProfileProxyMutationSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfileMutationResult(envelope.result, {
+    requireProfile: true,
+    requireProfileInList: true,
+    requireWarnings: false,
+  });
+
+  if (!result.profile) {
+    throw makeProtocolError("The sidecar profile proxy mutation result is missing profile.");
+  }
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+    profile: result.profile,
+  };
+}
+
 function parseIdentityPresetListEnvelope(value: unknown, receivedAt: string): IdentityPresetListSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityPresetListResult(envelope.result);
@@ -614,6 +703,20 @@ function parseIdentityPresetListEnvelope(value: unknown, receivedAt: string): Id
 function parseIdentityValidationEnvelope(value: unknown, receivedAt: string): IdentityValidationSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityValidationResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseProxyValidationEnvelope(value: unknown, receivedAt: string): ProxyValidationSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProxyValidationResult(envelope.result);
 
   return {
     requestId: formatRequestId(envelope.requestId),
@@ -880,6 +983,20 @@ function parseIdentityValidationResult(value: unknown): IdentityValidationResult
     identityVersion: 1,
     identity: parseProfileIdentity(record.identity, "identity"),
     warnings: parseIdentityWarningArray(record.warnings, "warnings"),
+  };
+}
+
+function parseProxyValidationResult(value: unknown): ProxyValidationResult {
+  const record = requireRecord(value, "The sidecar proxy validation result must be an object.");
+  assertNoForbiddenPublicProxyFields(record, "proxyValidation");
+  requirePublicKeys(record, ["proxyVersion", "proxy", "warnings"], ["proxyVersion", "proxy", "warnings"], "proxyValidation");
+  requireLiteralNumber(record.proxyVersion, "proxyVersion", 1);
+  const warnings = parseEmptyWarningArray(record.warnings, "warnings");
+
+  return {
+    proxyVersion: 1,
+    proxy: parseProfileProxySummary(record.proxy, "proxy"),
+    warnings,
   };
 }
 
@@ -1298,37 +1415,97 @@ function parseProfileArray(value: unknown): ProfileRecord[] {
 
 function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
   const record = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  assertNoForbiddenPublicProfileFields(record, field);
+  requirePublicKeys(
+    record,
+    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "metadata"],
+    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy"],
+    field,
+  );
   const id = requireNonBlankString(record.id, `${field}.id`);
   const name = requireNonBlankString(record.name, `${field}.name`);
   const createdAt = requireIsoTimestamp(record.createdAt, `${field}.createdAt`);
   const updatedAt = requireIsoTimestamp(record.updatedAt, `${field}.updatedAt`);
+  const proxy = parseProfileProxySummary(record.proxy, `${field}.proxy`);
 
-  const metadata = record.metadata === undefined ? undefined : parseSafeJsonObject(record.metadata, `${field}.metadata`);
+  const metadata = record.metadata === undefined ? undefined : parseSafePublicMetadata(record.metadata, `${field}.metadata`);
 
   return {
     id,
     name,
     createdAt,
     updatedAt,
-    defaults: parseProfileDefaults(record.defaults, `${field}.defaults`),
+    defaults: parseProfileDefaults(record.defaults, `${field}.defaults`, proxy.mode),
     storage: parseProfileStorage(record.storage, id, `${field}.storage`),
     identity: parseProfileIdentity(record.identity, `${field}.identity`),
+    proxy,
     ...(metadata === undefined ? {} : { metadata }),
   };
 }
 
-function parseProfileDefaults(value: unknown, field: string): ProfileDefaults {
+function parseProfileDefaults(value: unknown, field: string, expectedProxyMode: ProfileProxyMode): ProfileDefaults {
   const defaults = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requirePublicKeys(defaults, ["browser", "startUrl", "proxyMode", "fingerprintMode"], ["browser", "startUrl", "proxyMode", "fingerprintMode"], field);
   requireLiteral(defaults.browser, `${field}.browser`, "chromium");
   requireLiteral(defaults.startUrl, `${field}.startUrl`, "about:blank");
-  requireLiteral(defaults.proxyMode, `${field}.proxyMode`, "direct");
+  const proxyMode = requireProfileProxyMode(defaults.proxyMode, `${field}.proxyMode`);
   requireLiteral(defaults.fingerprintMode, `${field}.fingerprintMode`, "disabled");
+
+  if (proxyMode !== expectedProxyMode) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.proxyMode must match the public proxy summary.`);
+  }
 
   return {
     browser: "chromium",
     startUrl: "about:blank",
-    proxyMode: "direct",
+    proxyMode,
     fingerprintMode: "disabled",
+  };
+}
+
+function parseProfileProxySummary(value: unknown, field: string): ProfileProxySummary {
+  const record = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  assertNoForbiddenPublicProxyFields(record, field);
+  requireLiteralNumber(record.proxyVersion, `${field}.proxyVersion`, 1);
+  const mode = requireProfileProxyMode(record.mode, `${field}.mode`);
+
+  if (mode === "direct") {
+    requirePublicKeys(record, ["proxyVersion", "mode", "credentialState", "summary"], ["proxyVersion", "mode", "credentialState", "summary"], field);
+    requireLiteral(record.credentialState, `${field}.credentialState`, "none");
+    requireLiteral(record.summary, `${field}.summary`, "Direct connection");
+    return {
+      proxyVersion: 1,
+      mode,
+      credentialState: "none",
+      summary: "Direct connection",
+    };
+  }
+
+  requirePublicKeys(
+    record,
+    ["proxyVersion", "mode", "protocol", "host", "port", "credentialState", "summary"],
+    ["proxyVersion", "mode", "protocol", "host", "port", "credentialState", "summary"],
+    field,
+  );
+  const protocol = requireProxyProtocol(record.protocol, `${field}.protocol`);
+  const host = requireProxyHost(record.host, `${field}.host`);
+  const port = requireProxyPort(record.port, `${field}.port`);
+  const credentialState = requireProxyCredentialState(record.credentialState, `${field}.credentialState`);
+  const summary = requireProxySummary(record.summary, `${field}.summary`);
+  const expectedSummary = formatProxySummary(protocol, host, port);
+
+  if (summary !== expectedSummary) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.summary must match the redacted proxy endpoint.`);
+  }
+
+  return {
+    proxyVersion: 1,
+    mode,
+    protocol,
+    host,
+    port,
+    credentialState,
+    summary,
   };
 }
 
@@ -1712,6 +1889,13 @@ function containsUnsafeAuditText(value: string): boolean {
       "traceback",
       "proxy_user",
       "proxy_pass",
+      "proxyuser",
+      "proxyusername",
+      "proxypass",
+      "proxypassword",
+      "authcredentials",
+      "credentials",
+      "username=",
       "token=",
       "password=",
       "secret=",
@@ -1761,6 +1945,113 @@ function assertNoForbiddenAuditFields(value: unknown, field: string): void {
   }
 }
 
+function assertNoForbiddenPublicProfileFields(value: unknown, field: string): void {
+  assertNoForbiddenPublicProxyFields(value, field);
+}
+
+function assertNoForbiddenPublicProxyFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenPublicProxyFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_PUBLIC_PROXY_FIELD_TOKENS.has(fieldToken(key))) {
+      throw makeProtocolError(`The sidecar public profile field ${field}.${key} must not expose proxy credentials or runtime details.`);
+    }
+    assertNoForbiddenPublicProxyFields(item, `${field}.${key}`);
+  }
+}
+
+function requirePublicKeys(record: Record<string, unknown>, allowed: string[], required: string[], field: string): void {
+  const allowedSet = new Set(allowed);
+  const requiredSet = new Set(required);
+  for (const key of Object.keys(record)) {
+    if (!allowedSet.has(key)) {
+      throw makeProtocolError(`The sidecar public profile field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of requiredSet) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar public profile field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function parseEmptyWarningArray(value: unknown, field: string): [] {
+  if (!Array.isArray(value) || value.length !== 0) {
+    throw makeProtocolError(`The sidecar proxy validation field ${field} must be an empty warnings array.`);
+  }
+  return [];
+}
+
+function requireProfileProxyMode(value: unknown, field: string): ProfileProxyMode {
+  if (value === "direct" || value === "fixedServer") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar profile proxy field ${field} must be a supported mode.`);
+}
+
+function requireProxyProtocol(value: unknown, field: string): ProxyProtocol {
+  if (value === "http" || value === "https" || value === "socks4" || value === "socks5") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar profile proxy field ${field} must be a supported protocol.`);
+}
+
+function requireProxyCredentialState(value: unknown, field: string): ProxyCredentialState {
+  if (value === "none" || value === "configured") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar profile proxy field ${field} must be a supported credential state.`);
+}
+
+function requireProxyPort(value: unknown, field: string): number {
+  const port = requireNumber(value, field);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw makeProtocolError(`The sidecar profile proxy field ${field} must be a valid port.`);
+  }
+  return port;
+}
+
+function requireProxyHost(value: unknown, field: string): string {
+  const host = requireNonBlankString(value, field).trim();
+  if (host.length > 253 || containsControlCharacters(host) || /\s/.test(host) || /:\/\/|[\\/?#@]/.test(host)) {
+    throw makeProtocolError(`The sidecar profile proxy field ${field} must be a safe host.`);
+  }
+  if (!/^[A-Za-z0-9.:-]+$/.test(host)) {
+    throw makeProtocolError(`The sidecar profile proxy field ${field} must be a safe host.`);
+  }
+  return host;
+}
+
+function requireProxySummary(value: unknown, field: string): string {
+  const summary = requireNonBlankString(value, field);
+  if (summary.length > 320 || containsControlCharacters(summary) || containsUnsafeProxySummaryText(summary)) {
+    throw makeProtocolError(`The sidecar profile proxy field ${field} must be safe UI copy.`);
+  }
+  return summary;
+}
+
+function containsUnsafeProxySummaryText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (["@", "credential", "password", "username", "proxyuser", "proxypass", "authcredentials", "debugport", "argv", "command"].some((marker) => lowered.includes(marker))) {
+    return true;
+  }
+  return /(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function formatProxySummary(protocol: ProxyProtocol, host: string, port: number): string {
+  const displayHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${protocol}://${displayHost}:${port}`;
+}
+
+function fieldToken(value: string): string {
+  return value.toLowerCase().replace(/[\s_-]/g, "");
+}
+
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
@@ -1800,12 +2091,12 @@ function containsControlCharacters(value: string): boolean {
   return Array.from(value).some((character) => character.charCodeAt(0) < 32);
 }
 
-function requireStoreVersion(value: unknown): 2 {
-  if (value !== 2) {
-    throw makeProtocolError("The sidecar profile result field storeVersion must be 2.");
+function requireStoreVersion(value: unknown): 3 {
+  if (value !== 3) {
+    throw makeProtocolError("The sidecar profile result field storeVersion must be 3.");
   }
 
-  return 2;
+  return 3;
 }
 
 function requireNonBlankString(value: unknown, field: string): string {
@@ -2037,6 +2328,11 @@ function optionalNonBlankString(value: unknown, field: string): string | undefin
   return requireNonBlankString(value, field);
 }
 
+function parseSafePublicMetadata(value: unknown, field: string): JsonObject {
+  assertNoForbiddenPublicProfileFields(value, field);
+  return parseSafeJsonObject(value, field);
+}
+
 function parseSafeJsonObject(value: unknown, field: string): JsonObject {
   const record = requireRecord(value, `The sidecar response field ${field} must be an object.`);
   const parsed: JsonObject = {};
@@ -2114,8 +2410,16 @@ function containsSensitiveDiagnosticMarker(value: string): boolean {
     "stdout",
     "stderr",
     "params",
+    "authcredentials",
+    "credential=",
+    "credentials",
     "proxy_user",
     "proxy_pass",
+    "proxyuser",
+    "proxyusername",
+    "proxypass",
+    "proxypassword",
+    "username=",
     "token=",
     "password=",
     "secret=",
@@ -2176,6 +2480,7 @@ function sameProfileRecord(left: ProfileRecord, right: ProfileRecord): boolean {
     left.defaults.proxyMode === right.defaults.proxyMode &&
     left.defaults.fingerprintMode === right.defaults.fingerprintMode &&
     JSON.stringify(left.identity) === JSON.stringify(right.identity) &&
+    JSON.stringify(left.proxy) === JSON.stringify(right.proxy) &&
     JSON.stringify(left.metadata ?? null) === JSON.stringify(right.metadata ?? null)
   );
 }

@@ -18,9 +18,11 @@ import {
   triggerSidecarDiagnosticFailure,
   updateProfile,
   updateProfileIdentity,
+  updateProfileProxy,
   validateIdentity,
+  validateProxy,
 } from "./client";
-import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR, type ProfileIdentity } from "./types";
+import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR, type ProfileIdentity, type ProfileProxyDraft } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -145,6 +147,67 @@ function identityWarning(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function directProxySummary(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    mode: "direct",
+    credentialState: "none",
+    summary: "Direct connection",
+    ...overrides,
+  };
+}
+
+function fixedProxySummary(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    mode: "fixedServer",
+    protocol: "http",
+    host: "proxy.example",
+    port: 8080,
+    credentialState: "none",
+    summary: "http://proxy.example:8080",
+    ...overrides,
+  };
+}
+
+function directProxyDraft(overrides: Record<string, unknown> = {}): ProfileProxyDraft {
+  return {
+    proxyVersion: 1 as const,
+    mode: "direct" as const,
+    ...overrides,
+  } as ProfileProxyDraft;
+}
+
+function fixedProxyDraft(overrides: Record<string, unknown> = {}): ProfileProxyDraft {
+  return {
+    proxyVersion: 1 as const,
+    mode: "fixedServer" as const,
+    protocol: "http" as const,
+    host: "proxy.example",
+    port: 8080,
+    ...overrides,
+  } as ProfileProxyDraft;
+}
+
+function proxyValidationResult(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    proxy: directProxySummary(),
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function proxyEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-proxy-1",
+    protocolVersion: "1.0.0",
+    durationMs: 3.75,
+    result,
+    ...overrides,
+  };
+}
+
 function identityEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
   return {
     requestId: "bridge-identity-1",
@@ -157,6 +220,8 @@ function identityEnvelope(result: unknown, overrides: Record<string, unknown> = 
 
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
+  const proxy = overrides.proxy ?? directProxySummary();
+  const proxyMode = typeof proxy === "object" && proxy !== null && (proxy as { mode?: unknown }).mode === "fixedServer" ? "fixedServer" : "direct";
   return {
     id,
     name: "Research",
@@ -165,7 +230,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
     defaults: {
       browser: "chromium",
       startUrl: "about:blank",
-      proxyMode: "direct",
+      proxyMode,
       fingerprintMode: "disabled",
     },
     storage: {
@@ -173,6 +238,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
     identity: defaultIdentity(),
+    proxy,
     ...overrides,
   };
 }
@@ -180,7 +246,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 function profileResult(overrides: Record<string, unknown> = {}) {
   const profiles = overrides.profiles ?? [profileRecord()];
   return {
-    storeVersion: 2,
+    storeVersion: 3,
     profiles,
     count: Array.isArray(profiles) ? profiles.length : 1,
     ...overrides,
@@ -684,7 +750,7 @@ describe("sidecar client", () => {
       protocolVersion: "1.0.0",
       durationMs: 4.5,
       result: {
-        storeVersion: 2,
+        storeVersion: 3,
         profiles: [],
         count: 0,
       },
@@ -694,7 +760,7 @@ describe("sidecar client", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("profiles_list");
     expect(snapshot.requestId).toBe("bridge-profiles-1");
-    expect(snapshot.storeVersion).toBe(2);
+    expect(snapshot.storeVersion).toBe(3);
     expect(snapshot.profiles).toEqual([]);
     expect(snapshot.count).toBe(0);
   });
@@ -712,6 +778,7 @@ describe("sidecar client", () => {
       proxyMode: "direct",
       fingerprintMode: "disabled",
     });
+    expect(snapshot.profiles[0].proxy).toEqual(directProxySummary());
     expect(snapshot.profiles[0].storage).toEqual({
       profileDir: `profile-store/profiles/${profile.id}`,
       userDataDir: `profile-store/profiles/${profile.id}/user-data`,
@@ -737,6 +804,45 @@ describe("sidecar client", () => {
     expect(updated.profile).toEqual(renamed);
     expect(deleted.profile).toBeUndefined();
     expect(deleted.profiles).toEqual([]);
+  });
+
+  it("wraps proxy validation and profile proxy update with fixed command params only", async () => {
+    const draft = fixedProxyDraft({ credentials: { username: "proxy-user", password: "proxy-pass" } });
+    const fixedSummary = fixedProxySummary({ credentialState: "configured" });
+    const profile = profileRecord({ proxy: fixedSummary });
+    mockInvoke
+      .mockResolvedValueOnce(proxyEnvelope(proxyValidationResult({ proxy: fixedSummary })))
+      .mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile] })));
+
+    const validation = await validateProxy(draft);
+    const updated = await updateProfileProxy(profile.id, draft);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "proxy_validate", { proxy: draft });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "profiles_proxy_update", { profileId: profile.id, proxy: draft });
+    expect(validation).toMatchObject({
+      proxyVersion: 1,
+      proxy: fixedSummary,
+      warnings: [],
+      requestId: "bridge-proxy-1",
+    });
+    expect(updated.profile).toEqual(profile);
+    expect(updated.profiles).toEqual([profile]);
+    expect(JSON.stringify(validation)).not.toMatch(/proxy-user|proxy-pass|"username"|"password"|"credentials"/i);
+    expect(JSON.stringify(updated)).not.toMatch(/proxy-user|proxy-pass|"username"|"password"|"credentials"/i);
+  });
+
+  it.each([
+    ["direct", directProxySummary()],
+    ["fixed unauthenticated", fixedProxySummary()],
+    ["fixed authenticated", fixedProxySummary({ credentialState: "configured" })],
+  ])("parses redacted proxy summaries for %s profiles", async (_caseName, proxy) => {
+    const profile = profileRecord({ proxy });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile] })));
+
+    const snapshot = await listProfiles();
+
+    expect(snapshot.profiles[0].proxy).toEqual(proxy);
+    expect(snapshot.profiles[0].defaults.proxyMode).toBe((proxy as { mode: string }).mode);
   });
 
   it("wraps identity commands with fixed command params and parses structured warnings", async () => {
@@ -1149,9 +1255,14 @@ describe("sidecar client", () => {
   it.each([
     ["malformed envelope", { protocolVersion: "1.0.0", durationMs: 4.5, result: profileResult() }],
     ["stale v1 store version", profileEnvelope(profileResult({ storeVersion: 1 }))],
+    ["stale v2 store version", profileEnvelope(profileResult({ storeVersion: 2 }))],
     ["wrong profiles item type", profileEnvelope(profileResult({ profiles: ["not-a-profile"] }))],
     ["missing defaults", profileEnvelope(profileResult({ profiles: [profileRecord({ defaults: undefined })] }))],
     ["missing identity", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: undefined })] }))],
+    ["missing proxy", profileEnvelope(profileResult({ profiles: [profileRecord({ proxy: undefined })] }))],
+    ["invalid proxy credential state", profileEnvelope(profileResult({ profiles: [profileRecord({ proxy: fixedProxySummary({ credentialState: "visible" }) })] }))],
+    ["proxy defaults mismatch", profileEnvelope(profileResult({ profiles: [profileRecord({ proxy: fixedProxySummary(), defaults: { browser: "chromium", startUrl: "about:blank", proxyMode: "direct", fingerprintMode: "disabled" } })] }))],
+    ["proxy summary mismatch", profileEnvelope(profileResult({ profiles: [profileRecord({ proxy: fixedProxySummary({ summary: "http://user:pass@proxy.example:8080" }) })] }))],
     ["unknown identity surface mode", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: defaultIdentity({ browser: { mode: "private" } }) })] }))],
     ["invalid language array", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: presetIdentity({ locale: { mode: "masked", locale: "en-US", languages: ["not a tag"], timezoneId: "America/New_York" } }) })] }))],
     ["invalid noise seed", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: presetIdentity({ canvas: { mode: "noise", noiseSeed: 1000001 } }) })] }))],
@@ -1168,6 +1279,71 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
       detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    "credentials",
+    "username",
+    "password",
+    "proxyPassword",
+    "authCredentials",
+    "debugPort",
+    "path",
+    "argv",
+    "args",
+    "command",
+    "executablePath",
+  ])("rejects forbidden raw proxy/profile leak field %s before UI state sees it", async (field) => {
+    const unsafeValue = field === "argv" || field === "args" ? ["--proxy-server=http://user:pass@proxy.example:8080"] : "unsafe-runtime-or-secret-detail";
+    const profile = profileRecord({ proxy: { ...fixedProxySummary(), [field]: unsafeValue } });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile] })));
+
+    await expect(listProfiles()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["proxy validation leaked credentials", proxyEnvelope(proxyValidationResult({ proxy: { ...fixedProxySummary(), credentials: { username: "raw-user", password: "raw-pass" } } })), () => validateProxy(directProxyDraft())],
+    ["proxy validation invalid credentialState", proxyEnvelope(proxyValidationResult({ proxy: fixedProxySummary({ credentialState: "raw" }) })), () => validateProxy(directProxyDraft())],
+    ["proxy validation non-empty warnings", proxyEnvelope(proxyValidationResult({ warnings: [{ code: "PROXY_WARNING" }] })), () => validateProxy(directProxyDraft())],
+    ["proxy update result profile absent from refreshed list", profileEnvelope(profileResult({ profile: profileRecord({ proxy: fixedProxySummary() }), profiles: [profileRecord()] })), () => updateProfileProxy("11111111-1111-1111-1111-111111111111", fixedProxyDraft())],
+    ["proxy update result profile id mismatch", profileEnvelope(profileResult({ profile: profileRecord({ id: "22222222-2222-2222-2222-222222222222", proxy: fixedProxySummary() }), profiles: [profileRecord({ id: "22222222-2222-2222-2222-222222222222", proxy: fixedProxySummary() })] })), () => updateProfileProxy("11111111-1111-1111-1111-111111111111", fixedProxyDraft())],
+  ])("maps malformed proxy payloads to protocol errors: %s", async (_caseName, envelope, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelope);
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["PROXY_INVALID", "Proxy configuration must be an object.", () => validateProxy(directProxyDraft())],
+    ["PROXY_PAC_UNSUPPORTED", "PAC proxy configuration is not supported.", () => updateProfileProxy("profile-id", directProxyDraft())],
+  ])("preserves typed recoverable proxy errors: %s", async (code, message, callClient) => {
+    mockInvoke.mockRejectedValueOnce({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-proxy-detail",
+    });
+
+    await expect(callClient()).rejects.toMatchObject({
+      code,
+      message,
+      recoverable: true,
+      detailRef: "sidecar-proxy-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
     });
   });
 

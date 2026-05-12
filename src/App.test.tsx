@@ -48,8 +48,33 @@ function defaultIdentity(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function directProxySummary(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    mode: "direct",
+    credentialState: "none",
+    summary: "Direct connection",
+    ...overrides,
+  };
+}
+
+function fixedProxySummary(overrides: Record<string, unknown> = {}) {
+  return {
+    proxyVersion: 1,
+    mode: "fixedServer",
+    protocol: "http",
+    host: "proxy.example",
+    port: 8080,
+    credentialState: "none",
+    summary: "http://proxy.example:8080",
+    ...overrides,
+  };
+}
+
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
+  const proxy = overrides.proxy ?? directProxySummary();
+  const proxyMode = typeof proxy === "object" && proxy !== null && (proxy as { mode?: unknown }).mode === "fixedServer" ? "fixedServer" : "direct";
   const base = {
     id,
     name: "Research",
@@ -58,7 +83,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
     defaults: {
       browser: "chromium",
       startUrl: "about:blank",
-      proxyMode: "direct",
+      proxyMode,
       fingerprintMode: "disabled",
     },
     storage: {
@@ -66,6 +91,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
     identity: defaultIdentity(),
+    proxy,
   };
 
   return {
@@ -77,7 +103,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 
 function profileResult(profiles: unknown[], overrides: Record<string, unknown> = {}) {
   return {
-    storeVersion: 2,
+    storeVersion: 3,
     profiles,
     count: profiles.length,
     ...overrides,
@@ -526,7 +552,7 @@ describe("ThePrivator profile library UI", () => {
     expect(card).toHaveTextContent("11111111-1111-1111-1111-111111111111");
     expect(card).toHaveTextContent(/2026-05-04 18:00:00 UTC/i);
     expect(card).toHaveTextContent(/Chromium/i);
-    expect(card).toHaveTextContent(/direct proxy/i);
+    expect(card).toHaveTextContent(/Direct connection/i);
     expect(card).toHaveTextContent(/disabled fingerprinting/i);
     expect(card).toHaveTextContent(/about:blank/i);
     expect(card).toHaveTextContent(/profile-store\/profiles\/11111111-1111-1111-1111-111111111111\/user-data/i);
@@ -535,6 +561,25 @@ describe("ThePrivator profile library UI", () => {
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Current count1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/List requestbridge-profiles-1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Running count0/i);
+  });
+
+  it("renders safe fixed proxy summaries without credential values", async () => {
+    const direct = profileRecord({ name: "Direct Research", proxy: directProxySummary() });
+    const fixed = profileRecord({
+      id: "22222222-2222-2222-2222-222222222222",
+      name: "Fixed Research",
+      proxy: fixedProxySummary({ credentialState: "configured", summary: "http://proxy.example:8080" }),
+    });
+    mockStartup([direct, fixed]);
+
+    render(<App />);
+
+    const directCard = await screen.findByRole("listitem", { name: /direct research/i });
+    const fixedCard = await screen.findByRole("listitem", { name: /fixed research/i });
+    expect(directCard).toHaveTextContent(/Direct connection/i);
+    expect(fixedCard).toHaveTextContent(/http:\/\/proxy\.example:8080/i);
+    expect(fixedCard).not.toHaveTextContent(/configured/i);
+    expect(fixedCard).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|username|password|credentials/i);
   });
 
   it("renders saved identity as profile truth without lazy identity startup calls", async () => {

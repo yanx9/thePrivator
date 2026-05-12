@@ -135,6 +135,64 @@ export type IdentityMaskingMode = "real" | "masked" | "custom";
 export type IdentityNoiseMode = "real" | "noise";
 export type WebRtcPolicy = "real" | "disableNonProxiedUdp" | "block";
 
+export type ProfileProxyMode = "direct" | "fixedServer";
+export type ProxyProtocol = "http" | "https" | "socks4" | "socks5";
+export type ProxyCredentialState = "none" | "configured";
+
+export interface DirectProxySummary {
+  proxyVersion: 1;
+  mode: "direct";
+  credentialState: "none";
+  summary: "Direct connection";
+}
+
+export interface FixedServerProxySummary {
+  proxyVersion: 1;
+  mode: "fixedServer";
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  credentialState: ProxyCredentialState;
+  summary: string;
+}
+
+export type ProfileProxySummary = DirectProxySummary | FixedServerProxySummary;
+
+export interface FixedServerProxyCredentials {
+  username: string;
+  password: string;
+}
+
+export interface DirectProxyDraft {
+  proxyVersion: 1;
+  mode: "direct";
+}
+
+export interface FixedServerProxyDraft {
+  proxyVersion: 1;
+  mode: "fixedServer";
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  credentials?: FixedServerProxyCredentials | null;
+}
+
+export type ProfileProxyDraft = DirectProxyDraft | FixedServerProxyDraft;
+
+export interface ProxyValidationResult {
+  proxyVersion: 1;
+  proxy: ProfileProxySummary;
+  warnings: [];
+}
+
+export interface ProxyValidationSnapshot extends ProxyValidationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface IdentityRealSurface {
   mode: "real";
 }
@@ -325,7 +383,7 @@ export interface IdentityValidationSnapshot extends IdentityValidationResult {
 export interface ProfileDefaults {
   browser: "chromium";
   startUrl: "about:blank";
-  proxyMode: "direct";
+  proxyMode: ProfileProxyMode;
   fingerprintMode: FingerprintMode;
 }
 
@@ -342,11 +400,12 @@ export interface ProfileRecord {
   defaults: ProfileDefaults;
   storage: ProfileStorage;
   identity: ProfileIdentity;
+  proxy: ProfileProxySummary;
   metadata?: JsonObject;
 }
 
 export interface ProfileListResult {
-  storeVersion: 2;
+  storeVersion: 3;
   profiles: ProfileRecord[];
   count: number;
 }
@@ -354,6 +413,10 @@ export interface ProfileListResult {
 export interface ProfileMutationResult extends ProfileListResult {
   profile?: ProfileRecord;
   warnings?: IdentityWarning[];
+}
+
+export interface ProfileProxyMutationResult extends ProfileMutationResult {
+  profile: ProfileRecord;
 }
 
 export interface ProfileIdentityMutationResult extends ProfileMutationResult {
@@ -370,6 +433,14 @@ export interface ProfileListSnapshot extends ProfileListResult {
 }
 
 export interface ProfileMutationSnapshot extends ProfileMutationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ProfileProxyMutationSnapshot extends ProfileProxyMutationResult {
   requestId: string;
   rawRequestId: JsonScalar;
   protocolVersion: string;

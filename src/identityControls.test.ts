@@ -74,6 +74,12 @@ function profileRecord(savedIdentity = identity()): ProfileRecord {
       userDataDir: "profile-store/profiles/11111111-1111-1111-1111-111111111111/user-data",
     },
     identity: savedIdentity,
+    proxy: {
+      proxyVersion: 1,
+      mode: "direct",
+      credentialState: "none",
+      summary: "Direct connection",
+    },
   };
 }
 
