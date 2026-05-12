@@ -208,6 +208,74 @@ def test_fixed_server_protocols_return_local_fixture_route_and_ip_hiding_proof(t
     assert_public_payload_safe(result)
 
 
+def test_curated_identity_fixed_server_proxy_reports_combined_s04_vocabulary(tmp_path, monkeypatch):
+    store_root, profile = create_profile(
+        tmp_path,
+        proxy=fixed_proxy("https", credentials=True, port=18443),
+        identity=curated_preset("windows-10-chrome-120"),
+    )
+
+    def collect_safe_minimal_proof(received_store_root, case, *, timeout_seconds):
+        assert received_store_root == store_root
+        assert timeout_seconds > 0
+        assert case["label"] == "profiles.proxy.check"
+        assert case["managedFixture"] is True
+        assert case["proxy"]["mode"] == "fixedServer"
+        assert case["proxy"]["protocol"] == "https"
+        assert case["proxy"]["credentials"] == {
+            "username": SENTINEL_USERNAME,
+            "password": SENTINEL_PASSWORD,
+        }
+        return minimal_proof("https")
+
+    monkeypatch.setattr("theprivator_sidecar.proxy_check.collect_proxy_proof", collect_safe_minimal_proof)
+
+    result = check_profile_proxy(store_root, profile["id"])
+
+    assert_public_shape(result)
+    assert result["profileId"] == profile["id"]
+    assert result["proxy"] == {
+        "proxyVersion": 1,
+        "mode": "fixedServer",
+        "protocol": "https",
+        "host": "proxy.example.invalid",
+        "port": 18443,
+        "credentialState": "configured",
+        "summary": "https://proxy.example.invalid:18443",
+    }
+    assert result["routeProof"] == {
+        "status": "proved",
+        "basis": PROXY_CHECK_SCOPE_LOCAL_FIXTURE,
+        "scope": "local-fixture",
+        "protocol": "https",
+        "credentialState": "configured",
+        "durationMs": 1.25,
+        "fixture": {"kind": "https", "managed": True},
+        "target": {"host": "theprivator-proxy-proof.invalid", "port": 80},
+        "directFallbackDetected": False,
+        "observationCounts": {"proxy": 1, "target": 1},
+    }
+    assert result["ipHiding"] == {
+        "status": "proved",
+        "basis": "route-proof-succeeded",
+        "scope": "local-fixture",
+        "publicExitIpClaimed": False,
+        "publicExitIp": None,
+        "localFixtureConclusion": "direct target IP hidden from the proof target by the managed fixture",
+    }
+    assert result["webRtc"] == {
+        "status": "restricted",
+        "basis": "profile-identity-policy",
+        "mode": "masked",
+        "policy": "disableNonProxiedUdp",
+        "localIpExposure": "non-proxied-udp-disabled",
+    }
+    assert result["publicCheckers"]["status"] == PROXY_CHECK_PUBLIC_CHECKER_STATUS
+    assert result["publicCheckers"]["networkDependency"] == "user-driven-external-pages"
+    assert all("content" not in page for page in result["publicCheckers"]["pages"])
+    assert_public_payload_safe(result)
+
+
 def test_webrtc_policy_classification_reports_real_baseline_and_restricted_modes(tmp_path):
     real_store_root, real_profile = create_profile(tmp_path / "real", identity=DEFAULT_REAL_IDENTITY)
     restricted_store_root, restricted_profile = create_profile(

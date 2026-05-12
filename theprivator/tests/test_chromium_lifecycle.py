@@ -128,6 +128,61 @@ def assert_no_runtime_truth(profile: Mapping[str, Any]) -> None:
     assert forbidden.isdisjoint(profile.keys())
 
 
+CHROMIUM_PUBLIC_FORBIDDEN_MARKERS = (
+    "proxy-auth-user-sentinel",
+    "proxy-auth-password-sentinel",
+    "Proxy-Authorization",
+    "proxy-authorization",
+    "authCredentials",
+    "--proxy-server",
+    "--load-extension",
+    "--disable-extensions-except",
+    "--remote-debugging-port",
+    "DevToolsActivePort",
+    "ws://",
+    "wss://",
+    "proxy-auth-extensions",
+    "identity-extensions",
+    "Traceback",
+)
+
+
+def assert_chromium_payload_omits_forbidden_markers(
+    payload: Any,
+    *,
+    extra_forbidden: tuple[str, ...] = (),
+) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    for marker in (*CHROMIUM_PUBLIC_FORBIDDEN_MARKERS, *extra_forbidden):
+        assert marker not in encoded
+    return encoded
+
+
+def assert_composed_extension_allowlist(argv: list[str]) -> list[Path]:
+    load_extension_args = [arg for arg in argv if arg.startswith("--load-extension=")]
+    disable_except_args = [arg for arg in argv if arg.startswith("--disable-extensions-except=")]
+    assert len(load_extension_args) == 1
+    assert len(disable_except_args) == 1
+    load_value = load_extension_args[0].split("=", 1)[1]
+    assert load_value == disable_except_args[0].split("=", 1)[1]
+
+    extension_dirs = [Path(value) for value in load_value.split(",")]
+    assert len(extension_dirs) == 2
+    assert len({str(path) for path in extension_dirs}) == 2
+
+    identity_dirs = [path for path in extension_dirs if "identity-extensions" in path.parts]
+    proxy_auth_dirs = [path for path in extension_dirs if "proxy-auth-extensions" in path.parts]
+    assert len(identity_dirs) == 1
+    assert len(proxy_auth_dirs) == 1
+    assert (identity_dirs[0] / "manifest.json").is_file()
+    assert (identity_dirs[0] / "identity_config.js").is_file()
+    assert (identity_dirs[0] / "identity_protector.js").is_file()
+    assert (proxy_auth_dirs[0] / "manifest.json").is_file()
+    assert (proxy_auth_dirs[0] / "proxy_auth_config.js").is_file()
+    assert (proxy_auth_dirs[0] / "proxy_auth_worker.js").is_file()
+    return extension_dirs
+
+
 def test_socks_proxy_credentials_fail_before_executable_discovery_or_spawn(tmp_path, monkeypatch):
     profile = create_profile(tmp_path)
     ProfileStore(tmp_path).update_proxy(
@@ -570,6 +625,135 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
         assert "--proxy-bypass-list" not in "\n".join(argv)
         assert not any(arg.startswith("--load-extension=") for arg in argv)
         assert chromium.status(tmp_path)["runningCount"] == 1
+        assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_audit_open_stopped_masked_identity_with_authenticated_proxy_composes_runtime_artifacts(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    ProfileStore(tmp_path).update_proxy(profile["id"], authenticated_http_proxy("https"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "audit-identity-proxy-argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    user_data_path = tmp_path / profile["storage"]["userDataDir"]
+    user_data_path.mkdir(parents=True, exist_ok=True)
+    stale_active_port = user_data_path / "DevToolsActivePort"
+    stale_active_port.write_text("65535\n/devtools/browser/stale\n", encoding="utf-8")
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert Path(user_data_dir) == user_data_path
+        assert not stale_active_port.exists()
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("discover", kwargs))
+        return "ws://127.0.0.1:1/devtools/browser/test"
+
+    def fake_apply_identity_cdp_overrides(endpoint, overrides, **kwargs):
+        assert endpoint == "ws://127.0.0.1:1/devtools/browser/test"
+        assert "userAgent" in overrides
+        assert "deviceMetrics" in overrides
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("apply", sorted(overrides), kwargs))
+        return {"applied": ["userAgent", "deviceMetrics", "timezone", "locale"]}
+
+    def fake_create_audit_page_target_endpoint(endpoint, **kwargs):
+        assert endpoint == "ws://127.0.0.1:1/devtools/browser/test"
+        assert kwargs["target_url"] == "https://browserleaks.com/webgl"
+        assert kwargs["allowed_public_urls"] == {"https://browserleaks.com/webgl"}
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("open", kwargs))
+        return object()
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fake_apply_identity_cdp_overrides)
+    monkeypatch.setattr(chromium, "create_audit_page_target_endpoint", fake_create_audit_page_target_endpoint)
+
+    result = chromium.open_identity_audit_page(tmp_path, profile["id"], audit_page_payload(), audit_version=1)
+
+    try:
+        assert [call[0] for call in calls] == ["discover", "apply", "open"]
+        assert result["auditVersion"] == 1
+        assert result["profileId"] == profile["id"]
+        assert result["pageId"] == "browserleaks-webgl"
+        assert result["status"] == "opened"
+        assert result["openedAt"].endswith("Z")
+        assert result["launched"] is True
+        assert result["runningCount"] == 1
+        assert set(result) == {
+            "auditVersion",
+            "profileId",
+            "pageId",
+            "status",
+            "openedAt",
+            "launched",
+            "runningCount",
+            "page",
+        }
+        assert "pid" not in json.dumps(result)
+        assert "userDataDir" not in json.dumps(result)
+        assert_chromium_payload_omits_forbidden_markers(
+            result,
+            extra_forbidden=(str(tmp_path), "profile-store/", "raw argv"),
+        )
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        joined_argv = "\n".join(argv)
+        assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
+            "--proxy-server=https://proxy.example.invalid:18443"
+        ]
+        assert argv.count("--remote-debugging-port=0") == 1
+        assert argv.count("--force-webrtc-ip-handling-policy=disable_non_proxied_udp") == 1
+        extension_dirs = assert_composed_extension_allowlist(argv)
+        extension_allowlist = next(arg for arg in argv if arg.startswith("--load-extension=")).split("=", 1)[1]
+        assert "direct://" not in joined_argv
+        assert "--proxy-bypass-list" not in joined_argv
+        assert "proxy-auth-user-sentinel" not in joined_argv
+        assert "proxy-auth-password-sentinel" not in joined_argv
+        assert "Proxy-Authorization" not in joined_argv
+        assert "@proxy.example.invalid" not in joined_argv
+        assert all(profile["id"] not in str(path) for path in extension_dirs)
+        assert "windows-10-chrome-120" not in joined_argv
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        running_profile = status["profiles"][0]
+        assert running_profile["profileId"] == profile["id"]
+        assert running_profile["status"] == "running"
+        assert running_profile["userDataDir"] == profile["storage"]["userDataDir"]
+        assert_chromium_payload_omits_forbidden_markers(
+            status,
+            extra_forbidden=(
+                str(tmp_path),
+                extension_allowlist,
+                *(str(path) for path in extension_dirs),
+                "raw argv",
+            ),
+        )
+        registry_payload = json.loads(
+            (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert_chromium_payload_omits_forbidden_markers(
+            registry_payload,
+            extra_forbidden=(
+                str(tmp_path),
+                extension_allowlist,
+                *(str(path) for path in extension_dirs),
+                "raw argv",
+            ),
+        )
+
+        stopped = chromium.stop(tmp_path, profile["id"])
+        assert stopped["status"] == "stopped"
+        assert stopped["runningCount"] == 0
+        assert not chromium.is_process_alive(running_profile["pid"])
+        assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
         assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
     finally:
         chromium.stop(tmp_path, profile["id"])
