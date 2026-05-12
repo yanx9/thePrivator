@@ -239,6 +239,19 @@ const UNSAFE_TEXT_PATTERNS = [
   { code: "S06_REDACTION_TARGET_ID", pattern: /\b(?:targetId|targetIds|cdpTargetId|activeTargetId)\b/i },
   { code: "S06_REDACTION_GENERATED_EXTENSION", pattern: /\b(?:extensionPath|extensionDir|extensionManifestPath|extensionConfigPath|generatedExtensionPath|generatedExtensionDir|generatedConfigPath|generatedConfigDir|chrome-extension:\/\/|manifest\.json)\b/i },
 ];
+const PUBLIC_EVIDENCE_UNSAFE_TEXT_PATTERNS = [
+  { code: "S06_REDACTION_PROXY_AUTH_HEADER", pattern: /Proxy-Authorization/i },
+  { code: "S06_REDACTION_PROXY_SERVER_ARG", pattern: /--proxy-server(?:=|\s+)/i },
+  { code: "S06_REDACTION_CREDENTIAL_PROXY_URI", pattern: /(?:https?|socks4|socks5):\/\/[^\s\"'/:@]+:[^\s\"'/:@]+@/i },
+  { code: "S06_REDACTION_GENERATED_PROXY_AUTH_EXTENSION", pattern: /(?:generated-)?proxy-auth(?:-[A-Za-z0-9_.-]+)*-extension|proxyAuthExtension|chrome-extension:\/\/|manifest\.json/i },
+  { code: "S06_REDACTION_GENERATED_IDENTITY_EXTENSION", pattern: /(?:generated-)?identity(?:-[A-Za-z0-9_.-]+)*-extension|identityRuntimeRegistry/i },
+  { code: "S06_REDACTION_PROFILE_STORAGE_ROOT", pattern: /profile-store\/profiles\//i },
+  { code: "S06_REDACTION_PROFILE_USER_DATA_ROOT", pattern: /(?:^|[\/\\])user-data(?:[\/\\]|$)|--user-data-dir/i },
+  { code: "S06_REDACTION_APP_DATA_ROOT", pattern: /(?:XDG_DATA_HOME|APPDATA|LOCALAPPDATA|Application Support|app-data-root)/i },
+  { code: "S06_REDACTION_PUBLIC_CHECKER_URL", pattern: /https?:\/\/[^\s\"']*(?:browserleaks\.com|cloudflare|checkip|webbrowsertools)/i },
+  { code: "S06_REDACTION_PUBLIC_CHECKER_BODY", pattern: /public checker body|Cloudflare trace body|ip=\d{1,3}(?:\.\d{1,3}){3}/i },
+  { code: "S06_REDACTION_FIXTURE_TRUST", pattern: /(?:fixtureTrust|spkiSha256|verifier-only-trust-detail|privateKey|certificatePem)/i },
+];
 
 const GLOBAL_SENSITIVE_VALUES = new Set([ROOT_DIR, PACKAGED_SMOKE_PROXY_USERNAME, PACKAGED_SMOKE_PROXY_PASSWORD]);
 if (process.env.THEPRIVATOR_CHROMIUM_PATH) {
@@ -2233,6 +2246,103 @@ async function assertSmokeProxySummary(driver, runtime, options = {}) {
   };
 }
 
+async function latestVisibleDetailRef(driver, runtime, step) {
+  const visibleText = await getVisibleText(driver);
+  const sidecarRefs = Array.from(visibleText.matchAll(/\bsidecar-[a-f0-9]{12}(?![a-f0-9])/gi)).map((match) => match[0]);
+  const bridgeRefs = Array.from(visibleText.matchAll(/\bbridge-[A-Za-z0-9_.:-]{8,160}/g)).map((match) => match[0].replace(/(?:Lookup|Retry).*$/u, ""));
+  const uiRefs = Array.from(visibleText.matchAll(/\bui-[A-Za-z0-9_.:-]{8,160}/g)).map((match) => match[0].replace(/(?:Lookup|Retry).*$/u, ""));
+  const detailRefs = [...sidecarRefs, ...bridgeRefs, ...uiRefs].filter((detailRef) => /^(?:sidecar|bridge|ui)-[A-Za-z0-9_.:-]+$/.test(detailRef));
+  const detailRef = detailRefs.at(-1);
+  if (!detailRef) {
+    await failUi(driver, runtime, "Expected a visible diagnostic detailRef.", {
+      code: "S06_UI_DETAIL_REF_MISSING",
+      step,
+    });
+  }
+  return detailRef;
+}
+
+async function lookupVisibleDiagnosticRef(driver, runtime, detailRef, options = {}) {
+  const step = options.step ?? "packaged-diagnostic-lookup";
+  const lookupButton = await waitForVisibleElement(driver, By.xpath(`//button[@aria-label=${xpathLiteral(`Lookup diagnostics for ${detailRef}`)}]`), runtime, `diagnostic lookup button for ${detailRef}`, { step });
+  try {
+    await lookupButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible diagnostics lookup button.", {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      detailRef,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await waitForVisibleText(driver, "Persisted diagnostic event summaries matched this detailRef.", runtime, { step });
+  await waitForVisibleText(driver, detailRef, runtime, { step });
+  return { detailRef: "visible", lookup: "matched-redacted-diagnostics" };
+}
+
+async function configureUnsupportedSocksProxyAndAssertProofFailure(driver, runtime, fixture) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = "packaged-socks-auth-negative-proof";
+  const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, { step });
+  try {
+    await configureButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Configure proxy button for the SOCKS negative proof.", {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const panelLabel = proxyConfigSectionLabel(profileName);
+  await waitForVisibleElement(driver, profileSectionByAriaLabel(profileName, panelLabel), runtime, panelLabel, { step });
+  await clickProxyPanelLabel(driver, runtime, "Fixed server", { step });
+  await selectProxyProtocol(driver, runtime, "socks5", { step });
+  await setProxyPanelInput(driver, runtime, "Host", fixture.ready.proxy.host, { step });
+  await setProxyPanelInput(driver, runtime, "Port", fixture.ready.proxy.port, { step });
+  await clickProxyPanelLabel(driver, runtime, "Replace credentials", { step });
+  await setProxyPanelInput(driver, runtime, "Replacement username", PACKAGED_SMOKE_PROXY_USERNAME, { step });
+  await setProxyPanelInput(driver, runtime, "Replacement password", PACKAGED_SMOKE_PROXY_PASSWORD, { step });
+
+  const saveButton = await waitForProfileButton(driver, profileName, "Save proxy", runtime, { step });
+  try {
+    await saveButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Save proxy button for the SOCKS negative proof.", {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await waitForVisibleText(driver, "Proxy configuration saved.", runtime, { step });
+  await waitForVisibleText(driver, "Proxy configuration saved with redacted public profile truth", runtime, { step });
+
+  const runButton = await waitForProfileButton(driver, profileName, "Run saved proxy proof", runtime, { step });
+  try {
+    await runButton.click();
+  } catch (error) {
+    await failUi(driver, runtime, "Failed to click the visible Run saved proxy proof button for the SOCKS negative proof.", {
+      code: "S06_UI_CLICK_FAILED",
+      step,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  await waitForVisibleText(driver, "PROXY_SOCKS_AUTH_UNSUPPORTED", runtime, { step });
+  await waitForVisibleText(driver, "SOCKS proxy credentials cannot be used", runtime, { step });
+  const detailRef = await latestVisibleDetailRef(driver, runtime, step);
+  const diagnosticsLookup = await lookupVisibleDiagnosticRef(driver, runtime, detailRef, { step });
+  await waitForVisibleText(driver, "profiles.proxy.check", runtime, { step });
+  await assertNoCredentialTextVisible(driver, runtime, step);
+  return {
+    status: "typed-negative-proved",
+    code: "PROXY_SOCKS_AUTH_UNSUPPORTED",
+    detailRef: diagnosticsLookup.detailRef,
+    diagnosticsLookup: diagnosticsLookup.lookup,
+    savedProxyOverwrittenBy: "packaged-proxy-configure-save",
+    smokeRoot: runtime.smokeContext.smokeRootRelative,
+  };
+}
+
 async function configureSmokeProxy(driver, runtime, fixture) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, {
@@ -2325,7 +2435,7 @@ async function runSavedProxyProof(driver, runtime, options = {}) {
     "IP-hiding conclusion",
     "WebRTC / local-IP baseline",
     "Public checker advisory pages",
-    "advisory-only",
+    "Advisory only",
     "Not detected",
   ], runtime, { step });
   await waitForVisibleText(driver, "Saved proxy proof finished for request", runtime, { step });
@@ -2448,6 +2558,19 @@ function assertNoUnsafeText(label, value, options = {}) {
     }
   }
   return { label, redacted: true };
+}
+
+function assertNoForbiddenPublicEvidenceText(label, value, options = {}) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  for (const { code, pattern } of PUBLIC_EVIDENCE_UNSAFE_TEXT_PATTERNS) {
+    if (pattern.test(text)) {
+      fail(`${label} leaked forbidden public verifier evidence.`, {
+        code,
+        label,
+      }, options);
+    }
+  }
+  return { label, publicEvidenceSafe: true };
 }
 
 function collectProfileStoreFiles(dir, options = {}, output = [], state = { entries: 0 }) {
@@ -2671,25 +2794,30 @@ function assertPackagedSmokeProxy(proxy, profileStorePath, rootDir, smokeContext
     hasHost: typeof proxy.host === "string" && proxy.host.length > 0,
     hasPort: Number.isInteger(proxy.port),
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
-  assert(proxy.credentialState === "configured", "Smoke profile proxy must persist configured masked credentials.", {
+  const credentialsConfigured = proxy.credentials && typeof proxy.credentials === "object" && !Array.isArray(proxy.credentials);
+  const credentialState = proxy.credentialState ?? (credentialsConfigured ? "configured" : "none");
+  assert(credentialState === "configured", "Smoke profile proxy must persist configured masked credentials.", {
     code: "S06_PROFILE_PROXY_CREDENTIAL_STATE",
     profileStore: repoRelative(rootDir, profileStorePath),
     smokeProfileName: smokeContext.smokeProfileName,
-    actualCredentialState: proxy.credentialState,
+    actualCredentialState: credentialState,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
-  assert(proxy.credentials && typeof proxy.credentials === "object" && !Array.isArray(proxy.credentials), "Smoke profile proxy credentials must remain private in the packaged store.", {
+  assert(credentialsConfigured, "Smoke profile proxy credentials must remain private in the packaged store.", {
     code: "S06_PROFILE_PROXY_CREDENTIALS_MISSING",
     profileStore: repoRelative(rootDir, profileStorePath),
     smokeProfileName: smokeContext.smokeProfileName,
-    credentialState: proxy.credentialState,
+    credentialState,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
-  assert(typeof proxy.summary === "string" && proxy.summary.length > 0 && !/@/.test(proxy.summary), "Smoke profile proxy summary must be public-safe and credential-free.", {
+  const summary = typeof proxy.summary === "string" && proxy.summary.length > 0
+    ? proxy.summary
+    : `${proxy.protocol}://${proxy.host}:${proxy.port}`;
+  assert(typeof summary === "string" && summary.length > 0 && !/@/.test(summary), "Smoke profile proxy summary must be public-safe and credential-free.", {
     code: "S06_PROFILE_PROXY_SUMMARY_UNSAFE",
     profileStore: repoRelative(rootDir, profileStorePath),
     smokeProfileName: smokeContext.smokeProfileName,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
   for (const token of DEFAULT_SENSITIVE_SUBSTRINGS) {
-    assert(!proxy.summary.includes(token), "Smoke profile proxy summary must not contain proxy credentials.", {
+    assert(!summary.includes(token), "Smoke profile proxy summary must not contain proxy credentials.", {
       code: "S06_PROFILE_PROXY_SUMMARY_CREDENTIAL_LEAK",
       profileStore: repoRelative(rootDir, profileStorePath),
       smokeProfileName: smokeContext.smokeProfileName,
@@ -2701,8 +2829,8 @@ function assertPackagedSmokeProxy(proxy, profileStorePath, rootDir, smokeContext
     proxyVersion: proxy.proxyVersion,
     mode: proxy.mode,
     protocol: proxy.protocol,
-    credentialState: proxy.credentialState,
-    summary: proxy.summary,
+    credentialState,
+    summary,
   };
 }
 
@@ -2796,6 +2924,14 @@ function readBoundedText(path) {
 
 function isSafeDiagnosticMethodName(value) {
   return typeof value === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(value);
+}
+
+function isSafeDiagnosticErrorCode(value) {
+  return value === null || value === undefined || (typeof value === "string" && /^[A-Z0-9_]{1,96}$/.test(value));
+}
+
+function isSafeDiagnosticDetailRef(value) {
+  return value === null || value === undefined || (typeof value === "string" && /^(?:sidecar|bridge|ui)-[A-Za-z0-9_.:-]{1,160}$/.test(value));
 }
 
 function parseDiagnosticRecords(path, rootDir, smokeContext, appDataRoot) {
@@ -2901,6 +3037,42 @@ function assertDiagnosticRecordSafe(record, method, rootDir, smokeContext, diagn
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 }
 
+function summarizeDiagnosticFailures(records, rootDir, smokeContext, diagnosticsPath) {
+  const failures = [];
+  for (const [index, record] of records.entries()) {
+    if (record.status !== "error") {
+      continue;
+    }
+    assert(isSafeDiagnosticErrorCode(record.errorCode), "Diagnostics error row used an unsafe errorCode.", {
+      code: "S06_DIAGNOSTICS_ERROR_CODE_UNSAFE",
+      diagnosticsLog: repoRelative(rootDir, diagnosticsPath),
+      row: index + 1,
+      method: record.method,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+    assert(isSafeDiagnosticDetailRef(record.detailRef), "Diagnostics error row used an unsafe detailRef.", {
+      code: "S06_DIAGNOSTICS_DETAIL_REF_UNSAFE",
+      diagnosticsLog: repoRelative(rootDir, diagnosticsPath),
+      row: index + 1,
+      method: record.method,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+    assert(typeof record.durationMs === "number" && Number.isFinite(record.durationMs) && record.durationMs >= 0, "Diagnostics error row durationMs was missing or unsafe.", {
+      code: "S06_DIAGNOSTICS_ERROR_DURATION_MISSING",
+      diagnosticsLog: repoRelative(rootDir, diagnosticsPath),
+      row: index + 1,
+      method: record.method,
+    }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+    failures.push({
+      method: record.method,
+      status: record.status,
+      errorCode: record.errorCode ?? null,
+      detailRef: record.detailRef ?? null,
+      logPath: record.logPath,
+      durationMs: record.durationMs,
+    });
+  }
+  return failures;
+}
+
 export function assertPostSmokeDiagnostics(options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const smokeContext = options.smokeContext;
@@ -2939,6 +3111,8 @@ export function assertPostSmokeDiagnostics(options = {}) {
     };
   }
 
+  const typedFailures = summarizeDiagnosticFailures(records, rootDir, smokeContext, diagnosticsPath);
+
   return {
     smokeProfileName: smokeContext.smokeProfileName,
     smokeRoot: smokeContext.smokeRootRelative,
@@ -2947,6 +3121,7 @@ export function assertPostSmokeDiagnostics(options = {}) {
     logPath: DIAGNOSTIC_RELATIVE_LOG_PATH,
     requiredMethods: REQUIRED_DIAGNOSTIC_METHODS,
     required,
+    typedFailures,
     totalRowsRead: lines.length,
     validRows: records.length,
     malformedRows,
@@ -2977,11 +3152,13 @@ export function assertPostSmokeRedaction(options = {}) {
       label: "verify.s06 final evidence",
       forbiddenKeys: forbiddenEvidenceKeys,
     }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
-    assertNoUnsafeText("verify.s06 final evidence", options.evidence, {
+    const finalEvidenceOptions = {
       rootDir,
       smokeContext,
       sensitiveValues: [appDataRoot],
-    });
+    };
+    assertNoUnsafeText("verify.s06 final evidence", options.evidence, finalEvidenceOptions);
+    assertNoForbiddenPublicEvidenceText("verify.s06 final evidence", options.evidence, finalEvidenceOptions);
   }
   return {
     smokeProfileName: smokeContext.smokeProfileName,
@@ -3012,12 +3189,32 @@ function summarizeProfileStoreForEvidence(profileStore) {
   };
 }
 
+function summarizeDiagnosticsForEvidence(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return diagnostics;
+  }
+  return {
+    smokeProfileName: diagnostics.smokeProfileName,
+    smokeRoot: diagnostics.smokeRoot,
+    diagnosticsLog: diagnostics.diagnosticsLog,
+    logPath: diagnostics.logPath,
+    requiredMethods: diagnostics.requiredMethods,
+    required: diagnostics.required,
+    typedFailures: diagnostics.typedFailures,
+    totalRowsRead: diagnostics.totalRowsRead,
+    validRows: diagnostics.validRows,
+    malformedRows: diagnostics.malformedRows,
+  };
+}
+
 function summarizePublicCheckerPages(publicCheckers) {
   if (!publicCheckers || typeof publicCheckers !== "object" || !Array.isArray(publicCheckers.pages)) {
     return publicCheckers;
   }
   return {
-    ...publicCheckers,
+    status: publicCheckers.status,
+    basis: publicCheckers.basis,
+    networkDependency: publicCheckers.networkDependency,
     pages: publicCheckers.pages.map((page) => {
       if (typeof page === "string") {
         return page;
@@ -3032,6 +3229,70 @@ function summarizePublicCheckerPages(publicCheckers) {
   };
 }
 
+function summarizeObservationCounts(counts) {
+  if (!counts || typeof counts !== "object") {
+    return undefined;
+  }
+  return {
+    proxy: Number.isFinite(counts.proxy) ? counts.proxy : counts.proxy === "visible" ? "visible" : undefined,
+    target: Number.isFinite(counts.target) ? counts.target : counts.target === "visible" ? "visible" : undefined,
+  };
+}
+
+function summarizeRouteProofForEvidence(routeProof) {
+  if (!routeProof || typeof routeProof !== "object") {
+    return routeProof;
+  }
+  return {
+    status: routeProof.status,
+    basis: routeProof.basis,
+    scope: routeProof.scope,
+    protocol: routeProof.protocol,
+    credentialState: routeProof.credentialState,
+    directFallbackDetected: routeProof.directFallbackDetected === true,
+    observationCounts: summarizeObservationCounts(routeProof.observationCounts),
+  };
+}
+
+function summarizeIpHidingForEvidence(ipHiding) {
+  if (!ipHiding || typeof ipHiding !== "object") {
+    return ipHiding;
+  }
+  return {
+    status: ipHiding.status,
+    basis: ipHiding.basis,
+    scope: ipHiding.scope,
+    publicExitIpClaimed: ipHiding.publicExitIpClaimed === true,
+    localFixtureConclusion: ipHiding.localFixtureConclusion ? "local-fixture-proof" : undefined,
+  };
+}
+
+function summarizeWebRtcForEvidence(webRtc) {
+  if (!webRtc || typeof webRtc !== "object") {
+    return webRtc;
+  }
+  return {
+    status: webRtc.status,
+    basis: webRtc.basis,
+    mode: webRtc.mode,
+    policy: webRtc.policy,
+    localIpExposure: webRtc.localIpExposure,
+  };
+}
+
+function summarizeProxyForEvidence(proxy) {
+  if (!proxy || typeof proxy !== "object") {
+    return proxy;
+  }
+  return {
+    proxyVersion: proxy.proxyVersion,
+    mode: proxy.mode,
+    protocol: proxy.protocol,
+    credentialState: proxy.credentialState,
+    summary: proxy.summary,
+  };
+}
+
 function summarizeProxyCheckForEvidence(proxyCheck) {
   if (!proxyCheck || typeof proxyCheck !== "object") {
     return proxyCheck;
@@ -3040,11 +3301,36 @@ function summarizeProxyCheckForEvidence(proxyCheck) {
     proxyCheckVersion: proxyCheck.proxyCheckVersion,
     profileId: proxyCheck.profileId,
     requestId: proxyCheck.requestId,
-    proxy: proxyCheck.proxy,
-    routeProof: proxyCheck.routeProof,
-    ipHiding: proxyCheck.ipHiding,
-    webRtc: proxyCheck.webRtc,
+    proxy: summarizeProxyForEvidence(proxyCheck.proxy),
+    routeProof: summarizeRouteProofForEvidence(proxyCheck.routeProof),
+    ipHiding: summarizeIpHidingForEvidence(proxyCheck.ipHiding),
+    webRtc: summarizeWebRtcForEvidence(proxyCheck.webRtc),
     publicCheckers: summarizePublicCheckerPages(proxyCheck.publicCheckers),
+  };
+}
+
+function summarizeCleanupForEvidence(cleanup) {
+  if (!cleanup || typeof cleanup !== "object") {
+    return cleanup;
+  }
+  const ownedChromium = cleanup.ownedChromium && typeof cleanup.ownedChromium === "object"
+    ? {
+        uiStop: cleanup.ownedChromium.uiStop,
+        runtimePidCount: Array.isArray(cleanup.ownedChromium.runtimePids) ? cleanup.ownedChromium.runtimePids.length : undefined,
+        runtimePidStatuses: Array.isArray(cleanup.ownedChromium.runtimePids)
+          ? cleanup.ownedChromium.runtimePids.map((item) => item?.status).filter(Boolean)
+          : undefined,
+      }
+    : cleanup.ownedChromium;
+  const cleanupStatus = cleanup.status ?? (/failed|kill-failed|quit-failed/i.test(JSON.stringify(cleanup)) ? "needs-attention" : "pass");
+  return {
+    smokeProfileName: cleanup.smokeProfileName,
+    smokeRoot: cleanup.smokeRoot,
+    retainedSmokeRoot: cleanup.retainedSmokeRoot === true,
+    ownedChromium,
+    webdriverSession: typeof cleanup.webdriverSession === "object" ? cleanup.webdriverSession?.status : cleanup.webdriverSession,
+    driverProcess: typeof cleanup.driverProcess === "object" ? cleanup.driverProcess?.status : cleanup.driverProcess,
+    status: cleanupStatus,
   };
 }
 
@@ -3056,12 +3342,13 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
         persistence: "profile-store",
       }
     : undefined);
-  const proxy = smoke?.proxy ?? smoke?.profileStore?.proxy;
+  const proxy = summarizeProxyForEvidence(smoke?.proxy ?? smoke?.profileStore?.proxy);
   const proxyCheck = summarizeProxyCheckForEvidence(smoke?.proxyCheck);
   const routeProof = proxyCheck?.routeProof;
   const ipHiding = proxyCheck?.ipHiding;
   const webRtc = proxyCheck?.webRtc;
   const publicCheckers = proxyCheck?.publicCheckers;
+  const cleanup = summarizeCleanupForEvidence(smoke?.cleanup);
   return {
     os: { platform, arch },
     mode,
@@ -3088,6 +3375,7 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
     ipHiding,
     webRtc,
     publicCheckers,
+    directFallbackDetected: routeProof?.directFallbackDetected === true,
     observations: smoke?.observations ?? {
       running: stepByName(checks, "packaged-chromium-launch")
         ? { lifecycle: "running", runningCount: stepByName(checks, "packaged-chromium-launch")?.runningCount }
@@ -3098,9 +3386,10 @@ export function buildFinalSummary({ mode, proof, smoke, checks = STEP_RESULTS, p
     },
     restartPersistence: smoke?.restartPersistence ?? smoke?.lifecycle,
     profileStore: summarizeProfileStoreForEvidence(smoke?.profileStore),
-    diagnostics: smoke?.diagnostics,
+    diagnostics: summarizeDiagnosticsForEvidence(smoke?.diagnostics),
+    diagnosticsRequiredMethods: smoke?.diagnostics?.requiredMethods,
     redaction: smoke?.redaction,
-    cleanup: smoke?.cleanup,
+    cleanup,
     packageInspection,
     supportingRegressions: SUPPORTING_REGRESSION_COMMANDS,
   };
@@ -3268,6 +3557,7 @@ async function runPackagedUiSmoke(proof, options = {}) {
     await runStepAsync("packaged-profile-create", async () => createSmokeProfile(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const identityConfig = await runStepAsync("packaged-identity-config", async () => openSmokeIdentityConfig(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const identityApply = await runStepAsync("packaged-identity-apply", async () => applySmokeIdentityPreset(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
+    const unsupportedSocksAuth = await runStepAsync("packaged-socks-auth-negative-proof", async () => configureUnsupportedSocksProxyAndAssertProofFailure(driver, runtime, fixture), redactionOptionsForSmoke(rootDir, smokeContext));
     const proxyConfig = await runStepAsync("packaged-proxy-configure-save", async () => configureSmokeProxy(driver, runtime, fixture), redactionOptionsForSmoke(rootDir, smokeContext));
     const firstProxyCheck = await runStepAsync("packaged-saved-proxy-proof", async () => runSavedProxyProof(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     await runStepAsync("packaged-chromium-launch", async () => launchSmokeChromium(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
@@ -3288,7 +3578,9 @@ async function runPackagedUiSmoke(proof, options = {}) {
     const restartProof = await runStepAsync("packaged-restart-persistence", async () => assertRestartPersistence(driver, runtime), redactionOptionsForSmoke(rootDir, smokeContext));
     const restartProxyCheck = await runStepAsync("packaged-saved-proxy-proof-restart", async () => runSavedProxyProof(driver, runtime, { step: "packaged-saved-proxy-proof-restart" }), redactionOptionsForSmoke(rootDir, smokeContext));
     const profileStore = runStep("profile-store-persistence", () => assertPostSmokeProfileStore({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
+    const profileStoreEvidence = summarizeProfileStoreForEvidence(profileStore);
     const diagnostics = runStep("diagnostics-correlation", () => assertPostSmokeDiagnostics({ rootDir, smokeContext }), redactionOptionsForSmoke(rootDir, smokeContext));
+    const diagnosticsEvidence = summarizeDiagnosticsForEvidence(diagnostics);
     const fixtureCounts = await runStepAsync("proxy-fixture-observations", async () => fixtureObservationCounts(fixture), redactionOptionsForSmoke(rootDir, smokeContext));
 
     smokeProof = {
@@ -3303,11 +3595,11 @@ async function runPackagedUiSmoke(proof, options = {}) {
         persistence: "profile-store",
         configuredVia: "visible-ui",
       },
-      proxy: profileStore.proxy,
+      proxy: profileStoreEvidence.proxy,
       proxyCheck: {
         ...restartProxyCheck,
         profileId: profileStore.profileId,
-        proxy: profileStore.proxy,
+        proxy: profileStoreEvidence.proxy,
       },
       observations: {
         identityConfig: {
@@ -3322,6 +3614,7 @@ async function runPackagedUiSmoke(proof, options = {}) {
           summary: identityApply.summary,
         },
         proxyConfig,
+        unsupportedSocksAuth,
         savedProxyProof: firstProxyCheck,
         running: { lifecycle: "running", runningCount: 1, identity: "configured", proxy: "configured" },
         runtimeGuard,
@@ -3335,8 +3628,8 @@ async function runPackagedUiSmoke(proof, options = {}) {
         fixture: { observationCounts: fixtureCounts },
       },
       restartPersistence: restartProof.profileCard,
-      profileStore,
-      diagnostics,
+      profileStore: profileStoreEvidence,
+      diagnostics: diagnosticsEvidence,
     };
     smokeProof.redaction = runStep("diagnostics-redaction", () => assertPostSmokeRedaction({
       rootDir,

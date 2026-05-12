@@ -491,6 +491,39 @@ describe("verify-s06 guard helpers", () => {
     expect(JSON.stringify(proof)).not.toContain('"credentials"');
 
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 3,
+      profiles: [
+        {
+          id: profileId,
+          name: context.smokeProfileName,
+          storage: {
+            profileDir: `profile-store/profiles/${profileId}`,
+            userDataDir: `profile-store/profiles/${profileId}/user-data`,
+          },
+          identity: packagedSmokeIdentity(),
+          proxy: {
+            proxyVersion: 1,
+            mode: "fixedServer",
+            protocol: "http",
+            host: "proxy.example",
+            port: 8080,
+            credentials: {
+              username: "proxy-user-should-not-leak",
+              password: "proxy-pass-should-not-leak",
+            },
+          },
+        },
+      ],
+    });
+    expect(assertPostSmokeProfileStore({ rootDir: root, smokeContext: context }).proxy).toEqual({
+      proxyVersion: 1,
+      mode: "fixedServer",
+      protocol: "http",
+      credentialState: "configured",
+      summary: "http://proxy.example:8080",
+    });
+
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
       profiles: [
         {
           id: profileId,
@@ -647,6 +680,19 @@ describe("verify-s06 guard helpers", () => {
     mkdirSync(dirname(diagnosticsPath), { recursive: true });
     writeFileSync(diagnosticsPath, [
       "not-json-but-safe",
+      JSON.stringify({
+        schemaVersion: 1,
+        ts: "2026-05-09T10:10:59.000Z",
+        source: "python-sidecar",
+        event: "sidecar.request",
+        status: "error",
+        requestId: "s06-socks-negative",
+        method: "profiles.proxy.check",
+        durationMs: 7,
+        errorCode: "PROXY_SOCKS_AUTH_UNSUPPORTED",
+        detailRef: "sidecar-socks-auth-negative",
+        logPath: "profile-store/diagnostics/events.jsonl",
+      }),
       ...REQUIRED_DIAGNOSTIC_METHODS.map((method, index) => JSON.stringify({
         schemaVersion: 1,
         ts: `2026-05-09T10:11:${String(index).padStart(2, "0")}.000Z`,
@@ -676,7 +722,17 @@ describe("verify-s06 guard helpers", () => {
     expect(proof.requiredMethods).not.toContain("identity.audit.plan");
     expect(proof.requiredMethods).not.toContain("identity.audit.open");
     expect(proof.malformedRows).toBe(1);
-    expect(proof.validRows).toBe(REQUIRED_DIAGNOSTIC_METHODS.length);
+    expect(proof.validRows).toBe(REQUIRED_DIAGNOSTIC_METHODS.length + 1);
+    expect(proof.typedFailures).toEqual([
+      {
+        method: "profiles.proxy.check",
+        status: "error",
+        errorCode: "PROXY_SOCKS_AUTH_UNSUPPORTED",
+        detailRef: "sidecar-socks-auth-negative",
+        logPath: "profile-store/diagnostics/events.jsonl",
+        durationMs: 7,
+      },
+    ]);
     expect(JSON.stringify(proof)).not.toContain(root);
 
     for (const missingMethod of ["profiles.proxy.update", "profiles.proxy.check", "chromium.launch", "chromium.stop"]) {
@@ -797,7 +853,16 @@ describe("verify-s06 guard helpers", () => {
         proxy: profileStore.proxy,
         proxyCheck,
         redaction,
-        cleanup: { status: "pass" },
+        cleanup: {
+          status: "pass",
+          smokeProfileName: context.smokeProfileName,
+          smokeRoot: context.smokeRootRelative,
+          retainedSmokeRoot: true,
+          ownedChromium: { uiStop: "pass", runtimePids: [{ pid: 12345, status: "sigterm" }] },
+          webdriverSession: { status: "quit" },
+          driverProcess: { status: "terminated" },
+          driverStderrTail: "--proxy-server=http://127.0.0.1:8080 should not reach final evidence",
+        },
       },
       checks: [{ name: "package-sidecar-shape", inspections: [{ artifact: "pkg.deb", status: "pass" }] }],
     });
@@ -831,12 +896,26 @@ describe("verify-s06 guard helpers", () => {
       publicCheckers: { status: "advisory-only" },
     });
     expect(summary.routeProof).toMatchObject({ status: "proved", directFallbackDetected: false });
+    expect(summary.routeProof).not.toHaveProperty("fixture");
+    expect(summary.routeProof).not.toHaveProperty("target");
+    expect(summary.routeProof).not.toHaveProperty("durationMs");
+    expect(summary.directFallbackDetected).toBe(false);
     expect(summary.ipHiding).toMatchObject({ status: "proved", publicExitIpClaimed: false });
+    expect(summary.ipHiding).not.toHaveProperty("publicExitIp");
     expect(summary.webRtc).toMatchObject({ status: "restricted" });
     expect(summary.publicCheckers).toMatchObject({ status: "advisory-only" });
-    expect(summary.cleanup).toMatchObject({ status: "pass" });
+    expect(summary.diagnosticsRequiredMethods).toEqual(REQUIRED_DIAGNOSTIC_METHODS);
+    expect(summary.diagnostics).not.toHaveProperty("appDataRoot");
+    expect(summary.cleanup).toMatchObject({
+      status: "pass",
+      retainedSmokeRoot: true,
+      ownedChromium: { uiStop: "pass", runtimePidCount: 1, runtimePidStatuses: ["sigterm"] },
+      webdriverSession: "quit",
+      driverProcess: "terminated",
+    });
     expect(JSON.stringify(summary)).not.toContain(root);
-    expect(JSON.stringify(summary)).not.toMatch(/proxy-user-should-not-leak|proxy-pass-should-not-leak|"credentials"|Proxy-Authorization|--proxy-server|profile-store\/profiles|public checker body/i);
+    expect(JSON.stringify(summary)).not.toContain("12345");
+    expect(JSON.stringify(summary)).not.toMatch(/driver(?:Stdout|Stderr)Tail|proxy-user-should-not-leak|proxy-pass-should-not-leak|"credentials"|Proxy-Authorization|--proxy-server|profile-store\/profiles|public checker body/i);
 
     for (const evidence of [
       { credentials: { username: "redacted", password: "redacted" } },
@@ -846,6 +925,13 @@ describe("verify-s06 guard helpers", () => {
       { appDataRoot: join(context.dataRoot, "theprivator") },
       { publicCheckerBodyText: "Cloudflare trace body text ip=203.0.113.5" },
       { fixtureTrust: { spkiSha256: "verifier-only-trust-detail" } },
+      { note: "Proxy-Authorization: Basic redacted" },
+      { note: "http://alice:secret@proxy.example:8080" },
+      { note: "--proxy-server=http://127.0.0.1:8080" },
+      { note: "profile-store/profiles/profile/generated-proxy-auth-extension" },
+      { note: "profile-store/profiles/profile/user-data" },
+      { note: "https://browserleaks.com/webrtc public checker body" },
+      { note: "spkiSha256 verifier-only-trust-detail" },
     ]) {
       expect(() => assertPostSmokeRedaction({ rootDir: root, smokeContext: context, evidence })).toThrow(/forbidden|unsafe|leaked/i);
     }
