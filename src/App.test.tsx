@@ -1131,6 +1131,76 @@ describe("ThePrivator profile library UI", () => {
     expect(mockInvoke).toHaveBeenCalledWith("diagnostics_lookup", { detailRef });
   });
 
+  it("resets stale SOCKS proof state after saving a replacement HTTP proxy", async () => {
+    const socksProxy = fixedProxySummary({
+      protocol: "socks5",
+      port: 1080,
+      credentialState: "configured",
+      summary: "socks5://proxy.example:1080",
+    });
+    const httpProxy = fixedProxySummary({
+      protocol: "http",
+      port: 8080,
+      credentialState: "configured",
+      summary: "http://proxy.example:8080",
+    });
+    const profile = profileRecord({ name: "Research", proxy: socksProxy });
+    const updatedProfile = profileRecord({
+      id: profile.id,
+      name: "Research",
+      updatedAt: "2026-05-04T18:33:00.000Z",
+      proxy: httpProxy,
+    });
+    const httpProof = proxyCheckResult({
+      profileId: profile.id,
+      proxy: httpProxy,
+      routeProof: proxyCheckRouteProofProved({ credentialState: "configured", protocol: "http" }),
+      ipHiding: proxyCheckIpHidingProved(),
+      webRtc: proxyCheckWebRtcRestricted(),
+      publicCheckers: proxyCheckPublicCheckers(),
+    });
+    const detailRef = "sidecar-socks-auth-detail";
+    mockStartup([profile]);
+    mockInvoke
+      .mockRejectedValueOnce(profileError("PROXY_SOCKS_AUTH_UNSUPPORTED", "SOCKS proxy credentials cannot be used with Chromium fixed-server launch.", detailRef))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([updatedProfile], { profile: updatedProfile }), { requestId: "bridge-proxy-save-http" }))
+      .mockResolvedValueOnce(proxyCheckEnvelope(httpProof, { requestId: "bridge-proxy-check-http" }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /run saved proxy proof/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/PROXY_SOCKS_AUTH_UNSUPPORTED/i));
+    expect(within(card).queryByLabelText(/saved proxy proof results/i)).not.toBeInTheDocument();
+
+    fireEvent.click(within(card).getByRole("button", { name: /configure proxy for research/i }));
+    const panel = await within(card).findByRole("region", { name: /configure proxy for research/i });
+    fireEvent.change(within(panel).getByLabelText(/Protocol/i), { target: { value: "http" } });
+    fireEvent.change(within(panel).getByLabelText(/Port/i), { target: { value: "8080" } });
+    fireEvent.click(within(panel).getByLabelText(/Replace credentials/i));
+    fireEvent.change(within(panel).getByLabelText(/^Replacement username$/i), { target: { value: "proxy-user-should-not-leak" } });
+    fireEvent.change(within(panel).getByLabelText(/^Replacement password$/i), { target: { value: "proxy-pass-should-not-leak" } });
+    fireEvent.click(within(panel).getByRole("button", { name: /save proxy/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/Proxy configuration saved/i));
+    await waitFor(() => expect(card).not.toHaveTextContent(/PROXY_SOCKS_AUTH_UNSUPPORTED|SOCKS proxy credentials cannot be used/i));
+    expect(within(card).queryByLabelText(/saved proxy proof results/i)).not.toBeInTheDocument();
+    expect(card).toHaveTextContent(/No saved proxy proof has run yet/i);
+    expect(within(card).getByLabelText(/research saved proxy proof input/i)).toHaveTextContent(/Saved summaryhttp:\/\/proxy\.example:8080/i);
+    expect(within(card).getByLabelText(/research saved proxy proof input/i)).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+
+    fireEvent.click(within(card).getByRole("button", { name: /run saved proxy proof/i }));
+
+    const results = await within(card).findByLabelText(/saved proxy proof results/i);
+    expect(results).toHaveTextContent(/Local fixture proved saved proxy routing/i);
+    expect(results).toHaveTextContent(/ProtocolHTTP/i);
+    expect(results).toHaveTextContent(/Credential stateconfigured \(masked\)/i);
+    expect(results).toHaveTextContent(/Fallback routeNot detected/i);
+    expect(card).not.toHaveTextContent(/proxy-user-should-not-leak|proxy-pass-should-not-leak|Proxy-Authorization|--proxy-server|raw public checker body/i);
+    expect(commandCalls("profiles_proxy_check")).toHaveLength(2);
+    expect(commandCalls("profiles_proxy_update")).toHaveLength(1);
+  });
+
   it("renders saved identity as profile truth without lazy identity startup calls", async () => {
     const savedIdentity = defaultIdentity({
       label: "Banking desktop",

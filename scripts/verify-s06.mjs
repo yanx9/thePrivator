@@ -1804,6 +1804,52 @@ async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedVal
   });
 }
 
+async function readMetricValue(driver, sectionLabel, metricLabel) {
+  try {
+    const elements = await driver.findElements(By.xpath(`//*[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1]`));
+    for (const element of elements) {
+      if (!(await element.isDisplayed())) {
+        continue;
+      }
+      const text = (await element.getText()).trim();
+      return text && text !== "Unavailable" ? text : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function readProfileSectionText(driver, profileName, ariaLabel) {
+  try {
+    const regions = await driver.findElements(profileRegionByAriaLabel(profileName, ariaLabel));
+    for (const region of regions) {
+      if (!(await region.isDisplayed())) {
+        continue;
+      }
+      return (await region.getText()).trim();
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+async function readProfileCardText(driver, profileName) {
+  try {
+    const cards = await driver.findElements(profileCardByName(profileName));
+    for (const card of cards) {
+      if (!(await card.isDisplayed())) {
+        continue;
+      }
+      return (await card.getText()).trim();
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 async function assertInitialPackagedUi(driver, runtime) {
   await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-ui-initial" });
   await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "packaged-ui-initial" });
@@ -2246,6 +2292,121 @@ async function assertSmokeProxySummary(driver, runtime, options = {}) {
   };
 }
 
+const SAVED_PROXY_PROOF_VOCABULARY = Object.freeze([
+  {
+    code: "routeProof",
+    required: [
+      "Local fixture proved saved proxy routing.",
+      "The local fixture observed proxy routing",
+      "Deterministic local route proof",
+      "sidecar-managed local fixture saw the proxy path",
+    ],
+  },
+  {
+    code: "ipHiding",
+    required: [
+      "IP-hiding conclusion",
+      "target-IP hiding only for the deterministic fixture",
+    ],
+  },
+  {
+    code: "webRtc",
+    required: ["WebRTC / local-IP baseline"],
+  },
+  {
+    code: "publicCheckers",
+    required: [
+      "Public checker advisory pages",
+      "Advisory only",
+    ],
+  },
+  {
+    code: "httpProxy",
+    required: [
+      "Protocol HTTP",
+      "Credential state configured (masked)",
+      "Fallback route Not detected",
+    ],
+  },
+]);
+
+function normalizeUiTextForSearch(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function normalizedIncludes(normalizedText, expectedText) {
+  const expected = normalizeUiTextForSearch(expectedText);
+  if (normalizedText.includes(expected)) {
+    return true;
+  }
+  return normalizedText.replace(/\s+/g, "").includes(expected.replace(/\s+/g, ""));
+}
+
+export function describeSavedProxyProofUiState(state = {}) {
+  const resultText = String(state.resultText ?? "");
+  const visibleText = String(state.visibleText ?? "");
+  const phase = typeof state.phase === "string" && state.phase.trim() ? state.phase.trim() : null;
+  const request = typeof state.request === "string" && state.request.trim() ? state.request.trim() : null;
+  const previousRequest = typeof state.previousRequest === "string" && state.previousRequest.trim() ? state.previousRequest.trim() : null;
+  const normalizedResult = normalizeUiTextForSearch(resultText);
+  const normalizedVisible = normalizeUiTextForSearch(`${visibleText} ${resultText} ${phase ?? ""}`);
+  const missingVocabulary = SAVED_PROXY_PROOF_VOCABULARY
+    .filter(({ required }) => required.some((item) => !normalizedIncludes(normalizedResult, item)))
+    .map(({ code }) => code);
+  const hasResult = normalizedResult.length > 0;
+  const hasRequiredVocabulary = hasResult && missingVocabulary.length === 0;
+  const hasCurrentHttpSuccess = hasRequiredVocabulary
+    && !normalizedIncludes(normalizedResult, "Saved proxy proof completed without proving IP hiding.")
+    && normalizedIncludes(normalizedResult, "Protocol HTTP")
+    && normalizedIncludes(normalizedResult, "Credential state configured (masked)")
+    && normalizedIncludes(normalizedResult, "Fallback route Not detected");
+  return {
+    phase,
+    request,
+    previousRequest,
+    hasResult,
+    hasRequiredVocabulary,
+    hasCurrentHttpSuccess,
+    missingVocabulary,
+    runningObserved: /^running\b/i.test(phase ?? "") || normalizedIncludes(normalizedVisible, "Running saved proxy proof"),
+    staleSocksFailureObserved: normalizedIncludes(normalizedVisible, "PROXY_SOCKS_AUTH_UNSUPPORTED")
+      || normalizedIncludes(normalizedVisible, "SOCKS proxy credentials cannot be used"),
+    staleRequest: Boolean(previousRequest && request && request === previousRequest),
+  };
+}
+
+export function assertCurrentHttpSavedProxyProofUiState(state = {}, options = {}) {
+  const summary = describeSavedProxyProofUiState({
+    ...state,
+    previousRequest: options.previousRequest ?? state.previousRequest,
+  });
+  if (!summary.hasResult) {
+    fail("Current HTTP saved proxy proof results were not visible.", {
+      code: "S06_SAVED_PROXY_PROOF_MISSING",
+      proofState: summary,
+    });
+  }
+  if (!summary.hasRequiredVocabulary) {
+    fail("Current HTTP saved proxy proof result omitted required S04 vocabulary.", {
+      code: "S06_SAVED_PROXY_PROOF_MALFORMED",
+      proofState: summary,
+    });
+  }
+  if (!summary.hasCurrentHttpSuccess) {
+    fail("Current HTTP saved proxy proof did not prove the HTTP fixture.", {
+      code: "S06_SAVED_PROXY_PROOF_NOT_PROVED",
+      proofState: summary,
+    });
+  }
+  if (options.requireNewRequest !== false && summary.staleRequest) {
+    fail("Current HTTP saved proxy proof reused a stale request id.", {
+      code: "S06_SAVED_PROXY_PROOF_STALE_REQUEST",
+      proofState: summary,
+    });
+  }
+  return summary;
+}
+
 async function latestVisibleDetailRef(driver, runtime, step) {
   const visibleText = await getVisibleText(driver);
   const sidecarRefs = Array.from(visibleText.matchAll(/\bsidecar-[a-f0-9]{12}(?![a-f0-9])/gi)).map((match) => match[0]);
@@ -2398,6 +2559,7 @@ async function configureSmokeProxy(driver, runtime, fixture) {
   await waitForVisibleText(driver, "Proxy configuration saved with redacted public profile truth", runtime, { step: "packaged-proxy-save" });
   await waitForMetricValue(driver, `${profileName} proxy observability`, "Credential state", "configured (masked)", runtime, { step: "packaged-proxy-save" });
   const summary = await assertSmokeProxySummary(driver, runtime, { step: "packaged-proxy-save" });
+  await waitForSavedProxyProofResetAfterHttpSave(driver, runtime, { step: "packaged-proxy-save" });
   return {
     smokeProfileName: profileName,
     mode: "fixedServer",
@@ -2413,12 +2575,105 @@ async function configureSmokeProxy(driver, runtime, fixture) {
   };
 }
 
+async function waitForSavedProxyProofResetAfterHttpSave(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-proxy-save";
+  const timeoutMs = options.timeoutMs ?? UI_WAIT_TIMEOUT_MS;
+  const started = Date.now();
+  let lastState = null;
+  while (Date.now() - started < timeoutMs) {
+    const inputText = await readProfileSectionText(driver, profileName, `${profileName} saved proxy proof input`);
+    const resultText = await readProfileSectionText(driver, profileName, "Saved proxy proof results");
+    const cardText = await readProfileCardText(driver, profileName);
+    const phase = await readMetricValue(driver, `${profileName} proxy-check observability`, "Proxy check phase");
+    const normalizedInput = normalizeUiTextForSearch(inputText);
+    const normalizedCard = normalizeUiTextForSearch(cardText);
+    lastState = {
+      inputHttp: normalizedIncludes(normalizedInput, "Fixed endpoint")
+        && normalizedIncludes(normalizedInput, "Protocol HTTP")
+        && normalizedIncludes(normalizedInput, "Credential state configured (masked)"),
+      phase,
+      staleResultVisible: Boolean(resultText),
+      staleSocksFailureObserved: normalizedIncludes(normalizedCard, "PROXY_SOCKS_AUTH_UNSUPPORTED")
+        || normalizedIncludes(normalizedCard, "SOCKS proxy credentials cannot be used"),
+    };
+    if (/^idle\b/i.test(phase ?? "") && !lastState.staleResultVisible && !lastState.staleSocksFailureObserved) {
+      return {
+        savedProof: "reset-after-http-save",
+        input: lastState.inputHttp ? "http-fixed-configured" : "http-summary-verified",
+      };
+    }
+    await sleep(options.pollMs ?? UI_POLL_MS);
+  }
+  await failUi(driver, runtime, "HTTP proxy save did not reset stale saved-proxy proof state.", {
+    code: "S06_SAVED_PROXY_PROOF_RESET_TIMEOUT",
+    step,
+    timeoutMs,
+    proofState: lastState,
+  });
+}
+
+async function readSavedProxyProofUiState(driver, runtime, previousRequest) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const resultText = await readProfileSectionText(driver, profileName, "Saved proxy proof results");
+  const inputText = await readProfileSectionText(driver, profileName, `${profileName} saved proxy proof input`);
+  const visibleText = await getVisibleText(driver);
+  const phase = await readMetricValue(driver, `${profileName} proxy-check observability`, "Proxy check phase");
+  const request = await readMetricValue(driver, `${profileName} proxy-check observability`, "Request");
+  return describeSavedProxyProofUiState({ resultText: resultText ? `${resultText}\n${inputText}` : "", visibleText, phase, request, previousRequest });
+}
+
+async function waitForCurrentSavedProxyProofResult(driver, runtime, options = {}) {
+  const step = options.step ?? "packaged-saved-proxy-proof";
+  const previousRequest = options.previousRequest ?? null;
+  const timeoutMs = options.timeoutMs ?? UI_WAIT_TIMEOUT_MS;
+  const started = Date.now();
+  let transitionObserved = false;
+  let lastState = null;
+  while (Date.now() - started < timeoutMs) {
+    const state = await readSavedProxyProofUiState(driver, runtime, previousRequest);
+    transitionObserved = transitionObserved || state.runningObserved;
+    const newRequestObserved = Boolean(state.request && state.request !== previousRequest);
+    lastState = { ...state, transitionObserved, newRequestObserved };
+
+    if (state.hasResult && !state.hasRequiredVocabulary && (transitionObserved || newRequestObserved || !previousRequest)) {
+      await failUi(driver, runtime, "Current HTTP saved proxy proof result omitted required S04 vocabulary.", {
+        code: "S06_SAVED_PROXY_PROOF_MALFORMED",
+        step,
+        proofState: lastState,
+      });
+    }
+
+    if (state.hasResult && state.hasRequiredVocabulary && !state.hasCurrentHttpSuccess && (transitionObserved || newRequestObserved || !previousRequest)) {
+      await failUi(driver, runtime, "Current HTTP saved proxy proof result did not prove the HTTP fixture.", {
+        code: "S06_SAVED_PROXY_PROOF_NOT_PROVED",
+        step,
+        proofState: lastState,
+      });
+    }
+
+    if (state.hasCurrentHttpSuccess && (transitionObserved || newRequestObserved || !previousRequest)) {
+      return lastState;
+    }
+
+    await sleep(options.pollMs ?? UI_POLL_MS);
+  }
+
+  await failUi(driver, runtime, "Timed out waiting for current HTTP saved proxy proof results after rerun.", {
+    code: "S06_SAVED_PROXY_PROOF_TIMEOUT",
+    step,
+    timeoutMs,
+    proofState: lastState,
+  });
+}
+
 async function runSavedProxyProof(driver, runtime, options = {}) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const step = options.step ?? "packaged-saved-proxy-proof";
+  const previousRequest = await readMetricValue(driver, `${profileName} proxy-check observability`, "Request");
   const runButton = await waitForProfileButton(driver, profileName, "Run saved proxy proof", runtime, { step });
   try {
-    await runButton.click();
+    await driver.executeScript("arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' }); arguments[0].click();", runButton);
   } catch (error) {
     await failUi(driver, runtime, "Failed to click the visible Run saved proxy proof button.", {
       code: "S06_UI_CLICK_FAILED",
@@ -2427,22 +2682,14 @@ async function runSavedProxyProof(driver, runtime, options = {}) {
     });
   }
 
-  await waitForProfileSectionTexts(driver, profileName, "Saved proxy proof results", [
-    "Local fixture proved saved proxy routing.",
-    "The local fixture observed proxy routing",
-    "Deterministic local route proof",
-    "sidecar-managed local fixture saw the proxy path",
-    "IP-hiding conclusion",
-    "WebRTC / local-IP baseline",
-    "Public checker advisory pages",
-    "Advisory only",
-    "Not detected",
-  ], runtime, { step });
+  const proofUiState = await waitForCurrentSavedProxyProofResult(driver, runtime, { step, previousRequest });
   await waitForVisibleText(driver, "Saved proxy proof finished for request", runtime, { step });
   await assertNoCredentialTextVisible(driver, runtime, step);
   return {
     proxyCheckVersion: 1,
     profileId: "visible-ui-profile",
+    request: proofUiState.request ? "fresh-visible-request" : "visible-ui-request",
+    staleSocksFailureObserved: proofUiState.staleSocksFailureObserved,
     proxy: {
       proxyVersion: 1,
       mode: "fixedServer",

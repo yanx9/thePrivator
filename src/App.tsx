@@ -1129,6 +1129,19 @@ export function App() {
     }));
   }, []);
 
+  const clearProxyCheckStateForProfile = useCallback((profileId: string) => {
+    delete proxyCheckRequestByProfileRef.current[profileId];
+    setProxyCheckByProfile((current) => {
+      if (!current[profileId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[profileId];
+      return next;
+    });
+  }, []);
+
   const closeProxyConfig = useCallback(() => {
     proxyConfigRequestIdRef.current += 1;
     setProxyPanelProfileId(null);
@@ -1366,6 +1379,7 @@ export function App() {
         }
 
         applyProfileSnapshot(snapshot);
+        clearProxyCheckStateForProfile(profile.id);
         setProxyDraft(createProxyDraftState(snapshot.profile.proxy));
         setProxyConfigSuccess(createProxyConfigSuccess(profile.id, "save", snapshot.profile.proxy, snapshot.requestId, 0));
         setProxyConfigPhase("ready");
@@ -1379,7 +1393,7 @@ export function App() {
         recordProxyConfigError(profile.id, "save", error as SidecarClientError);
       }
     },
-    [applyProfileSnapshot, isProfileLoading, mutationPhase, proxyConfigPhase, proxyDraft, proxyPanelProfileId, recordProxyConfigError],
+    [applyProfileSnapshot, clearProxyCheckStateForProfile, isProfileLoading, mutationPhase, proxyConfigPhase, proxyDraft, proxyPanelProfileId, recordProxyConfigError],
   );
 
   const loadIdentityAuditPlan = useCallback((profile: ProfileRecord) => {

@@ -10,6 +10,7 @@ import {
   PACKAGED_SMOKE_PROFILE_PREFIX,
   REQUIRED_DIAGNOSTIC_METHODS,
   VerifyFailure,
+  assertCurrentHttpSavedProxyProofUiState,
   assertFreshBuildArtifacts,
   assertPostSmokeDiagnostics,
   assertPostSmokeProfileStore,
@@ -19,6 +20,7 @@ import {
   buildFinalSummary,
   buildTauriWebDriverCapabilities,
   createSmokeRunContext,
+  describeSavedProxyProofUiState,
   executableName,
   redact,
   resolveChromiumExecutable,
@@ -790,6 +792,67 @@ describe("verify-s06 guard helpers", () => {
       })}\n`, "utf8");
       expect(() => assertPostSmokeDiagnostics({ rootDir: root, smokeContext: context }), field).toThrow(message);
     }
+  });
+
+  it("rejects stale SOCKS proof state before accepting a fresh HTTP saved-proxy result", () => {
+    const staleSocksState = describeSavedProxyProofUiState({
+      visibleText: "Saved proxy proof bridge error PROXY_SOCKS_AUTH_UNSUPPORTED SOCKS proxy credentials cannot be used",
+      phase: "recoverable-error · Saved proxy proof bridge error",
+      request: "bridge-socks-negative",
+      previousRequest: "bridge-socks-negative",
+    });
+    expect(staleSocksState).toMatchObject({
+      hasResult: false,
+      hasCurrentHttpSuccess: false,
+      staleSocksFailureObserved: true,
+      staleRequest: true,
+    });
+    expect(() => assertCurrentHttpSavedProxyProofUiState({
+      visibleText: "Saved proxy proof bridge error PROXY_SOCKS_AUTH_UNSUPPORTED SOCKS proxy credentials cannot be used",
+      phase: "recoverable-error · Saved proxy proof bridge error",
+      request: "bridge-socks-negative",
+    }, { previousRequest: "bridge-socks-negative" })).toThrow(/results were not visible/i);
+
+    expect(() => assertCurrentHttpSavedProxyProofUiState({
+      resultText: "Local fixture proved saved proxy routing. Deterministic local route proof Route proof Proved Protocol HTTP Credential state configured (masked) Fallback route Not detected",
+      visibleText: "Saved proxy proof finished for request bridge-http-missing-vocab",
+      phase: "success · Saved proxy proof complete",
+      request: "bridge-http-missing-vocab",
+    }, { previousRequest: "bridge-socks-negative" })).toThrow(/required S04 vocabulary/i);
+
+    const freshHttpResult = [
+      "Local fixture proved saved proxy routing.",
+      "The local fixture observed proxy routing and concluded the proof target did not see the direct target IP.",
+      "Deterministic local route proof",
+      "The sidecar-managed local fixture saw the proxy path without bypass evidence.",
+      "Route proof Proved",
+      "Protocol HTTP",
+      "Credential state configured (masked)",
+      "Fallback route Not detected",
+      "IP-hiding conclusion",
+      "The local fixture conclusion proves target-IP hiding only for the deterministic fixture.",
+      "WebRTC / local-IP baseline",
+      "Non Proxied Udp Disabled",
+      "Public checker advisory pages",
+      "Advisory only",
+    ].join(" ");
+    const accepted = assertCurrentHttpSavedProxyProofUiState({
+      resultText: freshHttpResult,
+      visibleText: "Persisted diagnostic event summaries matched this detailRef. PROXY_SOCKS_AUTH_UNSUPPORTED Saved proxy proof finished for request bridge-http-current",
+      phase: "success · Saved proxy proof complete",
+      request: "bridge-http-current",
+    }, { previousRequest: "bridge-socks-negative" });
+    expect(accepted).toMatchObject({
+      hasCurrentHttpSuccess: true,
+      staleSocksFailureObserved: true,
+      staleRequest: false,
+    });
+    expect(() => assertCurrentHttpSavedProxyProofUiState({
+      resultText: freshHttpResult,
+      visibleText: "Saved proxy proof finished for request bridge-http-current",
+      phase: "success · Saved proxy proof complete",
+      request: "bridge-http-current",
+    }, { previousRequest: "bridge-http-current" })).toThrow(/stale request/i);
   });
 
   it("emits a redacted final summary with packaged proxy proof evidence", () => {
