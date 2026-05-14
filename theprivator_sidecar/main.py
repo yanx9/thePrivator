@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 import time
-from typing import Any, Callable, Dict, Optional, TextIO, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, TextIO, Tuple
 
 from . import chromium, identity_audit, legacy_import, proxy_check
 from .diagnostics import append_events
@@ -43,8 +44,14 @@ def run(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entrypoint used by ``python -m theprivator_sidecar``."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["automation-api"]:
+        from .automation_api import run_from_env
+
+        return run_from_env(os.environ)
+
     return run(sys.stdin, sys.stdout, sys.stderr)
 
 

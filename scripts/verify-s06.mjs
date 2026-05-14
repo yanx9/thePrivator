@@ -2667,18 +2667,65 @@ async function waitForCurrentSavedProxyProofResult(driver, runtime, options = {}
   });
 }
 
-async function runSavedProxyProof(driver, runtime, options = {}) {
-  const profileName = runtime.smokeContext.smokeProfileName;
-  const step = options.step ?? "packaged-saved-proxy-proof";
-  const previousRequest = await readMetricValue(driver, `${profileName} proxy-check observability`, "Request");
-  const runButton = await waitForProfileButton(driver, profileName, "Run saved proxy proof", runtime, { step });
+async function waitForSavedProxyProofKickoff(driver, runtime, previousRequest, options = {}) {
+  const timeoutMs = options.timeoutMs ?? Math.min(4000, UI_WAIT_TIMEOUT_MS);
+  const started = Date.now();
+  let lastState = null;
+  while (Date.now() - started < timeoutMs) {
+    const state = await readSavedProxyProofUiState(driver, runtime, previousRequest);
+    const newRequestObserved = Boolean(state.request && state.request !== previousRequest);
+    lastState = { ...state, newRequestObserved };
+    if (state.runningObserved || state.hasResult || newRequestObserved) {
+      return lastState;
+    }
+    await sleep(options.pollMs ?? UI_POLL_MS);
+  }
+  return lastState;
+}
+
+async function clickRunSavedProxyProofButton(driver, runtime, button, attempt, step) {
   try {
-    await driver.executeScript("arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' }); arguments[0].click();", runButton);
+    await driver.executeScript("arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' });", button);
+    if (attempt === 1) {
+      await button.click();
+      return "native-click";
+    }
+    await driver.executeScript("arguments[0].click();", button);
+    return "dom-click";
   } catch (error) {
     await failUi(driver, runtime, "Failed to click the visible Run saved proxy proof button.", {
       code: "S06_UI_CLICK_FAILED",
       step,
+      attempt,
       message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function runSavedProxyProof(driver, runtime, options = {}) {
+  const profileName = runtime.smokeContext.smokeProfileName;
+  const step = options.step ?? "packaged-saved-proxy-proof";
+  const previousRequest = await readMetricValue(driver, `${profileName} proxy-check observability`, "Request");
+  const clickAttempts = [];
+  let kickoffState = null;
+
+  for (const attempt of [1, 2]) {
+    const runButton = await waitForProfileButton(driver, profileName, "Run saved proxy proof", runtime, { step });
+    const clickMode = await clickRunSavedProxyProofButton(driver, runtime, runButton, attempt, step);
+    kickoffState = await waitForSavedProxyProofKickoff(driver, runtime, previousRequest, { step });
+    clickAttempts.push({ attempt, clickMode, kickoffState });
+    if (kickoffState?.runningObserved || kickoffState?.hasResult || kickoffState?.newRequestObserved) {
+      break;
+    }
+  }
+
+  if (!kickoffState?.runningObserved && !kickoffState?.hasResult && !kickoffState?.newRequestObserved) {
+    await failUi(driver, runtime, "Run saved proxy proof button did not start a visible proof request.", {
+      code: "S06_SAVED_PROXY_PROOF_NOT_STARTED",
+      step,
+      previousRequest,
+      clickAttempts,
+      proofState: kickoffState,
     });
   }
 
