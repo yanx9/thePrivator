@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "verify:sidecar": "node scripts/verify-sidecar.mjs",
+    "verify:m004:s01": "node scripts/verify-m004-s01.mjs",
     "verify:s01": "node scripts/verify-s01.mjs",
     "verify:s01:packaged": "node scripts/verify-s01.mjs --package-artifacts-only",
     "verify:s02": "node scripts/verify-s02.mjs",
