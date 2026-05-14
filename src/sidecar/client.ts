@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AutomationApiEndpointSnapshot,
+  AutomationApiErrorSnapshot,
+  AutomationApiLifecycleStatus,
+  AutomationApiProcessSnapshot,
+  AutomationApiStatusResult,
+  AutomationApiStatusSnapshot,
+  AutomationApiTimingSnapshot,
   ChromiumLaunchResult,
   ChromiumLaunchSnapshot,
   ChromiumRunningProfileState,
@@ -300,6 +307,65 @@ const FORBIDDEN_PUBLIC_PROXY_FIELD_TOKENS = new Set([
   "argv",
 ]);
 
+const FORBIDDEN_AUTOMATION_API_FIELD_TOKENS = new Set([
+  "appdata",
+  "appdatadir",
+  "appdataroot",
+  "args",
+  "argv",
+  "auth",
+  "authorization",
+  "bearer",
+  "cdp",
+  "cdpendpoint",
+  "command",
+  "credential",
+  "credentials",
+  "debug",
+  "debugport",
+  "devtools",
+  "devtoolsactiveport",
+  "diagnostics",
+  "env",
+  "environment",
+  "launchargs",
+  "path",
+  "raw",
+  "rawdiagnostics",
+  "root",
+  "stderr",
+  "stdout",
+  "store",
+  "storeroot",
+  "token",
+  "userdata",
+  "userdatadir",
+  "websocket",
+  "websocketdebuggerurl",
+  "websocketurl",
+]);
+
+const FORBIDDEN_AUTOMATION_API_TEXT_MARKERS = [
+  "authorization:",
+  "authorization=",
+  "bearer ",
+  "cdp://",
+  "devtoolsactiveport",
+  "raw diagnostics",
+  "rawdiagnostics",
+  "stderr",
+  "stdout",
+  "store_root",
+  "storeroot",
+  "theprivator_automation_api_store_root",
+  "theprivator_automation_api_token",
+  "tpapi-",
+  "--remote-debugging-port",
+  "--user-data-dir",
+  "ws://",
+  "wss://",
+];
+
 let detailCounter = 0;
 
 export async function getSidecarHealth(): Promise<SidecarHealthSnapshot> {
@@ -523,6 +589,54 @@ export async function importLegacyProfiles(
     const envelope = await invoke<unknown>("legacy_import_profiles", { legacyRoot, items });
     return parseLegacyImportEnvelope(envelope, new Date().toISOString());
   } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function startAutomationApi(): Promise<AutomationApiStatusSnapshot> {
+  try {
+    const snapshot = await invoke<unknown>("automation_api_start");
+    return parseAutomationApiStatusSnapshot(snapshot, new Date().toISOString());
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function getAutomationApiStatus(): Promise<AutomationApiStatusSnapshot> {
+  try {
+    const snapshot = await invoke<unknown>("automation_api_status");
+    return parseAutomationApiStatusSnapshot(snapshot, new Date().toISOString());
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function copyAutomationApiToken(): Promise<string> {
+  try {
+    const result = await invoke<unknown>("automation_api_copy_token");
+    return parseAutomationApiTokenCopy(result);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function stopAutomationApi(): Promise<AutomationApiStatusSnapshot> {
+  try {
+    const snapshot = await invoke<unknown>("automation_api_stop");
+    return parseAutomationApiStatusSnapshot(snapshot, new Date().toISOString());
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
     throw normalizeSidecarError(error);
   }
 }
@@ -913,6 +1027,111 @@ function parseLegacyImportEnvelope(value: unknown, receivedAt: string): LegacyIm
     receivedAt,
     ...result,
   };
+}
+
+function parseAutomationApiStatusSnapshot(value: unknown, receivedAt: string): AutomationApiStatusSnapshot {
+  return {
+    ...parseAutomationApiStatusResult(value),
+    receivedAt,
+  };
+}
+
+function parseAutomationApiStatusResult(value: unknown): AutomationApiStatusResult {
+  const record = requireRecord(value, "The automation API lifecycle response must be an object.");
+  assertNoForbiddenAutomationApiFields(record, "automationApi");
+  requireAutomationApiKeys(
+    record,
+    ["status", "running", "api", "process", "copyAvailable", "lastTransitionAt", "lastError", "timings"],
+    ["status", "running", "copyAvailable", "lastTransitionAt", "timings"],
+    "automationApi",
+  );
+
+  const status = requireAutomationApiLifecycleStatus(record.status, "automationApi.status");
+  const running = requireBoolean(record.running, "automationApi.running");
+  const api = record.api === undefined || record.api === null ? null : parseAutomationApiEndpoint(record.api, "automationApi.api");
+  const process = record.process === undefined || record.process === null ? null : parseAutomationApiProcess(record.process, "automationApi.process");
+  const copyAvailable = requireBoolean(record.copyAvailable, "automationApi.copyAvailable");
+  const lastError = record.lastError === undefined || record.lastError === null ? null : parseAutomationApiError(record.lastError, "automationApi.lastError");
+
+  if ((status === "running") !== running) {
+    throw makeProtocolError("The automation API lifecycle status and running flag disagreed.");
+  }
+  if (running && (!api || !process)) {
+    throw makeProtocolError("The automation API running state must include loopback endpoint and process metadata.");
+  }
+  if (!running && (api || process || copyAvailable)) {
+    throw makeProtocolError("The automation API stopped state must not expose endpoint, process, or copy availability.");
+  }
+
+  return {
+    status,
+    running,
+    api,
+    process,
+    copyAvailable,
+    lastTransitionAt: requireIsoTimestamp(record.lastTransitionAt, "automationApi.lastTransitionAt"),
+    lastError,
+    timings: parseAutomationApiTimings(record.timings, "automationApi.timings"),
+  };
+}
+
+function parseAutomationApiEndpoint(value: unknown, field: string): AutomationApiEndpointSnapshot {
+  const record = requireRecord(value, `The automation API field ${field} must be an object.`);
+  assertNoForbiddenAutomationApiFields(record, field);
+  requireAutomationApiKeys(record, ["host", "port", "url", "scope"], ["host", "port", "url", "scope"], field);
+  const host = requireAutomationApiLoopbackHost(record.host, `${field}.host`);
+  const port = requireProxyPort(record.port, `${field}.port`);
+  const url = requireAutomationApiLoopbackUrl(record.url, host, port, `${field}.url`);
+  return {
+    host,
+    port,
+    url,
+    scope: requireLiteral(record.scope, `${field}.scope`, "loopback"),
+  };
+}
+
+function parseAutomationApiProcess(value: unknown, field: string): AutomationApiProcessSnapshot {
+  const record = requireRecord(value, `The automation API field ${field} must be an object.`);
+  assertNoForbiddenAutomationApiFields(record, field);
+  requireAutomationApiKeys(record, ["pid", "startedAt"], ["pid", "startedAt"], field);
+  return {
+    pid: requirePositiveInteger(record.pid, `${field}.pid`),
+    startedAt: requireIsoTimestamp(record.startedAt, `${field}.startedAt`),
+  };
+}
+
+function parseAutomationApiError(value: unknown, field: string): AutomationApiErrorSnapshot {
+  const record = requireRecord(value, `The automation API field ${field} must be an object.`);
+  assertNoForbiddenAutomationApiFields(record, field);
+  requireAutomationApiKeys(record, ["code", "message", "phase", "detailRef", "at", "durationMs"], ["code", "message", "phase", "detailRef", "at"], field);
+  return compactOptionalFields({
+    code: requireDiagnosticErrorCode(record.code, `${field}.code`),
+    message: requireAutomationApiSafeText(record.message, `${field}.message`, { maxLength: 256 }),
+    phase: requireAutomationApiErrorPhase(record.phase, `${field}.phase`),
+    detailRef: requireDetailRef(record.detailRef, `${field}.detailRef`),
+    at: requireIsoTimestamp(record.at, `${field}.at`),
+    durationMs: record.durationMs === undefined ? undefined : requireNonNegativeNumber(record.durationMs, `${field}.durationMs`),
+  });
+}
+
+function parseAutomationApiTimings(value: unknown, field: string): AutomationApiTimingSnapshot {
+  const record = requireRecord(value, `The automation API field ${field} must be an object.`);
+  assertNoForbiddenAutomationApiFields(record, field);
+  requireAutomationApiKeys(record, ["readinessDurationMs", "stopDurationMs"], [], field);
+  return compactOptionalFields({
+    readinessDurationMs: record.readinessDurationMs === undefined ? undefined : requireNonNegativeNumber(record.readinessDurationMs, `${field}.readinessDurationMs`),
+    stopDurationMs: record.stopDurationMs === undefined ? undefined : requireNonNegativeNumber(record.stopDurationMs, `${field}.stopDurationMs`),
+  });
+}
+
+function parseAutomationApiTokenCopy(value: unknown): string {
+  const record = requireRecord(value, "The automation API token copy response must be an object.");
+  requireAutomationApiKeys(record, ["token"], ["token"], "automationApiTokenCopy");
+  const token = requireString(record.token, "automationApiTokenCopy.token");
+  if (!/^tpapi-[A-Za-z0-9._:-]{8,160}$/.test(token) || containsControlCharacters(token)) {
+    throw makeProtocolError("The automation API token copy response did not contain a bounded token.");
+  }
+  return token;
 }
 
 function parseChromiumStatusEnvelope(value: unknown, receivedAt: string): ChromiumStatusSnapshot {
@@ -2297,6 +2516,103 @@ function containsUnsafeAuditText(value: string): boolean {
     return true;
   }
   return false;
+}
+
+function requireAutomationApiKeys(record: Record<string, unknown>, allowed: string[], required: string[], field: string): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(record)) {
+    if (!allowedSet.has(key)) {
+      throw makeProtocolError(`The automation API field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of required) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The automation API field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function assertNoForbiddenAutomationApiFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenAutomationApiFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    if (typeof value === "string" && containsUnsafeAutomationApiText(value)) {
+      throw makeProtocolError(`The automation API field ${field} must not expose token material, raw diagnostics, app-data roots, or debug endpoints.`);
+    }
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_AUTOMATION_API_FIELD_TOKENS.has(fieldToken(key))) {
+      throw makeProtocolError(`The automation API field ${field}.${key} must not expose token material, raw diagnostics, app-data roots, or debug endpoints.`);
+    }
+    assertNoForbiddenAutomationApiFields(item, `${field}.${key}`);
+  }
+}
+
+function containsUnsafeAutomationApiText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (FORBIDDEN_AUTOMATION_API_TEXT_MARKERS.some((marker) => lowered.includes(marker))) {
+    return true;
+  }
+  if (/(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /(?:^|\s)[A-Za-z]:[\\/][^\s]+/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function requireAutomationApiLifecycleStatus(value: unknown, field: string): AutomationApiLifecycleStatus {
+  if (value === "stopped" || value === "running") {
+    return value;
+  }
+  throw makeProtocolError(`The automation API field ${field} must be a known lifecycle status.`);
+}
+
+function requireAutomationApiLoopbackHost(value: unknown, field: string): string {
+  const host = requireString(value, field).trim();
+  if (host === "::1" || host === "0:0:0:0:0:0:0:1") {
+    return host;
+  }
+  const parts = host.split(".");
+  if (parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    return host;
+  }
+  throw makeProtocolError(`The automation API field ${field} must be a loopback IP address.`);
+}
+
+function requireAutomationApiLoopbackUrl(value: unknown, host: string, port: number, field: string): string {
+  const url = requireString(value, field);
+  const expectedUrl = host.includes(":") ? `http://[${host}]:${port}` : `http://${host}:${port}`;
+  if (url !== expectedUrl) {
+    throw makeProtocolError(`The automation API field ${field} must match the loopback endpoint.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw makeProtocolError(`The automation API field ${field} must be a valid loopback URL.`);
+  }
+  if (parsed.protocol !== "http:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw makeProtocolError(`The automation API field ${field} must be a safe loopback URL.`);
+  }
+  return url;
+}
+
+function requireAutomationApiErrorPhase(value: unknown, field: string): string {
+  const phase = requireNonBlankString(value, field);
+  if (phase.length > 64 || containsControlCharacters(phase) || !/^[A-Za-z][A-Za-z0-9_.:-]*$/.test(phase)) {
+    throw makeProtocolError(`The automation API field ${field} must be a safe lifecycle phase.`);
+  }
+  return phase;
+}
+
+function requireAutomationApiSafeText(value: unknown, field: string, options: { maxLength: number }): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > options.maxLength || containsControlCharacters(text) || containsUnsafeAutomationApiText(text)) {
+    throw makeProtocolError(`The automation API field ${field} must be safe UI copy.`);
+  }
+  return text;
 }
 
 function requireExactProxyCheckKeys(record: Record<string, unknown>, keys: string[], field: string): void {

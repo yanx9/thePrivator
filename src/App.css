@@ -1791,6 +1791,74 @@ p {
   margin-top: 18px;
 }
 
+.automation-api-card {
+  display: grid;
+  gap: 16px;
+}
+
+.automation-api-metrics {
+  padding: 14px;
+  border: 1px solid rgba(242, 234, 219, 0.1);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(154, 178, 111, 0.08), rgba(212, 135, 75, 0.045)),
+    rgba(0, 0, 0, 0.13);
+}
+
+.automation-api-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.automation-api-actions button {
+  width: 100%;
+}
+
+.automation-api-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.automation-api-feedback {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(242, 234, 219, 0.12);
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.automation-api-feedback p {
+  margin-bottom: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.automation-api-feedback--success {
+  border-color: rgba(154, 178, 111, 0.44);
+  background:
+    linear-gradient(180deg, rgba(154, 178, 111, 0.16), rgba(154, 178, 111, 0.06)),
+    rgba(0, 0, 0, 0.14);
+}
+
+.automation-api-feedback--success > strong {
+  color: #def4b2;
+}
+
+.automation-api-feedback--error {
+  border-color: rgba(230, 120, 95, 0.46);
+  background:
+    linear-gradient(180deg, rgba(230, 120, 95, 0.14), rgba(230, 120, 95, 0.055)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.automation-api-feedback--error > strong {
+  color: #ffe0d7;
+}
+
 .telemetry-card {
   background:
     linear-gradient(155deg, rgba(154, 178, 111, 0.1), transparent 48%),
@@ -1892,6 +1960,7 @@ p {
 
   .section-heading button,
   .section-actions button,
+  .automation-api-actions,
   .create-controls button,
   .legacy-scan-controls button,
   .legacy-import-actions button,
@@ -1908,6 +1977,7 @@ p {
   }
 
   .profile-metadata,
+  .automation-api-actions,
   .defaults-grid,
   .runtime-proof-grid,
   .identity-audit-page-card__actions,

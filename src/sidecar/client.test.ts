@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createProfile,
-  deleteProfile,
-  getChromiumStatus,
-  getIdentityAuditPlan,
   applyProfileIdentityPreset,
   checkProfileProxy,
+  copyAutomationApiToken,
+  createProfile,
+  deleteProfile,
+  getAutomationApiStatus,
+  getChromiumStatus,
+  getIdentityAuditPlan,
   getSidecarHealth,
   importLegacyProfiles,
   launchChromiumProfile,
@@ -15,6 +17,8 @@ import {
   lookupDiagnosticDetail,
   openIdentityAuditPage,
   scanLegacyProfiles,
+  startAutomationApi,
+  stopAutomationApi,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
@@ -48,6 +52,64 @@ function healthEnvelope(overrides: Record<string, unknown> = {}) {
       build: { mode: "source", frozen: false },
       request: { durationMs: 1.25 },
     },
+    ...overrides,
+  };
+}
+
+function automationApiStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "running",
+    running: true,
+    api: {
+      host: "127.0.0.1",
+      port: 43123,
+      url: "http://127.0.0.1:43123",
+      scope: "loopback",
+    },
+    process: {
+      pid: 5151,
+      startedAt: "2026-05-04T18:15:00.000Z",
+    },
+    copyAvailable: true,
+    lastTransitionAt: "2026-05-04T18:15:00.000Z",
+    timings: {
+      readinessDurationMs: 25.5,
+    },
+    ...overrides,
+  };
+}
+
+function automationApiStopped(overrides: Record<string, unknown> = {}) {
+  return automationApiStatus({
+    status: "stopped",
+    running: false,
+    api: undefined,
+    process: undefined,
+    copyAvailable: false,
+    lastTransitionAt: "2026-05-04T18:16:00.000Z",
+    timings: {
+      readinessDurationMs: 25.5,
+      stopDurationMs: 8.75,
+    },
+    ...overrides,
+  });
+}
+
+function automationApiTokenCopy(token = "tpapi-sentinel-token-should-not-render", overrides: Record<string, unknown> = {}) {
+  return {
+    token,
+    ...overrides,
+  };
+}
+
+function automationApiLastError(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "AUTOMATION_API_START_TIMEOUT",
+    message: "Automation API process did not emit readiness before the timeout.",
+    phase: "readiness",
+    detailRef: "bridge-automation-timeout-detail",
+    at: "2026-05-04T18:16:30.000Z",
+    durationMs: 5000,
     ...overrides,
   };
 }
@@ -1288,6 +1350,105 @@ describe("sidecar client", () => {
       detailRef: "sidecar-legacy-detail",
       source: "sidecar",
       phase: "recoverable-error",
+    });
+  });
+
+  it("parses safe automation API running and stopped lifecycle snapshots", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(automationApiStatus())
+      .mockResolvedValueOnce(automationApiStopped());
+
+    const running = await getAutomationApiStatus();
+    const stopped = await getAutomationApiStatus();
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "automation_api_status");
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "automation_api_status");
+    expect(running).toMatchObject({
+      status: "running",
+      running: true,
+      api: { host: "127.0.0.1", port: 43123, url: "http://127.0.0.1:43123", scope: "loopback" },
+      process: { pid: 5151, startedAt: "2026-05-04T18:15:00.000Z" },
+      copyAvailable: true,
+    });
+    expect(stopped).toMatchObject({
+      status: "stopped",
+      running: false,
+      api: null,
+      process: null,
+      copyAvailable: false,
+    });
+    expect(JSON.stringify(running)).not.toMatch(/tpapi-|storeRoot|Authorization|webSocket|debugPort|argv/i);
+  });
+
+  it("wraps automation API lifecycle commands with fixed command names and no frontend authority", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(automationApiStatus({ lastTransitionAt: "2026-05-04T18:17:00.000Z" }))
+      .mockResolvedValueOnce(automationApiTokenCopy())
+      .mockResolvedValueOnce(automationApiStopped());
+
+    const started = await startAutomationApi();
+    const token = await copyAutomationApiToken();
+    const stopped = await stopAutomationApi();
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "automation_api_start");
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "automation_api_copy_token");
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "automation_api_stop");
+    expect(started.status).toBe("running");
+    expect(token).toBe("tpapi-sentinel-token-should-not-render");
+    expect(stopped.status).toBe("stopped");
+  });
+
+  it("preserves stopped copy-token failures as safe typed errors", async () => {
+    mockInvoke.mockRejectedValueOnce({
+      code: "AUTOMATION_API_COPY_UNAVAILABLE",
+      message: "Automation API credential is unavailable because the API is stopped.",
+      recoverable: true,
+      detailRef: "bridge-automation-copy-detail",
+    });
+
+    await expect(copyAutomationApiToken()).rejects.toMatchObject({
+      code: "AUTOMATION_API_COPY_UNAVAILABLE",
+      message: "Automation API credential is unavailable because the API is stopped.",
+      recoverable: true,
+      detailRef: "bridge-automation-copy-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("automation_api_copy_token");
+  });
+
+  it.each([
+    ["unknown lifecycle phase", automationApiStatus({ status: "starting" })],
+    ["running flag mismatch", automationApiStatus({ running: false })],
+    ["missing running endpoint", automationApiStatus({ api: undefined })],
+    ["non-loopback URL", automationApiStatus({ api: { host: "127.0.0.1", port: 43123, url: "http://198.51.100.1:43123", scope: "loopback" } })],
+    ["unsafe token field", automationApiStatus({ token: "tpapi-sentinel-token-should-not-render" })],
+    ["unsafe store root field", automationApiStatus({ storeRoot: "/tmp/theprivator-app-data-root-should-not-leak" })],
+    ["unsafe debug endpoint field", automationApiStatus({ webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/browser" })],
+    ["missing last error detailRef", automationApiStopped({ lastError: automationApiLastError({ detailRef: undefined }) })],
+    ["token in last error text", automationApiStopped({ lastError: automationApiLastError({ message: "tpapi-sentinel-token-should-not-render" }) })],
+  ])("rejects malformed or unsafe automation API payloads: %s", async (_caseName, payload) => {
+    mockInvoke.mockResolvedValueOnce(payload);
+
+    await expect(getAutomationApiStatus()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["extra copy-token field", automationApiTokenCopy(undefined, { storeRoot: "/tmp/theprivator-app-data-root-should-not-leak" })],
+    ["malformed token", automationApiTokenCopy("not-a-valid-local-token")],
+  ])("rejects malformed automation API token-copy responses: %s", async (_caseName, payload) => {
+    mockInvoke.mockResolvedValueOnce(payload);
+
+    await expect(copyAutomationApiToken()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
     });
   });
 

@@ -326,6 +326,57 @@ function profileError(code: string, message: string, detailRef = "profile-detail
   };
 }
 
+function automationApiStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "running",
+    running: true,
+    api: {
+      host: "127.0.0.1",
+      port: 43123,
+      url: "http://127.0.0.1:43123",
+      scope: "loopback",
+    },
+    process: {
+      pid: 5151,
+      startedAt: "2026-05-04T18:15:00.000Z",
+    },
+    copyAvailable: true,
+    lastTransitionAt: "2026-05-04T18:15:00.000Z",
+    timings: {
+      readinessDurationMs: 25.5,
+    },
+    ...overrides,
+  };
+}
+
+function automationApiStopped(overrides: Record<string, unknown> = {}) {
+  return automationApiStatus({
+    status: "stopped",
+    running: false,
+    api: undefined,
+    process: undefined,
+    copyAvailable: false,
+    lastTransitionAt: "2026-05-04T18:16:00.000Z",
+    timings: {
+      readinessDurationMs: 25.5,
+      stopDurationMs: 8.75,
+    },
+    ...overrides,
+  });
+}
+
+function automationApiTokenCopy(token = "tpapi-sentinel-token-should-not-render") {
+  return { token };
+}
+
+function installMockClipboard(writeText = vi.fn().mockResolvedValue(undefined)) {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
+
 function chromiumRunningProfile(overrides: Record<string, unknown> = {}) {
   const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "11111111-1111-1111-1111-111111111111";
   return {
@@ -651,6 +702,10 @@ function commandCalls(command: string) {
 describe("ThePrivator profile library UI", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
   });
 
   it("starts health, profile list, and Chromium status without a startup waterfall and renders the empty-state CTA", async () => {
@@ -2873,6 +2928,157 @@ describe("ThePrivator profile library UI", () => {
     });
   });
 
+  it("runs the Automation API lifecycle controls and copies the token without rendering it", async () => {
+    const writeText = installMockClipboard();
+    const running = automationApiStatus();
+    const stopped = automationApiStopped();
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(automationApiTokenCopy())
+      .mockResolvedValueOnce(stopped);
+
+    render(<App />);
+
+    const panel = await screen.findByLabelText(/automation api lifecycle controls/i);
+    expect(panel).toHaveTextContent(/status not checked/i);
+    expect(within(panel).getByRole("button", { name: /copy token/i })).toBeDisabled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: /start api/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/running/i));
+    expect(panel).toHaveTextContent(/http:\/\/127\.0\.0\.1:43123/i);
+    expect(panel).toHaveTextContent(/GET http:\/\/127\.0\.0\.1:43123\/health/i);
+    expect(panel).toHaveTextContent(/GET http:\/\/127\.0\.0\.1:43123\/v1\/status/i);
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|Authorization|Bearer/i);
+    expect(mockInvoke).toHaveBeenCalledWith("automation_api_start");
+
+    fireEvent.click(within(panel).getByRole("button", { name: /copy token/i }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("tpapi-sentinel-token-should-not-render"));
+    expect(panel).toHaveTextContent(/Token copied to the clipboard and discarded/i);
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|Authorization|Bearer/i);
+    expect(mockInvoke).toHaveBeenCalledWith("automation_api_copy_token");
+
+    fireEvent.click(within(panel).getByRole("button", { name: /stop api/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/stopped/i));
+    expect(within(panel).getByRole("button", { name: /copy token/i })).toBeDisabled();
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|Authorization|Bearer/i);
+    expect(mockInvoke).toHaveBeenCalledWith("automation_api_stop");
+  });
+
+  it("keeps previous Automation API status visible and supports diagnostic lookup after a status failure", async () => {
+    const detailRef = "bridge-automation-status-detail";
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(automationApiStatus())
+      .mockRejectedValueOnce({
+        code: "AUTOMATION_API_CHILD_STATUS_FAILED",
+        message: "Automation API process status could not be inspected.",
+        recoverable: true,
+        detailRef,
+      })
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, {
+          source: "rust-bridge",
+          event: "sidecar.bridge_failure",
+          errorCode: "AUTOMATION_API_CHILD_STATUS_FAILED",
+          method: "automation_api.status",
+        })],
+      }));
+
+    render(<App />);
+
+    const panel = await screen.findByLabelText(/automation api lifecycle controls/i);
+    fireEvent.click(within(panel).getByRole("button", { name: /start api/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/http:\/\/127\.0\.0\.1:43123/i));
+
+    fireEvent.click(within(panel).getByRole("button", { name: /refresh api status/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/AUTOMATION_API_CHILD_STATUS_FAILED/i));
+    expect(panel).toHaveTextContent(/http:\/\/127\.0\.0\.1:43123/i);
+    expect(panel).toHaveTextContent(detailRef);
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|Authorization|Bearer|ws:\/\//i);
+
+    fireEvent.click(within(panel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/AUTOMATION_API_CHILD_STATUS_FAILED/i);
+    expect(lookupPanel).toHaveTextContent(/automation_api\.status/i);
+    expect(mockInvoke).toHaveBeenCalledWith("diagnostics_lookup", { detailRef });
+  });
+
+  it("shows safe Automation API copy failures without rendering token material", async () => {
+    const writeText = installMockClipboard(vi.fn().mockRejectedValue(new Error("clipboard denied with token tpapi-sentinel-token-should-not-render")));
+    mockStartup([]);
+    mockInvoke
+      .mockResolvedValueOnce(automationApiStatus())
+      .mockResolvedValueOnce(automationApiTokenCopy())
+      .mockRejectedValueOnce({
+        code: "AUTOMATION_API_COPY_UNAVAILABLE",
+        message: "Automation API credential is unavailable because the API is stopped.",
+        recoverable: true,
+        detailRef: "bridge-automation-copy-detail",
+      });
+
+    render(<App />);
+
+    const panel = await screen.findByLabelText(/automation api lifecycle controls/i);
+    fireEvent.click(within(panel).getByRole("button", { name: /start api/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/running/i));
+
+    fireEvent.click(within(panel).getByRole("button", { name: /copy token/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("tpapi-sentinel-token-should-not-render"));
+    expect(panel).toHaveTextContent(/Clipboard write failed/i);
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|clipboard denied|Authorization|Bearer/i);
+
+    installMockClipboard();
+    fireEvent.click(within(panel).getByRole("button", { name: /copy token/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/AUTOMATION_API_COPY_UNAVAILABLE/i));
+    expect(panel).toHaveTextContent(/bridge-automation-copy-detail/i);
+    expect(panel).not.toHaveTextContent(/tpapi-sentinel-token-should-not-render|Authorization|Bearer/i);
+  });
+
+  it("disables Automation API actions while a lifecycle command is in flight", async () => {
+    const start = deferred<unknown>();
+    mockStartup([]);
+    mockInvoke.mockImplementation(((command: string) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "automation_api_start") {
+        return start.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+
+    const panel = await screen.findByLabelText(/automation api lifecycle controls/i);
+    fireEvent.click(within(panel).getByRole("button", { name: /start api/i }));
+
+    await waitFor(() => expect(within(panel).getByRole("button", { name: /starting api/i })).toBeDisabled());
+    expect(within(panel).getByRole("button", { name: /refresh api status/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /copy token/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /stop api/i })).toBeDisabled();
+    expect(commandCalls("automation_api_start")).toHaveLength(1);
+
+    await act(async () => {
+      start.resolve(automationApiStatus());
+      await start.promise;
+    });
+
+    await waitFor(() => expect(within(panel).getByRole("button", { name: /refresh api status/i })).toBeEnabled());
+  });
+
   it("does not add direct browser or Tauri filesystem bypasses for legacy import", () => {
     const source = appSource();
 
@@ -2886,13 +3092,17 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("openIdentityAuditPage");
     expect(source).toContain("validateProxy");
     expect(source).toContain("updateProfileProxy");
+    expect(source).toContain("startAutomationApi");
+    expect(source).toContain("getAutomationApiStatus");
+    expect(source).toContain("copyAutomationApiToken");
+    expect(source).toContain("stopAutomationApi");
     expect(source).not.toMatch(/value=\"pac\"|value='pac'|value=\"system\"|value='system'|value=\"directFallback\"|value='directFallback'/);
     expect(source).not.toMatch(/PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/);
     expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs|shell)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
     expect(source).not.toMatch(/type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/);
-    expect(source).not.toMatch(/guaranteed undetectability|universal green|universal pass/i);
+    expect(source).not.toMatch(/Authorization|Bearer|guaranteed undetectability|universal green|universal pass/i);
   });
 
   it("keeps the S01 diagnostic recovery pattern in the compact system panel", async () => {

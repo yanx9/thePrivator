@@ -642,6 +642,50 @@ export interface LegacyImportSnapshot extends LegacyImportResult {
   receivedAt: string;
 }
 
+export type AutomationApiLifecycleStatus = "stopped" | "running";
+export type AutomationApiScope = "loopback";
+
+export interface AutomationApiEndpointSnapshot {
+  host: string;
+  port: number;
+  url: string;
+  scope: AutomationApiScope;
+}
+
+export interface AutomationApiProcessSnapshot {
+  pid: number;
+  startedAt: string;
+}
+
+export interface AutomationApiErrorSnapshot {
+  code: string;
+  message: string;
+  phase: string;
+  detailRef: string;
+  at: string;
+  durationMs?: number;
+}
+
+export interface AutomationApiTimingSnapshot {
+  readinessDurationMs?: number;
+  stopDurationMs?: number;
+}
+
+export interface AutomationApiStatusResult {
+  status: AutomationApiLifecycleStatus;
+  running: boolean;
+  api: AutomationApiEndpointSnapshot | null;
+  process: AutomationApiProcessSnapshot | null;
+  copyAvailable: boolean;
+  lastTransitionAt: string;
+  lastError: AutomationApiErrorSnapshot | null;
+  timings: AutomationApiTimingSnapshot;
+}
+
+export interface AutomationApiStatusSnapshot extends AutomationApiStatusResult {
+  receivedAt: string;
+}
+
 export type ChromiumRuntimeStatus = "running" | "stopped";
 
 export type ChromiumTermination = "already-stopped" | "graceful" | "forced" | "reconciled";

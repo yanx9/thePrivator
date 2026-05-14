@@ -29,8 +29,10 @@ import {
 } from "./proxyControls";
 import {
   applyProfileIdentityPreset,
+  copyAutomationApiToken,
   createProfile,
   deleteProfile,
+  getAutomationApiStatus,
   getChromiumStatus,
   getIdentityAuditPlan,
   getSidecarHealth,
@@ -41,6 +43,8 @@ import {
   lookupDiagnosticDetail,
   openIdentityAuditPage,
   scanLegacyProfiles,
+  startAutomationApi,
+  stopAutomationApi,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
   updateProfile,
@@ -51,6 +55,7 @@ import {
   checkProfileProxy,
 } from "./sidecar/client";
 import type {
+  AutomationApiStatusSnapshot,
   ChromiumRunningProfileState,
   ChromiumStatusSnapshot,
   ChromiumStoppedProfileState,
@@ -80,6 +85,38 @@ import type {
 } from "./sidecar/types";
 
 type HealthBusyAction = "health" | "diagnostic" | null;
+type AutomationApiAction = "start" | "status" | "copy-token" | "stop";
+type AutomationApiUiPhase =
+  | "idle"
+  | "ready"
+  | "starting"
+  | "refreshing"
+  | "copying"
+  | "stopping"
+  | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+type AutomationApiError = {
+  action: AutomationApiAction;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+type AutomationApiCopyFeedback = {
+  kind: "success" | "error";
+  message: string;
+  occurredAt: string;
+  error?: SidecarClientError;
+} | null;
+type AutomationApiViewState = {
+  phase: AutomationApiUiPhase;
+  status: AutomationApiStatusSnapshot | null;
+  error: AutomationApiError | null;
+  currentAction: AutomationApiAction | null;
+  lastSuccess: {
+    action: Exclude<AutomationApiAction, "copy-token">;
+    occurredAt: string;
+    status: AutomationApiStatusSnapshot["status"];
+  } | null;
+  copyFeedback: AutomationApiCopyFeedback;
+};
 type ProfilePhase = "loading" | "ready" | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
 type ProfileMutationPhase = "idle" | "creating" | "renaming" | "deleting";
 type ProfileErrorContext = "startup" | "refresh" | "create" | "rename" | "delete";
@@ -297,6 +334,33 @@ const INITIAL_DIAGNOSTIC_LOOKUP_STATE: DiagnosticLookupState = {
   checkedAt: null,
 };
 
+const INITIAL_AUTOMATION_API_STATE: AutomationApiViewState = {
+  phase: "idle",
+  status: null,
+  error: null,
+  currentAction: null,
+  lastSuccess: null,
+  copyFeedback: null,
+};
+
+const AUTOMATION_API_PHASE_LABELS: Record<AutomationApiUiPhase, string> = {
+  idle: "Automation API status not checked",
+  ready: "Automation API lifecycle ready",
+  starting: "Starting automation API",
+  refreshing: "Refreshing automation API status",
+  copying: "Copying automation API token",
+  stopping: "Stopping automation API",
+  "recoverable-error": "Recoverable automation API error",
+  "bridge-error": "Automation API bridge error",
+};
+
+const AUTOMATION_API_ACTION_LABELS: Record<AutomationApiAction, string> = {
+  start: "Start API",
+  status: "Refresh API status",
+  "copy-token": "Copy token",
+  stop: "Stop API",
+};
+
 const HEALTH_PHASE_LABELS: Record<SidecarUiPhase, string> = {
   loading: "Checking sidecar",
   healthy: "Sidecar healthy",
@@ -423,6 +487,7 @@ const CHROMIUM_STATUS_POLL_MS = 2800;
 export function App() {
   const [healthState, setHealthState] = useState<HealthViewState>(INITIAL_HEALTH_STATE);
   const [healthBusyAction, setHealthBusyAction] = useState<HealthBusyAction>("health");
+  const [automationApiState, setAutomationApiState] = useState<AutomationApiViewState>(INITIAL_AUTOMATION_API_STATE);
   const [profiles, setProfiles] = useState<ProfileRecord[]>([]);
   const [profilePhase, setProfilePhase] = useState<ProfilePhase>("loading");
   const [profileError, setProfileError] = useState<ProfileUiError | null>(null);
@@ -480,6 +545,8 @@ export function App() {
   const [proxyCheckByProfile, setProxyCheckByProfile] = useState<ProxyCheckStateByProfile>({});
 
   const healthInFlightRef = useRef(false);
+  const automationApiActionInFlightRef = useRef(false);
+  const automationApiRequestIdRef = useRef(0);
   const profileLoadInFlightRef = useRef(false);
   const chromiumStatusInFlightRef = useRef(false);
   const diagnosticLookupRequestIdRef = useRef(0);
@@ -709,6 +776,159 @@ export function App() {
       setHealthBusyAction(null);
     }
   }, [finishHealthWithError]);
+
+  const runAutomationApiStatusAction = useCallback(
+    async (
+      action: Exclude<AutomationApiAction, "copy-token">,
+      operation: () => Promise<AutomationApiStatusSnapshot>,
+    ) => {
+      if (automationApiActionInFlightRef.current) {
+        return;
+      }
+
+      const requestId = automationApiRequestIdRef.current + 1;
+      automationApiRequestIdRef.current = requestId;
+      automationApiActionInFlightRef.current = true;
+      setAutomationApiState((current) => ({
+        ...current,
+        phase: action === "start" ? "starting" : action === "stop" ? "stopping" : "refreshing",
+        currentAction: action,
+        error: null,
+        copyFeedback: action === "stop" ? null : current.copyFeedback,
+      }));
+
+      try {
+        const snapshot = await operation();
+        if (automationApiRequestIdRef.current !== requestId) {
+          return;
+        }
+        setAutomationApiState((current) => ({
+          ...current,
+          phase: "ready",
+          status: snapshot,
+          error: null,
+          currentAction: null,
+          lastSuccess: {
+            action,
+            occurredAt: snapshot.receivedAt,
+            status: snapshot.status,
+          },
+          copyFeedback: action === "stop" ? null : current.copyFeedback,
+        }));
+      } catch (error) {
+        if (automationApiRequestIdRef.current !== requestId) {
+          return;
+        }
+        const clientError = error as SidecarClientError;
+        setAutomationApiState((current) => ({
+          ...current,
+          phase: clientError.phase,
+          error: {
+            action,
+            error: clientError,
+            occurredAt: new Date().toISOString(),
+          },
+          currentAction: null,
+        }));
+      } finally {
+        if (automationApiRequestIdRef.current === requestId) {
+          automationApiActionInFlightRef.current = false;
+        }
+      }
+    },
+    [],
+  );
+
+  const handleCopyAutomationApiToken = useCallback(async () => {
+    if (automationApiActionInFlightRef.current) {
+      return;
+    }
+
+    const requestId = automationApiRequestIdRef.current + 1;
+    automationApiRequestIdRef.current = requestId;
+    automationApiActionInFlightRef.current = true;
+    setAutomationApiState((current) => ({
+      ...current,
+      phase: "copying",
+      currentAction: "copy-token",
+      error: null,
+      copyFeedback: null,
+    }));
+
+    try {
+      const token = await copyAutomationApiToken();
+      try {
+        const clipboard = navigator.clipboard;
+        if (!clipboard || typeof clipboard.writeText !== "function") {
+          throw makeAutomationApiUiError(
+            "AUTOMATION_API_CLIPBOARD_UNAVAILABLE",
+            "Clipboard write is unavailable in this webview. The token was discarded without rendering it.",
+          );
+        }
+        await clipboard.writeText(token);
+      } catch (clipboardError) {
+        if (isSafeUiError(clipboardError)) {
+          throw clipboardError;
+        }
+        throw makeAutomationApiUiError(
+          "AUTOMATION_API_CLIPBOARD_WRITE_FAILED",
+          "Clipboard write failed. The token was discarded without rendering it.",
+        );
+      }
+
+      if (automationApiRequestIdRef.current !== requestId) {
+        return;
+      }
+      setAutomationApiState((current) => ({
+        ...current,
+        phase: "ready",
+        error: null,
+        currentAction: null,
+        copyFeedback: {
+          kind: "success",
+          message: "Token copied to the clipboard and discarded from UI state.",
+          occurredAt: new Date().toISOString(),
+        },
+      }));
+    } catch (error) {
+      if (automationApiRequestIdRef.current !== requestId) {
+        return;
+      }
+      const clientError = error as SidecarClientError;
+      setAutomationApiState((current) => ({
+        ...current,
+        phase: clientError.phase,
+        error: {
+          action: "copy-token",
+          error: clientError,
+          occurredAt: new Date().toISOString(),
+        },
+        currentAction: null,
+        copyFeedback: {
+          kind: "error",
+          message: clientError.message,
+          occurredAt: new Date().toISOString(),
+          error: clientError,
+        },
+      }));
+    } finally {
+      if (automationApiRequestIdRef.current === requestId) {
+        automationApiActionInFlightRef.current = false;
+      }
+    }
+  }, []);
+
+  const handleStartAutomationApi = useCallback(() => {
+    void runAutomationApiStatusAction("start", startAutomationApi);
+  }, [runAutomationApiStatusAction]);
+
+  const handleRefreshAutomationApiStatus = useCallback(() => {
+    void runAutomationApiStatusAction("status", getAutomationApiStatus);
+  }, [runAutomationApiStatusAction]);
+
+  const handleStopAutomationApi = useCallback(() => {
+    void runAutomationApiStatusAction("stop", stopAutomationApi);
+  }, [runAutomationApiStatusAction]);
 
   const refreshProfiles = useCallback(
     async (context: ProfileErrorContext = "refresh") => {
@@ -2023,6 +2243,15 @@ export function App() {
             onDiagnosticLookup={runDiagnosticLookup}
             onRefreshHealth={refreshHealth}
             onTriggerDiagnostic={triggerDiagnosticError}
+          />
+          <AutomationApiPanel
+            diagnosticLookupState={diagnosticLookupState}
+            state={automationApiState}
+            onCopyToken={handleCopyAutomationApiToken}
+            onDiagnosticLookup={runDiagnosticLookup}
+            onRefreshStatus={handleRefreshAutomationApiStatus}
+            onStart={handleStartAutomationApi}
+            onStop={handleStopAutomationApi}
           />
           <DiagnosticLookupPanel state={diagnosticLookupState} onRetry={retryDiagnosticLookup} />
           <ProfileTelemetry
@@ -4635,6 +4864,132 @@ function SystemStatusPanel({
   );
 }
 
+function AutomationApiPanel({
+  diagnosticLookupState,
+  state,
+  onCopyToken,
+  onDiagnosticLookup,
+  onRefreshStatus,
+  onStart,
+  onStop,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: AutomationApiViewState;
+  onCopyToken: () => void;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onRefreshStatus: () => void;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const status = state.status;
+  const isBusy = state.currentAction !== null;
+  const isRunning = status?.running ?? false;
+  const tone = state.phase === "ready" && isRunning
+    ? "ready"
+    : state.phase === "idle" || state.phase === "starting" || state.phase === "refreshing" || state.phase === "copying" || state.phase === "stopping"
+      ? "pending"
+      : state.error
+        ? "error"
+        : "ready";
+  const commandError = state.error;
+  const statusError = status?.lastError ?? null;
+  const copyFeedback = state.copyFeedback;
+  const safeUrl = status?.api?.url ?? null;
+
+  return (
+    <section className={`sidecar-card automation-api-card sidecar-card--${tone}`} aria-label="Automation API lifecycle controls" aria-live="polite">
+      <div className="sidecar-card__header">
+        <div>
+          <p className="kicker">Automation API</p>
+          <h2>{AUTOMATION_API_PHASE_LABELS[state.phase]}</h2>
+        </div>
+        <span className="mini-phase" aria-label={`Automation API UI phase: ${state.phase}`}>{state.phase}</span>
+      </div>
+
+      <dl className="metric-list automation-api-metrics" aria-label="Automation API safe status">
+        <Metric label="Lifecycle phase" value={status ? `${status.status} · ${status.running ? "running" : "stopped"}` : "Not checked"} />
+        <Metric label="Loopback URL" value={safeUrl ?? "Unavailable until running"} />
+        <Metric label="Port" value={status?.api?.port} />
+        <Metric label="Scope" value={status?.api?.scope ?? "Loopback only"} />
+        <Metric label="Health route" value={safeUrl ? `GET ${safeUrl}/health` : "GET /health after start"} />
+        <Metric label="Protected route" value={safeUrl ? `GET ${safeUrl}/v1/status` : "GET /v1/status after start"} />
+        <Metric label="Copy available" value={status?.copyAvailable ? "yes" : "no"} />
+        <Metric label="Started" value={formatProfileTimestamp(status?.process?.startedAt)} />
+        <Metric label="Last transition" value={formatProfileTimestamp(status?.lastTransitionAt)} />
+        <Metric label="Last received" value={formatProfileTimestamp(status?.receivedAt)} />
+        <Metric label="Readiness duration" value={formatAutomationDuration(status?.timings.readinessDurationMs)} />
+        <Metric label="Stop duration" value={formatAutomationDuration(status?.timings.stopDurationMs)} />
+        <Metric label="Last command" value={state.lastSuccess ? `${AUTOMATION_API_ACTION_LABELS[state.lastSuccess.action]} → ${state.lastSuccess.status}` : "No successful command"} />
+        <Metric label="Last command at" value={formatProfileTimestamp(state.lastSuccess?.occurredAt)} />
+        <Metric label="Last error code" value={commandError?.error.code ?? statusError?.code} />
+        <Metric label="Last error phase" value={commandError ? AUTOMATION_API_ACTION_LABELS[commandError.action] : statusError?.phase} />
+        <Metric label="Last detailRef" value={commandError?.error.detailRef ?? statusError?.detailRef} />
+      </dl>
+
+      <div className="automation-api-actions" aria-label="Automation API actions">
+        <button type="button" onClick={onStart} disabled={isBusy || isRunning}>
+          {state.currentAction === "start" ? "Starting API…" : "Start API"}
+        </button>
+        <button type="button" className="button--secondary" onClick={onRefreshStatus} disabled={isBusy}>
+          {state.currentAction === "status" ? "Refreshing API status…" : "Refresh API status"}
+        </button>
+        <button type="button" className="button--secondary" onClick={onCopyToken} disabled={isBusy || !status?.copyAvailable}>
+          {state.currentAction === "copy-token" ? "Copying token…" : "Copy token"}
+        </button>
+        <button type="button" className="button--ghost-danger" onClick={onStop} disabled={isBusy || !isRunning}>
+          {state.currentAction === "stop" ? "Stopping API…" : "Stop API"}
+        </button>
+      </div>
+
+      <p className="automation-api-note">
+        Token material is never displayed. Copy requests write directly to the system clipboard from this button handler and then discard the value.
+      </p>
+
+      {copyFeedback ? (
+        <div className={`automation-api-feedback automation-api-feedback--${copyFeedback.kind}`} role="status" aria-live="polite">
+          <strong>{copyFeedback.kind === "success" ? "Copy completed safely." : "Copy failed safely."}</strong>
+          <p>{copyFeedback.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Occurred" value={formatProfileTimestamp(copyFeedback.occurredAt)} />
+            <Metric label="Code" value={copyFeedback.error?.code} />
+            <Metric label="detailRef" value={copyFeedback.error?.detailRef} />
+          </dl>
+          {copyFeedback.error ? <DiagnosticReference detailRef={copyFeedback.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} /> : null}
+        </div>
+      ) : null}
+
+      {commandError ? (
+        <div className="automation-api-feedback automation-api-feedback--error" role="status" aria-live="polite">
+          <strong>{AUTOMATION_API_ACTION_LABELS[commandError.action]} failed safely.</strong>
+          <p>{commandError.error.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Code" value={commandError.error.code} />
+            <Metric label="Source" value={commandError.error.source} />
+            <Metric label="Occurred" value={formatProfileTimestamp(commandError.occurredAt)} />
+            <Metric label="detailRef" value={commandError.error.detailRef} />
+          </dl>
+          <DiagnosticReference detailRef={commandError.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+        </div>
+      ) : null}
+
+      {statusError ? (
+        <div className="automation-api-feedback automation-api-feedback--error" role="status" aria-live="polite">
+          <strong>Last lifecycle error snapshot.</strong>
+          <p>{statusError.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Code" value={statusError.code} />
+            <Metric label="Phase" value={statusError.phase} />
+            <Metric label="At" value={formatProfileTimestamp(statusError.at)} />
+            <Metric label="Duration" value={formatAutomationDuration(statusError.durationMs)} />
+            <Metric label="detailRef" value={statusError.detailRef} />
+          </dl>
+          <DiagnosticReference detailRef={statusError.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function DiagnosticReference({
   detailRef,
   state,
@@ -4845,6 +5200,10 @@ function formatDuration(value: number | undefined): string {
   return typeof value === "number" ? `${value.toFixed(2)} ms` : "Awaiting health";
 }
 
+function formatAutomationDuration(value: number | undefined): string {
+  return typeof value === "number" ? `${value.toFixed(2)} ms` : "Unavailable";
+}
+
 function formatHealthCheckedAt(value: string | null): string {
   if (!value) {
     return "Not checked yet";
@@ -5045,6 +5404,30 @@ function formatReconciliation(value: ChromiumStoppedProfileState | null): string
 
 function formatLegacyUserDataStatus(value: LegacyScanCandidate["userData"]["status"]): string {
   return value === "available" ? "User-data available" : "No user-data found";
+}
+
+function makeAutomationApiUiError(code: string, message: string): SidecarClientError {
+  return {
+    code,
+    message,
+    recoverable: true,
+    detailRef: `ui-automation-api-${code.toLowerCase().replace(/_/g, "-")}`,
+    source: "ui",
+    phase: "recoverable-error",
+  };
+}
+
+function isSafeUiError(value: unknown): value is SidecarClientError {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "code" in value &&
+    "message" in value &&
+    "recoverable" in value &&
+    "detailRef" in value &&
+    "source" in value &&
+    "phase" in value
+  );
 }
 
 function makeLegacyUiError(code: string, message: string): SidecarClientError {
