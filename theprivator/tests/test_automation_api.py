@@ -7,6 +7,11 @@ from typing import Mapping, Optional
 
 import pytest
 
+pytest.importorskip(
+    "fastapi",
+    reason="FastAPI automation API contract tests require requirements.txt runtime dependencies.",
+)
+
 from theprivator_sidecar import automation_api
 from theprivator_sidecar.automation_api import (
     AUTOMATION_API_VERSION,

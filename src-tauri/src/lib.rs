@@ -1,3 +1,4 @@
+mod automation_api;
 mod diagnostics;
 mod sidecar;
 
@@ -25,9 +26,14 @@ mod commands {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(automation_api::AutomationApiSupervisor::new())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::shell_status,
+            automation_api::automation_api_start,
+            automation_api::automation_api_status,
+            automation_api::automation_api_copy_token,
+            automation_api::automation_api_stop,
             diagnostics::diagnostics_lookup,
             sidecar::sidecar_health,
             sidecar::sidecar_diagnostic_failure,
