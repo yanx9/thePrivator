@@ -21,6 +21,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from . import chromium
 from .diagnostics import append_events
 from .profiles import ProfileRecord, ProfileStore, defaults_for_proxy, normalize_profile_identity
 from .protocol import (
@@ -33,6 +34,7 @@ from .protocol import (
     AUTOMATION_AUTH_REQUIRED,
     INTERNAL_ERROR,
     INVALID_REQUEST,
+    PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_UNAVAILABLE,
     PROFILE_STORE_WRITE_FAILED,
@@ -50,6 +52,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 0
 MAX_AUTHORIZATION_HEADER_LENGTH = 8192
 PROFILE_API_VERSION = 1
+RUNTIME_API_VERSION = 1
 DEFAULT_PROFILE_LIST_LIMIT = 50
 MAX_PROFILE_LIST_LIMIT = 100
 _PROFILE_CURSOR_PREFIX = "p_"
@@ -57,6 +60,8 @@ _PROFILE_CURSOR_MARKER = "profiles:"
 _MAX_PROFILE_CURSOR_LENGTH = 96
 _URLSAFE_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 _AUTOMATION_PROFILES_LIST_METHOD = "automation.profiles.list"
+_AUTOMATION_PROFILES_STATUS_METHOD = "automation.profiles.status"
+_AUTOMATION_RUNTIME_STATUS_METHOD = "automation.runtime.status"
 
 ENV_HOST = "THEPRIVATOR_AUTOMATION_API_HOST"
 ENV_PORT = "THEPRIVATOR_AUTOMATION_API_PORT"
@@ -72,6 +77,7 @@ _SAFE_ERROR_DETAILS = {
     "routing": {"phase": "routing"},
     "http": {"phase": "http"},
     "profile": {"phase": "profile"},
+    "runtime": {"phase": "runtime"},
 }
 
 
@@ -249,12 +255,19 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
                 "Profile list pagination is invalid.",
                 make_detail_ref(),
                 started,
+                method=_AUTOMATION_PROFILES_LIST_METHOD,
             )
             raise AssertionError("unreachable") from exc
         except AutomationHttpError:
             raise
         except SidecarError as error:
-            _raise_profile_sidecar_http_error(request, error, started)
+            _raise_profile_sidecar_http_error(
+                request,
+                error,
+                started,
+                method=_AUTOMATION_PROFILES_LIST_METHOD,
+                invalid_message="Profile list request is invalid.",
+            )
             raise AssertionError("unreachable") from error
         except Exception as exc:
             detail_ref = make_detail_ref()
@@ -265,8 +278,66 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
                 "Profile list request failed unexpectedly.",
                 detail_ref,
                 started,
+                method=_AUTOMATION_PROFILES_LIST_METHOD,
             )
             raise AssertionError("unreachable") from exc
+
+    @app.get("/v1/runtime/status")
+    async def runtime_status(request: Request, _authorized: None = Depends(require_token)) -> JsonObject:
+        started = time.perf_counter()
+        return _load_automation_runtime_status(
+            request,
+            method=_AUTOMATION_RUNTIME_STATUS_METHOD,
+            started=started,
+        )
+
+    @app.get("/v1/profiles/{profile_id}/status")
+    async def profile_status(
+        profile_id: str,
+        request: Request,
+        _authorized: None = Depends(require_token),
+    ) -> JsonObject:
+        started = time.perf_counter()
+        try:
+            profile = ProfileStore(_request_config(request).store_root).get(profile_id)
+        except AutomationHttpError:
+            raise
+        except SidecarError as error:
+            _raise_profile_sidecar_http_error(
+                request,
+                error,
+                started,
+                method=_AUTOMATION_PROFILES_STATUS_METHOD,
+                invalid_message="Profile status request is invalid.",
+            )
+            raise AssertionError("unreachable") from error
+        except Exception as exc:
+            detail_ref = make_detail_ref()
+            _raise_profile_http_error(
+                request,
+                500,
+                INTERNAL_ERROR,
+                "Profile status request failed unexpectedly.",
+                detail_ref,
+                started,
+                method=_AUTOMATION_PROFILES_STATUS_METHOD,
+            )
+            raise AssertionError("unreachable") from exc
+
+        runtime = _load_automation_runtime_status(
+            request,
+            method=_AUTOMATION_PROFILES_STATUS_METHOD,
+            started=started,
+        )
+        return {
+            "profileApiVersion": PROFILE_API_VERSION,
+            "runtimeApiVersion": RUNTIME_API_VERSION,
+            "profile": _automation_profile_summary(profile),
+            "runtime": _runtime_state_for_profile(profile.id, runtime),
+            "request": {
+                "requestId": request.state.request_id,
+            },
+        }
 
     return app
 
@@ -571,19 +642,30 @@ def _proxy_host_for_summary(host: str) -> str:
     return host
 
 
-def _raise_profile_sidecar_http_error(request: Request, error: SidecarError, started: float) -> None:
+def _raise_profile_sidecar_http_error(
+    request: Request,
+    error: SidecarError,
+    started: float,
+    *,
+    method: str,
+    invalid_message: str,
+) -> None:
     if error.code == INVALID_REQUEST:
         _raise_profile_http_error(
             request,
             400,
             INVALID_REQUEST,
-            "Profile list request is invalid.",
+            invalid_message,
             error.detail_ref,
             started,
+            method=method,
         )
 
+    if error.code == PROFILE_NOT_FOUND:
+        _raise_profile_http_error(request, 404, PROFILE_NOT_FOUND, error.message, error.detail_ref, started, method=method)
+
     if error.code in {PROFILE_STORE_CORRUPT, PROFILE_STORE_UNAVAILABLE, PROFILE_STORE_WRITE_FAILED}:
-        _raise_profile_http_error(request, 503, error.code, error.message, error.detail_ref, started)
+        _raise_profile_http_error(request, 503, error.code, error.message, error.detail_ref, started, method=method)
 
     _raise_profile_http_error(
         request,
@@ -592,6 +674,7 @@ def _raise_profile_sidecar_http_error(request: Request, error: SidecarError, sta
         "Profile store is corrupt.",
         error.detail_ref,
         started,
+        method=method,
     )
 
 
@@ -602,8 +685,10 @@ def _raise_profile_http_error(
     message: str,
     detail_ref: str,
     started: float,
+    *,
+    method: str,
 ) -> None:
-    _record_profile_error(request, code, detail_ref, started)
+    _record_domain_error(request, method=method, code=code, detail_ref=detail_ref, started=started)
     raise AutomationHttpError(
         status_code=status_code,
         code=code,
@@ -613,13 +698,13 @@ def _raise_profile_http_error(
     )
 
 
-def _record_profile_error(request: Request, code: str, detail_ref: str, started: float) -> None:
+def _record_domain_error(request: Request, *, method: str, code: str, detail_ref: str, started: float) -> None:
     append_events(
         _request_config(request).store_root,
         [
             diagnostic_event(
                 request_id=getattr(request.state, "request_id", None),
-                method=_AUTOMATION_PROFILES_LIST_METHOD,
+                method=method,
                 status="error",
                 duration_ms=_elapsed_ms(started),
                 error_code=code,
@@ -627,7 +712,159 @@ def _record_profile_error(request: Request, code: str, detail_ref: str, started:
             )
         ],
         request_id=getattr(request.state, "request_id", None),
-        method=_AUTOMATION_PROFILES_LIST_METHOD,
+        method=method,
+    )
+
+
+def _load_automation_runtime_status(request: Request, *, method: str, started: float) -> JsonObject:
+    try:
+        raw_status = chromium.status(_request_config(request).store_root)
+        return _automation_runtime_status(raw_status, request)
+    except AutomationHttpError:
+        raise
+    except ValueError as exc:
+        detail_ref = make_detail_ref()
+        _raise_runtime_http_error(
+            request,
+            503,
+            INTERNAL_ERROR,
+            "Chromium runtime status is unavailable.",
+            detail_ref,
+            started,
+            method=method,
+        )
+        raise AssertionError("unreachable") from exc
+    except SidecarError as error:
+        _raise_runtime_sidecar_http_error(request, error, started, method=method)
+        raise AssertionError("unreachable") from error
+    except Exception as exc:
+        detail_ref = make_detail_ref()
+        _raise_runtime_http_error(
+            request,
+            503,
+            INTERNAL_ERROR,
+            "Chromium runtime status request failed unexpectedly.",
+            detail_ref,
+            started,
+            method=method,
+        )
+        raise AssertionError("unreachable") from exc
+
+
+def _automation_runtime_status(raw_status: Mapping[str, Any], request: Request) -> JsonObject:
+    if not isinstance(raw_status, Mapping):
+        raise ValueError("runtime status must be a mapping")
+    raw_profiles = raw_status.get("profiles")
+    raw_reconciled = raw_status.get("reconciled")
+    raw_running_count = raw_status.get("runningCount")
+    if not isinstance(raw_profiles, list) or not isinstance(raw_reconciled, list):
+        raise ValueError("runtime status collections are malformed")
+    if not isinstance(raw_running_count, int) or raw_running_count < 0:
+        raise ValueError("runtime runningCount is malformed")
+
+    safe_profiles = [_safe_runtime_entry(item, expected_status="running") for item in raw_profiles]
+    safe_reconciled = [_safe_runtime_entry(item, expected_status="stopped") for item in raw_reconciled]
+    if raw_running_count != len(safe_profiles):
+        raise ValueError("runtime runningCount does not match running profiles")
+
+    return {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "runningCount": len(safe_profiles),
+        "profiles": safe_profiles,
+        "reconciled": safe_reconciled,
+        "request": {
+            "requestId": request.state.request_id,
+        },
+    }
+
+
+def _safe_runtime_entry(raw_entry: Any, *, expected_status: str) -> JsonObject:
+    if not isinstance(raw_entry, Mapping):
+        raise ValueError("runtime entry must be a mapping")
+    profile_id = raw_entry.get("profileId")
+    status = raw_entry.get("status")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise ValueError("runtime entry profileId is malformed")
+    if status != expected_status:
+        raise ValueError("runtime entry status is malformed")
+
+    entry: JsonObject = {
+        "profileId": profile_id,
+        "status": status,
+    }
+    if status == "running":
+        started_at = raw_entry.get("startedAt")
+        if not isinstance(started_at, str) or not started_at.endswith("Z"):
+            raise ValueError("runtime running entry startedAt is malformed")
+        entry["startedAt"] = started_at
+        return entry
+
+    stopped_at = raw_entry.get("stoppedAt")
+    termination = raw_entry.get("termination")
+    if not isinstance(stopped_at, str) or not stopped_at.endswith("Z"):
+        raise ValueError("runtime stopped entry stoppedAt is malformed")
+    if not isinstance(termination, str) or not termination:
+        raise ValueError("runtime stopped entry termination is malformed")
+    entry["stoppedAt"] = stopped_at
+    entry["termination"] = termination
+    return entry
+
+
+def _runtime_state_for_profile(profile_id: str, runtime: Mapping[str, Any]) -> JsonObject:
+    for collection_name in ("profiles", "reconciled"):
+        collection = runtime.get(collection_name, [])
+        if not isinstance(collection, list):
+            continue
+        for entry in collection:
+            if isinstance(entry, Mapping) and entry.get("profileId") == profile_id:
+                return dict(entry)
+    return {
+        "profileId": profile_id,
+        "status": "stopped",
+    }
+
+
+def _raise_runtime_sidecar_http_error(request: Request, error: SidecarError, started: float, *, method: str) -> None:
+    if error.code == INVALID_REQUEST:
+        _raise_runtime_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Chromium runtime status request is invalid.",
+            error.detail_ref,
+            started,
+            method=method,
+        )
+
+    status_code = 503
+    _raise_runtime_http_error(
+        request,
+        status_code,
+        error.code,
+        error.message,
+        error.detail_ref,
+        started,
+        method=method,
+    )
+
+
+def _raise_runtime_http_error(
+    request: Request,
+    status_code: int,
+    code: str,
+    message: str,
+    detail_ref: str,
+    started: float,
+    *,
+    method: str,
+) -> None:
+    _record_domain_error(request, method=method, code=code, detail_ref=detail_ref, started=started)
+    raise AutomationHttpError(
+        status_code=status_code,
+        code=code,
+        message=message,
+        phase="runtime",
+        detail_ref=detail_ref,
     )
 
 
@@ -737,6 +974,7 @@ __all__ = [
     "ENV_TOKEN",
     "MAX_PROFILE_LIST_LIMIT",
     "PROFILE_API_VERSION",
+    "RUNTIME_API_VERSION",
     "AutomationApiConfig",
     "AutomationHttpError",
     "AutomationStartupError",

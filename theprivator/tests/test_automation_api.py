@@ -12,7 +12,7 @@ pytest.importorskip(
     reason="FastAPI automation API contract tests require requirements.txt runtime dependencies.",
 )
 
-from theprivator_sidecar import automation_api
+from theprivator_sidecar import automation_api, chromium
 from theprivator_sidecar.automation_api import (
     AUTOMATION_API_VERSION,
     DEFAULT_PROFILE_LIST_LIMIT,
@@ -22,6 +22,7 @@ from theprivator_sidecar.automation_api import (
     ENV_TOKEN,
     MAX_PROFILE_LIST_LIMIT,
     PROFILE_API_VERSION,
+    RUNTIME_API_VERSION,
     AutomationApiConfig,
     AutomationStartupError,
     bind_loopback_socket,
@@ -39,10 +40,13 @@ from theprivator_sidecar.protocol import (
     AUTOMATION_API_CONFIGURATION_ERROR,
     AUTOMATION_AUTH_INVALID,
     AUTOMATION_AUTH_REQUIRED,
+    INTERNAL_ERROR,
     INVALID_REQUEST,
+    PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_UNAVAILABLE,
     SIDECAR_VERSION,
+    SidecarError,
 )
 from theprivator_sidecar.proxy import FIXED_SERVER_PROXY_MODE, PROXY_VERSION
 
@@ -232,6 +236,66 @@ def assert_profile_error_body(response, expected_code: str, expected_status: int
     assert error["requestId"].startswith("automation-")
     assert_no_forbidden_profile_surface(body)
     return error
+
+
+def assert_no_forbidden_runtime_surface(payload, *extra_markers: str) -> None:
+    forbidden_runtime_keys = {
+        "pid",
+        "userDataDir",
+        "ownerToken",
+        "launchArgs",
+        "args",
+        "debugPort",
+        "debugEndpoint",
+        "webSocketDebuggerUrl",
+        "wsEndpoint",
+        "process",
+    }
+    encoded_payload = encoded(payload)
+    assert forbidden_runtime_keys.isdisjoint(collect_keys(payload))
+    assert_no_forbidden_markers(
+        encoded_payload,
+        "profile-store",
+        "app-data-root-should-not-leak",
+        "owner-token-should-not-leak",
+        "argv-should-not-leak",
+        "--user-data-dir",
+        *extra_markers,
+    )
+
+
+def assert_runtime_error_body(response, expected_code: str, expected_status: int):
+    assert response.status_code == expected_status
+    body = response.json()
+    assert set(body) == {"error"}
+    error = body["error"]
+    assert set(error) == {"code", "message", "details", "detailRef", "requestId"}
+    assert error["code"] == expected_code
+    assert error["message"]
+    assert error["details"] == {"phase": "runtime"}
+    assert error["detailRef"].startswith("sidecar-")
+    assert error["requestId"].startswith("automation-")
+    assert_no_forbidden_runtime_surface(body)
+    return error
+
+
+def assert_persisted_diagnostic(config: AutomationApiConfig, error, *, method: str, code: str) -> None:
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    lookup = lookup_by_detail_ref(config.store_root, error["detailRef"])
+    assert lookup["found"] is True
+    assert lookup["logPath"] == "profile-store/diagnostics/events.jsonl"
+    assert len(lookup["entries"]) == 1
+    entry = lookup["entries"][0]
+    assert entry["event"] == "sidecar.request"
+    assert entry["status"] == "error"
+    assert entry["method"] == method
+    assert entry["errorCode"] == code
+    assert entry["detailRef"] == error["detailRef"]
+    assert entry["requestId"] == error["requestId"]
+    assert isinstance(entry["durationMs"], (int, float))
+    assert entry["durationMs"] >= 0
+    assert_no_forbidden_markers(encoded(entry), str(config.store_root), "owner-token-should-not-leak", "argv-should-not-leak")
 
 
 def test_health_is_public_and_contains_only_safe_runtime_metadata(tmp_path):
@@ -502,6 +566,259 @@ def test_profiles_unavailable_store_returns_profile_phase_503_without_store_root
     assert_profile_error_body(response, PROFILE_STORE_UNAVAILABLE, 503)
     assert "Traceback" not in response.text
     assert_no_forbidden_profile_surface(response.json(), str(config.store_root))
+
+
+def test_runtime_status_empty_store_returns_safe_empty_payload(tmp_path):
+    config = make_config(tmp_path)
+    app = create_app(config)
+
+    response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"runtimeApiVersion", "runningCount", "profiles", "reconciled", "request"}
+    assert body == {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "runningCount": 0,
+        "profiles": [],
+        "reconciled": [],
+        "request": {"requestId": body["request"]["requestId"]},
+    }
+    assert body["request"]["requestId"].startswith("automation-")
+    assert_no_forbidden_runtime_surface(body, str(config.store_root))
+
+
+def test_runtime_status_redacts_running_records_from_chromium_status(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Running Profile")["profile"]
+    chromium.RuntimeRegistry(config.store_root).write(
+        {
+            profile["id"]: chromium.RuntimeRecord(
+                profile_id=profile["id"],
+                pid=424242,
+                started_at="2026-01-01T00:00:00.000Z",
+                user_data_dir=profile["storage"]["userDataDir"],
+                owner_token="owner-token-should-not-leak",
+            )
+        }
+    )
+    monkeypatch.setattr(chromium, "is_process_alive", lambda pid: pid == 424242)
+    app = create_app(config)
+
+    response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runtimeApiVersion"] == RUNTIME_API_VERSION
+    assert body["runningCount"] == 1
+    assert body["profiles"] == [
+        {
+            "profileId": profile["id"],
+            "status": "running",
+            "startedAt": "2026-01-01T00:00:00.000Z",
+        }
+    ]
+    assert body["reconciled"] == []
+    assert body["request"]["requestId"].startswith("automation-")
+    assert_no_forbidden_runtime_surface(body, str(config.store_root), profile["storage"]["userDataDir"])
+
+
+def test_selected_profile_status_composes_profile_summary_and_running_runtime_safely(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Selected Running")["profile"]
+    chromium.RuntimeRegistry(config.store_root).write(
+        {
+            profile["id"]: chromium.RuntimeRecord(
+                profile_id=profile["id"],
+                pid=515151,
+                started_at="2026-01-02T00:00:00.000Z",
+                user_data_dir=profile["storage"]["userDataDir"],
+                owner_token="owner-token-should-not-leak",
+            )
+        }
+    )
+    monkeypatch.setattr(chromium, "is_process_alive", lambda pid: pid == 515151)
+    app = create_app(config)
+
+    response = asgi_get(app, f"/v1/profiles/{profile['id']}/status", headers=automation_auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"profileApiVersion", "runtimeApiVersion", "profile", "runtime", "request"}
+    assert body["profileApiVersion"] == PROFILE_API_VERSION
+    assert body["runtimeApiVersion"] == RUNTIME_API_VERSION
+    assert body["profile"]["id"] == profile["id"]
+    assert body["profile"]["name"] == "Selected Running"
+    assert body["runtime"] == {
+        "profileId": profile["id"],
+        "status": "running",
+        "startedAt": "2026-01-02T00:00:00.000Z",
+    }
+    assert body["request"]["requestId"].startswith("automation-")
+    assert_no_forbidden_profile_surface(body, str(config.store_root), profile["storage"]["userDataDir"])
+    assert_no_forbidden_runtime_surface(body, str(config.store_root), profile["storage"]["userDataDir"])
+
+
+def test_selected_profile_status_reports_reconciled_then_absent_runtime_safely(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Selected Stale")["profile"]
+    chromium.RuntimeRegistry(config.store_root).write(
+        {
+            profile["id"]: chromium.RuntimeRecord(
+                profile_id=profile["id"],
+                pid=626262,
+                started_at="2026-01-03T00:00:00.000Z",
+                user_data_dir=profile["storage"]["userDataDir"],
+                owner_token="owner-token-should-not-leak",
+            )
+        }
+    )
+    monkeypatch.setattr(chromium, "is_process_alive", lambda pid: False)
+    app = create_app(config)
+
+    first_response = asgi_get(app, f"/v1/profiles/{profile['id']}/status", headers=automation_auth_headers())
+
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert first_body["runtime"] == {
+        "profileId": profile["id"],
+        "status": "stopped",
+        "stoppedAt": first_body["runtime"]["stoppedAt"],
+        "termination": "reconciled",
+    }
+    assert first_body["runtime"]["stoppedAt"].endswith("Z")
+    assert chromium.RuntimeRegistry(config.store_root).read() == {}
+    assert_no_forbidden_runtime_surface(first_body, str(config.store_root), profile["storage"]["userDataDir"])
+
+    second_response = asgi_get(app, f"/v1/profiles/{profile['id']}/status", headers=automation_auth_headers())
+
+    assert second_response.status_code == 200
+    assert second_response.json()["runtime"] == {"profileId": profile["id"], "status": "stopped"}
+    assert_no_forbidden_runtime_surface(second_response.json(), str(config.store_root), profile["storage"]["userDataDir"])
+
+
+@pytest.mark.parametrize(
+    ("headers", "url", "expected_code"),
+    [
+        ({}, "/v1/runtime/status", AUTOMATION_AUTH_REQUIRED),
+        ({}, f"/v1/runtime/status?token={SENTINEL_TOKEN}", AUTOMATION_AUTH_REQUIRED),
+        ({"Authorization": ""}, "/v1/runtime/status", AUTOMATION_AUTH_INVALID),
+        ({"Authorization": "Basic not-the-token"}, "/v1/runtime/status", AUTOMATION_AUTH_INVALID),
+        ({"Authorization": "Bearer wrong-token"}, "/v1/runtime/status", AUTOMATION_AUTH_INVALID),
+    ],
+)
+def test_runtime_status_rejects_missing_query_param_and_invalid_auth_like_status(tmp_path, headers, url, expected_code):
+    config = make_config(tmp_path)
+    app = create_app(config)
+
+    response = asgi_get(app, url, headers=headers)
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert_error_body(response, expected_code)
+    assert_no_forbidden_markers(response.text, str(config.store_root))
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_code", "expected_status"),
+    [
+        ("/v1/profiles/missing-profile/status", PROFILE_NOT_FOUND, 404),
+        ("/v1/profiles/   /status", INVALID_REQUEST, 400),
+    ],
+)
+def test_selected_profile_status_rejects_unknown_and_blank_ids_with_profile_phase(tmp_path, url, expected_code, expected_status):
+    config = make_config(tmp_path)
+    ProfileStore(config.store_root).create("Known Profile")
+    app = create_app(config)
+
+    response = asgi_get(app, url, headers=automation_auth_headers())
+
+    error = assert_profile_error_body(response, expected_code, expected_status)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.profiles.status",
+        code=expected_code,
+    )
+    assert_no_forbidden_profile_surface(response.json(), str(config.store_root))
+
+
+def test_runtime_status_corrupt_store_returns_runtime_phase_503_and_safe_diagnostic(tmp_path):
+    config = make_config(tmp_path)
+    store_file = config.store_root / "profile-store" / "profiles.json"
+    store_file.parent.mkdir(parents=True)
+    store_file.write_text("{not-json", encoding="utf-8")
+    app = create_app(config)
+
+    response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+
+    error = assert_runtime_error_body(response, PROFILE_STORE_CORRUPT, 503)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.runtime.status",
+        code=PROFILE_STORE_CORRUPT,
+    )
+    assert "{not-json" not in response.text
+    assert "Traceback" not in response.text
+    assert_no_forbidden_runtime_surface(response.json(), str(config.store_root), str(store_file))
+
+
+def test_runtime_status_malformed_chromium_payload_returns_runtime_phase_without_raw_fields(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    ProfileStore(config.store_root).create("Malformed Runtime")
+
+    def malformed_status(store_root):
+        return {
+            "runningCount": 1,
+            "profiles": [
+                {
+                    "profileId": "profile-malformed",
+                    "status": "running",
+                    "pid": 717171,
+                    "userDataDir": "profile-store/profiles/profile-malformed/user-data",
+                    "ownerToken": "owner-token-should-not-leak",
+                }
+            ],
+            "reconciled": [],
+        }
+
+    monkeypatch.setattr(automation_api.chromium, "status", malformed_status)
+    app = create_app(config)
+
+    response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+
+    error = assert_runtime_error_body(response, INTERNAL_ERROR, 503)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.runtime.status",
+        code=INTERNAL_ERROR,
+    )
+    assert "717171" not in response.text
+    assert_no_forbidden_runtime_surface(response.json(), str(config.store_root), "owner-token-should-not-leak")
+
+
+def test_runtime_status_sidecar_failure_returns_runtime_phase_and_safe_diagnostic(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    ProfileStore(config.store_root).create("Runtime Failure")
+
+    def failing_status(store_root):
+        raise SidecarError(code="CHROMIUM_STOP_FAILED", message="Chromium runtime bookkeeping failed.")
+
+    monkeypatch.setattr(automation_api.chromium, "status", failing_status)
+    app = create_app(config)
+
+    response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+
+    error = assert_runtime_error_body(response, "CHROMIUM_STOP_FAILED", 503)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.runtime.status",
+        code="CHROMIUM_STOP_FAILED",
+    )
+    assert_no_forbidden_runtime_surface(response.json(), str(config.store_root))
 
 
 def test_health_stays_public_when_token_query_param_is_supplied(tmp_path):
