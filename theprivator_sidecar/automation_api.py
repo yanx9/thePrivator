@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import os
@@ -11,7 +12,7 @@ import socket
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, TextIO
@@ -20,6 +21,8 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .diagnostics import append_events
+from .profiles import ProfileRecord, ProfileStore, defaults_for_proxy, normalize_profile_identity
 from .protocol import (
     AUTOMATION_API_BIND_FAILED,
     AUTOMATION_API_CONFIGURATION_ERROR,
@@ -28,16 +31,32 @@ from .protocol import (
     AUTOMATION_API_STARTUP_FAILED,
     AUTOMATION_AUTH_INVALID,
     AUTOMATION_AUTH_REQUIRED,
+    INTERNAL_ERROR,
+    INVALID_REQUEST,
+    PROFILE_STORE_CORRUPT,
+    PROFILE_STORE_UNAVAILABLE,
+    PROFILE_STORE_WRITE_FAILED,
     JsonObject,
     SIDECAR_VERSION,
+    SidecarError,
+    diagnostic_event,
     make_detail_ref,
 )
+from .proxy import DIRECT_PROXY_MODE, FIXED_SERVER_PROXY_MODE, PROXY_VERSION, normalize_proxy_config
 
 AUTOMATION_API_VERSION = "1.0.0"
 PRODUCT_NAME = "ThePrivator"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 0
 MAX_AUTHORIZATION_HEADER_LENGTH = 8192
+PROFILE_API_VERSION = 1
+DEFAULT_PROFILE_LIST_LIMIT = 50
+MAX_PROFILE_LIST_LIMIT = 100
+_PROFILE_CURSOR_PREFIX = "p_"
+_PROFILE_CURSOR_MARKER = "profiles:"
+_MAX_PROFILE_CURSOR_LENGTH = 96
+_URLSAFE_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+_AUTOMATION_PROFILES_LIST_METHOD = "automation.profiles.list"
 
 ENV_HOST = "THEPRIVATOR_AUTOMATION_API_HOST"
 ENV_PORT = "THEPRIVATOR_AUTOMATION_API_PORT"
@@ -52,6 +71,7 @@ _SAFE_ERROR_DETAILS = {
     "auth": {"phase": "auth"},
     "routing": {"phase": "routing"},
     "http": {"phase": "http"},
+    "profile": {"phase": "profile"},
 }
 
 
@@ -200,6 +220,53 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
                 "requestId": request.state.request_id,
             },
         }
+
+    @app.get("/v1/profiles")
+    async def profiles(request: Request, _authorized: None = Depends(require_token)) -> JsonObject:
+        started = time.perf_counter()
+        try:
+            limit, cursor_offset = _parse_profile_list_query(request)
+            records = ProfileStore(_request_config(request).store_root)._read_profiles()
+            offset = _validate_profile_cursor_offset(cursor_offset, len(records))
+            page = records[offset : offset + limit]
+            next_offset = offset + len(page)
+            next_cursor = _encode_profile_cursor(next_offset) if next_offset < len(records) else None
+            return {
+                "profileApiVersion": PROFILE_API_VERSION,
+                "profiles": [_automation_profile_summary(profile) for profile in page],
+                "count": len(page),
+                "limit": limit,
+                "nextCursor": next_cursor,
+                "request": {
+                    "requestId": request.state.request_id,
+                },
+            }
+        except ValueError as exc:
+            _raise_profile_http_error(
+                request,
+                400,
+                INVALID_REQUEST,
+                "Profile list pagination is invalid.",
+                make_detail_ref(),
+                started,
+            )
+            raise AssertionError("unreachable") from exc
+        except AutomationHttpError:
+            raise
+        except SidecarError as error:
+            _raise_profile_sidecar_http_error(request, error, started)
+            raise AssertionError("unreachable") from error
+        except Exception as exc:
+            detail_ref = make_detail_ref()
+            _raise_profile_http_error(
+                request,
+                500,
+                INTERNAL_ERROR,
+                "Profile list request failed unexpectedly.",
+                detail_ref,
+                started,
+            )
+            raise AssertionError("unreachable") from exc
 
     return app
 
@@ -384,6 +451,186 @@ def _error_response(
     return JSONResponse(status_code=status_code, content=content, headers=dict(headers or {}))
 
 
+def _parse_profile_list_query(request: Request) -> tuple[int, Optional[int]]:
+    limit = _parse_profile_limit(_single_query_value(request, "limit"))
+    cursor_offset = _decode_profile_cursor(_single_query_value(request, "cursor"))
+    return limit, cursor_offset
+
+
+def _single_query_value(request: Request, key: str) -> Optional[str]:
+    values = request.query_params.getlist(key)
+    if not values:
+        return None
+    if len(values) != 1:
+        raise ValueError(f"{key} must appear once")
+    return values[0]
+
+
+def _parse_profile_limit(raw_limit: Optional[str]) -> int:
+    if raw_limit is None:
+        return DEFAULT_PROFILE_LIST_LIMIT
+    if not raw_limit or not raw_limit.isascii() or not raw_limit.isdigit():
+        raise ValueError("limit must be an ASCII integer")
+    limit = int(raw_limit, 10)
+    if limit < 1 or limit > MAX_PROFILE_LIST_LIMIT:
+        raise ValueError("limit is outside allowed bounds")
+    return limit
+
+
+def _decode_profile_cursor(raw_cursor: Optional[str]) -> Optional[int]:
+    if raw_cursor is None:
+        return None
+    if (
+        not raw_cursor
+        or len(raw_cursor) > _MAX_PROFILE_CURSOR_LENGTH
+        or any(character.isspace() for character in raw_cursor)
+        or not raw_cursor.startswith(_PROFILE_CURSOR_PREFIX)
+    ):
+        raise ValueError("cursor is malformed")
+
+    encoded = raw_cursor[len(_PROFILE_CURSOR_PREFIX) :]
+    if not encoded or any(character not in _URLSAFE_BASE64_CHARS for character in encoded):
+        raise ValueError("cursor is malformed")
+
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.b64decode((encoded + padding).encode("ascii"), altchars=b"-_", validate=True).decode("ascii")
+    except Exception as exc:
+        raise ValueError("cursor is malformed") from exc
+
+    if not decoded.startswith(_PROFILE_CURSOR_MARKER):
+        raise ValueError("cursor is unknown")
+    offset_text = decoded[len(_PROFILE_CURSOR_MARKER) :]
+    if not offset_text or not offset_text.isascii() or not offset_text.isdigit():
+        raise ValueError("cursor is unknown")
+    offset = int(offset_text, 10)
+    if offset <= 0:
+        raise ValueError("cursor is outside allowed bounds")
+    return offset
+
+
+def _validate_profile_cursor_offset(cursor_offset: Optional[int], total_profiles: int) -> int:
+    if cursor_offset is None:
+        return 0
+    if cursor_offset >= total_profiles:
+        raise ValueError("cursor is outside the current profile page range")
+    return cursor_offset
+
+
+def _encode_profile_cursor(offset: int) -> str:
+    payload = f"{_PROFILE_CURSOR_MARKER}{offset}".encode("ascii")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"{_PROFILE_CURSOR_PREFIX}{encoded}"
+
+
+def _automation_profile_summary(profile: ProfileRecord) -> JsonObject:
+    proxy = normalize_proxy_config(profile.proxy)
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "createdAt": profile.createdAt,
+        "updatedAt": profile.updatedAt,
+        "defaults": asdict(defaults_for_proxy(proxy)),
+        "identity": normalize_profile_identity(profile.identity),
+        "proxy": _automation_proxy_summary(proxy),
+    }
+
+
+def _automation_proxy_summary(proxy: Mapping[str, Any]) -> JsonObject:
+    normalized = normalize_proxy_config(proxy)
+    if normalized["mode"] == DIRECT_PROXY_MODE:
+        return {
+            "proxyVersion": PROXY_VERSION,
+            "mode": DIRECT_PROXY_MODE,
+            "summary": "Direct connection",
+        }
+
+    if normalized["mode"] == FIXED_SERVER_PROXY_MODE:
+        protocol = normalized["protocol"]
+        host = normalized["host"]
+        port = normalized["port"]
+        return {
+            "proxyVersion": PROXY_VERSION,
+            "mode": FIXED_SERVER_PROXY_MODE,
+            "protocol": protocol,
+            "host": host,
+            "port": port,
+            "summary": f"{protocol}://{_proxy_host_for_summary(host)}:{port}",
+        }
+
+    raise ValueError("unsupported normalized proxy mode")
+
+
+def _proxy_host_for_summary(host: str) -> str:
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if parsed.version == 6:
+        return f"[{host}]"
+    return host
+
+
+def _raise_profile_sidecar_http_error(request: Request, error: SidecarError, started: float) -> None:
+    if error.code == INVALID_REQUEST:
+        _raise_profile_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Profile list request is invalid.",
+            error.detail_ref,
+            started,
+        )
+
+    if error.code in {PROFILE_STORE_CORRUPT, PROFILE_STORE_UNAVAILABLE, PROFILE_STORE_WRITE_FAILED}:
+        _raise_profile_http_error(request, 503, error.code, error.message, error.detail_ref, started)
+
+    _raise_profile_http_error(
+        request,
+        503,
+        PROFILE_STORE_CORRUPT,
+        "Profile store is corrupt.",
+        error.detail_ref,
+        started,
+    )
+
+
+def _raise_profile_http_error(
+    request: Request,
+    status_code: int,
+    code: str,
+    message: str,
+    detail_ref: str,
+    started: float,
+) -> None:
+    _record_profile_error(request, code, detail_ref, started)
+    raise AutomationHttpError(
+        status_code=status_code,
+        code=code,
+        message=message,
+        phase="profile",
+        detail_ref=detail_ref,
+    )
+
+
+def _record_profile_error(request: Request, code: str, detail_ref: str, started: float) -> None:
+    append_events(
+        _request_config(request).store_root,
+        [
+            diagnostic_event(
+                request_id=getattr(request.state, "request_id", None),
+                method=_AUTOMATION_PROFILES_LIST_METHOD,
+                status="error",
+                duration_ms=_elapsed_ms(started),
+                error_code=code,
+                detail_ref=detail_ref,
+            )
+        ],
+        request_id=getattr(request.state, "request_id", None),
+        method=_AUTOMATION_PROFILES_LIST_METHOD,
+    )
+
+
 def _parse_authorization_header(raw_header: str) -> Optional[str]:
     if not raw_header or len(raw_header) > MAX_AUTHORIZATION_HEADER_LENGTH:
         return None
@@ -483,10 +730,13 @@ __all__ = [
     "AUTOMATION_API_VERSION",
     "DEFAULT_HOST",
     "DEFAULT_PORT",
+    "DEFAULT_PROFILE_LIST_LIMIT",
     "ENV_HOST",
     "ENV_PORT",
     "ENV_STORE_ROOT",
     "ENV_TOKEN",
+    "MAX_PROFILE_LIST_LIMIT",
+    "PROFILE_API_VERSION",
     "AutomationApiConfig",
     "AutomationHttpError",
     "AutomationStartupError",
