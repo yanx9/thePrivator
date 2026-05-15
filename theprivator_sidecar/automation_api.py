@@ -44,12 +44,22 @@ from .protocol import (
     CHROMIUM_LAUNCH_FAILED,
     CHROMIUM_STOP_FAILED,
     IDENTITY_CDP_FAILED,
+    IDENTITY_EXTENSION_FAILED,
+    IDENTITY_INVALID,
+    IDENTITY_UNSUPPORTED_MODE,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_UNAVAILABLE,
     PROFILE_STORE_WRITE_FAILED,
+    PROXY_AUTH_HELPER_FAILED,
+    PROXY_INVALID,
+    PROXY_LAUNCH_ARG_UNSAFE,
+    PROXY_LAUNCH_UNSUPPORTED,
+    PROXY_PAC_UNSUPPORTED,
+    PROXY_SOCKS_AUTH_UNSUPPORTED,
+    PROXY_UNSUPPORTED_MODE,
     JsonObject,
     SIDECAR_VERSION,
     SidecarError,
@@ -101,6 +111,27 @@ _SAFE_ERROR_DETAILS = {
     "runtime": {"phase": "runtime"},
     "lease": {"phase": "lease"},
 }
+_LEASE_HANDOFF_COLLAPSE_ERROR_CODES = frozenset(
+    {
+        CHROMIUM_EXECUTABLE_NOT_FOUND,
+        CHROMIUM_LAUNCH_FAILED,
+        IDENTITY_CDP_FAILED,
+        AUTOMATION_LEASE_HANDOFF_FAILED,
+    }
+)
+_LEASE_TYPED_LAUNCH_ERROR_MESSAGES: Mapping[str, str] = {
+    PROXY_INVALID: "Automation lease proxy configuration could not be prepared.",
+    PROXY_PAC_UNSUPPORTED: "Automation lease proxy mode is unsupported.",
+    PROXY_UNSUPPORTED_MODE: "Automation lease proxy mode is unsupported.",
+    PROXY_LAUNCH_UNSUPPORTED: "Automation lease proxy launch mode is unsupported.",
+    PROXY_SOCKS_AUTH_UNSUPPORTED: "Automation lease proxy authentication is unsupported.",
+    PROXY_AUTH_HELPER_FAILED: "Automation lease proxy authentication helper could not be prepared.",
+    PROXY_LAUNCH_ARG_UNSAFE: "Automation lease proxy launch arguments could not be prepared.",
+    IDENTITY_INVALID: "Automation lease identity configuration could not be prepared.",
+    IDENTITY_EXTENSION_FAILED: "Automation lease identity helper could not be prepared.",
+    IDENTITY_UNSUPPORTED_MODE: "Automation lease identity mode is unsupported.",
+}
+_LEASE_TYPED_LAUNCH_ERROR_CODES = frozenset(_LEASE_TYPED_LAUNCH_ERROR_MESSAGES)
 
 
 @dataclass(frozen=True)
@@ -1228,10 +1259,16 @@ def _normalize_lease_launch_error(error: SidecarError) -> SidecarError:
             message="An automation lease cannot start while this profile is already running.",
             detail_ref=error.detail_ref,
         )
-    if error.code in {CHROMIUM_EXECUTABLE_NOT_FOUND, CHROMIUM_LAUNCH_FAILED, IDENTITY_CDP_FAILED}:
+    if error.code in _LEASE_HANDOFF_COLLAPSE_ERROR_CODES:
         return SidecarError(
             code=AUTOMATION_LEASE_HANDOFF_FAILED,
             message="Automation lease handoff could not be prepared.",
+            detail_ref=error.detail_ref,
+        )
+    if error.code in _LEASE_TYPED_LAUNCH_ERROR_CODES:
+        return SidecarError(
+            code=error.code,
+            message=_LEASE_TYPED_LAUNCH_ERROR_MESSAGES[error.code],
             detail_ref=error.detail_ref,
         )
     return error
@@ -1350,12 +1387,23 @@ def _raise_lease_sidecar_http_error(request: Request, error: SidecarError, start
             method=method,
         )
 
-    if error.code in {CHROMIUM_EXECUTABLE_NOT_FOUND, CHROMIUM_LAUNCH_FAILED, IDENTITY_CDP_FAILED, AUTOMATION_LEASE_HANDOFF_FAILED}:
+    if error.code in _LEASE_HANDOFF_COLLAPSE_ERROR_CODES:
         _raise_lease_http_error(
             request,
             503,
             AUTOMATION_LEASE_HANDOFF_FAILED,
             "Automation lease handoff could not be prepared.",
+            error.detail_ref,
+            started,
+            method=method,
+        )
+
+    if error.code in _LEASE_TYPED_LAUNCH_ERROR_CODES:
+        _raise_lease_http_error(
+            request,
+            503,
+            error.code,
+            _LEASE_TYPED_LAUNCH_ERROR_MESSAGES[error.code],
             error.detail_ref,
             started,
             method=method,

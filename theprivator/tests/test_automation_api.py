@@ -48,13 +48,22 @@ from theprivator_sidecar.protocol import (
     AUTOMATION_LEASE_PROFILE_BUSY,
     AUTOMATION_LEASE_RELEASED,
     CHROMIUM_ALREADY_RUNNING,
+    CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
     CHROMIUM_STOP_FAILED,
+    IDENTITY_CDP_FAILED,
+    IDENTITY_EXTENSION_FAILED,
+    IDENTITY_INVALID,
+    IDENTITY_UNSUPPORTED_MODE,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_UNAVAILABLE,
+    PROXY_AUTH_HELPER_FAILED,
+    PROXY_INVALID,
+    PROXY_LAUNCH_ARG_UNSAFE,
+    PROXY_SOCKS_AUTH_UNSUPPORTED,
     SIDECAR_VERSION,
     SidecarError,
 )
@@ -72,7 +81,10 @@ FORBIDDEN_STATIC_MARKERS = (
     "DevToolsActivePort",
     "debugPort",
     "--remote-debugging-port",
+    "--proxy-server",
+    "--proxy-bypass-list",
     "remote-debugging",
+    "direct://",
     "cdp://",
     "ws://",
     "wss://",
@@ -411,7 +423,14 @@ class FakeLeaseTimerFactory:
         return timer
 
 
-def assert_persisted_diagnostic(config: AutomationApiConfig, error, *, method: str, code: str) -> None:
+def assert_persisted_diagnostic(
+    config: AutomationApiConfig,
+    error,
+    *,
+    method: str,
+    code: str,
+    extra_markers: tuple[str, ...] = (),
+) -> None:
     from theprivator_sidecar.diagnostics import lookup_by_detail_ref
 
     lookup = lookup_by_detail_ref(config.store_root, error["detailRef"])
@@ -427,7 +446,13 @@ def assert_persisted_diagnostic(config: AutomationApiConfig, error, *, method: s
     assert entry["requestId"] == error["requestId"]
     assert isinstance(entry["durationMs"], (int, float))
     assert entry["durationMs"] >= 0
-    assert_no_forbidden_markers(encoded(entry), str(config.store_root), "owner-token-should-not-leak", "argv-should-not-leak")
+    assert_no_forbidden_markers(
+        encoded(entry),
+        str(config.store_root),
+        "owner-token-should-not-leak",
+        "argv-should-not-leak",
+        *extra_markers,
+    )
 
 
 def test_health_is_public_and_contains_only_safe_runtime_metadata(tmp_path):
@@ -1493,6 +1518,149 @@ def test_lease_create_maps_launcher_failure_to_handoff_failed(tmp_path, monkeypa
         method="automation.leases.create",
         code=AUTOMATION_LEASE_HANDOFF_FAILED,
     )
+
+
+@pytest.mark.parametrize(
+    ("raw_code", "raw_markers"),
+    [
+        (
+            CHROMIUM_EXECUTABLE_NOT_FOUND,
+            ("THEPRIVATOR_CHROMIUM_PATH=/private/chrome", "/private/chrome"),
+        ),
+        (
+            IDENTITY_CDP_FAILED,
+            (
+                "DevToolsActivePort",
+                "ws://127.0.0.1:9222/devtools/browser/raw",
+                "--remote-debugging-port=9222",
+                "debugPort",
+            ),
+        ),
+    ],
+)
+def test_lease_create_collapses_browser_control_failures_to_handoff_failed_without_raw_context(
+    tmp_path,
+    monkeypatch,
+    raw_code,
+    raw_markers,
+):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Browser Control Failure")["profile"]
+    raw_message = "browser-control failure: " + " ".join(raw_markers)
+
+    def failing_launch(store_root, profile_id):
+        raise SidecarError(code=raw_code, message=raw_message, detail_ref="sidecar-browsercontrol001")
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", failing_launch)
+    manager = AutomationLeaseManager(timer_factory=FakeLeaseTimerFactory())
+    app = create_app(config)
+    app.state.automation_lease_manager = manager
+
+    response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    error = assert_lease_error_body(response, AUTOMATION_LEASE_HANDOFF_FAILED, 503)
+    assert error["detailRef"] == "sidecar-browsercontrol001"
+    assert error["message"] != raw_message
+    assert "INTERNAL_ERROR" not in response.text
+    assert_no_forbidden_markers(response.text, raw_message, *raw_markers)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=AUTOMATION_LEASE_HANDOFF_FAILED,
+        extra_markers=(raw_message, *raw_markers),
+    )
+    assert manager._leases == {}
+    assert manager._active_by_profile == {}
+    assert manager._timers == {}
+
+
+@pytest.mark.parametrize(
+    ("raw_code", "raw_markers"),
+    [
+        (
+            PROXY_INVALID,
+            ("proxyUrl", "username", "password", "proxy.example.invalid"),
+        ),
+        (
+            PROXY_SOCKS_AUTH_UNSUPPORTED,
+            (
+                "--proxy-server=socks5://proxy-user:proxy-pass@proxy.example.invalid:1080",
+                SENTINEL_USERNAME,
+                SENTINEL_PASSWORD,
+                "direct://fallback",
+            ),
+        ),
+        (
+            PROXY_AUTH_HELPER_FAILED,
+            (
+                "proxy-auth-helper",
+                "--load-extension=/private/proxy-auth-extension",
+                SENTINEL_USERNAME,
+                SENTINEL_PASSWORD,
+            ),
+        ),
+        (
+            PROXY_LAUNCH_ARG_UNSAFE,
+            (
+                "--proxy-server=http://proxy-user:proxy-pass@proxy.example.invalid:8080",
+                "--proxy-bypass-list=*",
+                "direct://",
+            ),
+        ),
+        (
+            IDENTITY_INVALID,
+            ("identity.localStorage.path", "/private/identity-profile", "stack trace"),
+        ),
+        (
+            IDENTITY_EXTENSION_FAILED,
+            (
+                "identity-extension-helper",
+                "--load-extension=/private/identity-extension",
+                "extension stderr",
+            ),
+        ),
+        (
+            IDENTITY_UNSUPPORTED_MODE,
+            ("navigator.mode=teleport", "raw identity preset"),
+        ),
+    ],
+)
+def test_lease_create_maps_expected_proxy_identity_launch_failures_to_typed_redacted_503(
+    tmp_path,
+    monkeypatch,
+    raw_code,
+    raw_markers,
+):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Typed Launch Failure")["profile"]
+    raw_message = "lease launch failure: " + " ".join(raw_markers)
+
+    def failing_launch(store_root, profile_id):
+        raise SidecarError(code=raw_code, message=raw_message, detail_ref="sidecar-typedlaunch001")
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", failing_launch)
+    manager = AutomationLeaseManager(timer_factory=FakeLeaseTimerFactory())
+    app = create_app(config)
+    app.state.automation_lease_manager = manager
+
+    response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    error = assert_lease_error_body(response, raw_code, 503)
+    assert error["detailRef"] == "sidecar-typedlaunch001"
+    assert error["message"] != raw_message
+    assert "INTERNAL_ERROR" not in response.text
+    assert_no_forbidden_markers(response.text, raw_message, *raw_markers)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=raw_code,
+        extra_markers=(raw_message, *raw_markers),
+    )
+    assert manager._leases == {}
+    assert manager._active_by_profile == {}
+    assert manager._timers == {}
 
 
 @pytest.mark.parametrize("method", ["GET", "DELETE"])
