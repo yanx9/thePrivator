@@ -40,6 +40,13 @@ from theprivator_sidecar.protocol import (
     AUTOMATION_API_CONFIGURATION_ERROR,
     AUTOMATION_AUTH_INVALID,
     AUTOMATION_AUTH_REQUIRED,
+    AUTOMATION_LEASE_EXPIRED,
+    AUTOMATION_LEASE_HANDOFF_FAILED,
+    AUTOMATION_LEASE_NOT_FOUND,
+    AUTOMATION_LEASE_PROFILE_BUSY,
+    AUTOMATION_LEASE_RELEASED,
+    CHROMIUM_ALREADY_RUNNING,
+    CHROMIUM_LAUNCH_FAILED,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
@@ -136,19 +143,47 @@ class AsgiResponse:
         return json.loads(self.text)
 
 
-def asgi_get(app, url: str, headers: Optional[Mapping[str, str]] = None) -> AsgiResponse:
+_BODY_OMITTED = object()
+
+
+def asgi_request(
+    app,
+    method: str,
+    url: str,
+    *,
+    headers: Optional[Mapping[str, str]] = None,
+    json_body=_BODY_OMITTED,
+    raw_body: Optional[bytes | str] = None,
+) -> AsgiResponse:
     import asyncio
+
+    if json_body is not _BODY_OMITTED and raw_body is not None:
+        raise ValueError("json_body and raw_body are mutually exclusive")
+
+    request_headers = dict(headers or {})
+    if json_body is not _BODY_OMITTED:
+        body = json.dumps(json_body).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    elif raw_body is None:
+        body = b""
+    elif isinstance(raw_body, bytes):
+        body = raw_body
+    else:
+        body = raw_body.encode("utf-8")
+
+    if body:
+        request_headers.setdefault("Content-Length", str(len(body)))
 
     path, separator, query = url.partition("?")
     encoded_headers = [
         (name.lower().encode("latin-1"), value.encode("latin-1"))
-        for name, value in (headers or {}).items()
+        for name, value in request_headers.items()
     ]
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method.upper(),
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),
@@ -166,19 +201,23 @@ def asgi_get(app, url: str, headers: Optional[Mapping[str, str]] = None) -> Asgi
         if request_sent:
             return {"type": "http.disconnect"}
         request_sent = True
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": body, "more_body": False}
 
     async def send(message):
         events.append(message)
 
     asyncio.run(app(scope, receive, send))
     start = next(event for event in events if event["type"] == "http.response.start")
-    body = b"".join(event.get("body", b"") for event in events if event["type"] == "http.response.body")
+    response_body = b"".join(event.get("body", b"") for event in events if event["type"] == "http.response.body")
     response_headers = {
         name.decode("latin-1"): value.decode("latin-1")
         for name, value in start.get("headers", [])
     }
-    return AsgiResponse(start["status"], response_headers, body)
+    return AsgiResponse(start["status"], response_headers, response_body)
+
+
+def asgi_get(app, url: str, headers: Optional[Mapping[str, str]] = None) -> AsgiResponse:
+    return asgi_request(app, "GET", url, headers=headers)
 
 
 def encoded(value) -> str:
@@ -277,6 +316,67 @@ def assert_runtime_error_body(response, expected_code: str, expected_status: int
     assert error["requestId"].startswith("automation-")
     assert_no_forbidden_runtime_surface(body)
     return error
+
+
+def assert_lease_error_body(response, expected_code: str, expected_status: int):
+    assert response.status_code == expected_status
+    body = response.json()
+    assert set(body) == {"error"}
+    error = body["error"]
+    assert set(error) == {"code", "message", "details", "detailRef", "requestId"}
+    assert error["code"] == expected_code
+    assert error["message"]
+    assert error["details"] == {"phase": "lease"}
+    assert error["detailRef"].startswith("sidecar-")
+    assert error["requestId"].startswith("automation-")
+    assert_no_forbidden_lease_surface(body)
+    return error
+
+
+def assert_no_forbidden_lease_surface(payload, *extra_markers: str) -> None:
+    forbidden_lease_keys = {
+        "handoffOrigin",
+        "debugPort",
+        "debugEndpoint",
+        "webSocketDebuggerUrl",
+        "wsEndpoint",
+        "launchArgs",
+        "args",
+        "pid",
+        "userDataDir",
+        "ownerToken",
+        "process",
+    }
+    encoded_payload = encoded(payload)
+    assert forbidden_lease_keys.isdisjoint(collect_keys(payload))
+    assert_no_forbidden_markers(
+        encoded_payload,
+        "profile-store",
+        "app-data-root-should-not-leak",
+        "owner-token-should-not-leak",
+        "argv-should-not-leak",
+        *extra_markers,
+    )
+
+
+def fake_automation_launch(profile_id: str, *, endpoint: str = "http://127.0.0.1:45678") -> dict[str, object]:
+    return {
+        "profileId": profile_id,
+        "status": "running",
+        "startedAt": "2026-01-04T00:00:00.000Z",
+        "runningCount": 1,
+        "handoffOrigin": endpoint,
+    }
+
+
+def fake_automation_stop(profile_id: str) -> dict[str, object]:
+    return {
+        "profileId": profile_id,
+        "status": "stopped",
+        "stoppedAt": "2026-01-04T00:01:00.000Z",
+        "termination": "graceful",
+        "runningCount": 0,
+    }
 
 
 def assert_persisted_diagnostic(config: AutomationApiConfig, error, *, method: str, code: str) -> None:
@@ -819,6 +919,364 @@ def test_runtime_status_sidecar_failure_returns_runtime_phase_and_safe_diagnosti
         code="CHROMIUM_STOP_FAILED",
     )
     assert_no_forbidden_runtime_surface(response.json(), str(config.store_root))
+
+
+def test_lease_create_returns_one_time_playwright_handoff_and_safe_runtime(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Lease Target")["profile"]
+    monkeypatch.setattr(
+        automation_api.chromium,
+        "launch_for_automation",
+        lambda store_root, profile_id: fake_automation_launch(profile_id),
+    )
+    app = create_app(config)
+
+    response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"framework": "playwright", "ttlSeconds": 1},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == {"leaseApiVersion", "lease", "handoff", "runtime", "request"}
+    assert body["leaseApiVersion"] == 1
+    lease = body["lease"]
+    assert set(lease) == {"id", "profileId", "framework", "status", "createdAt", "expiresAt", "ttlSeconds"}
+    assert lease["id"].startswith("lease_")
+    assert lease["profileId"] == profile["id"]
+    assert lease["framework"] == "playwright"
+    assert lease["status"] == "active"
+    assert lease["ttlSeconds"] == 1
+    assert lease["createdAt"].endswith("Z")
+    assert lease["expiresAt"].endswith("Z")
+    assert response.headers["location"] == f"/v1/leases/{lease['id']}"
+    assert body["handoff"] == {
+        "browser": "chromium",
+        "method": "connect-over-cdp",
+        "endpoint": "http://127.0.0.1:45678",
+    }
+    assert body["runtime"] == {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "runningCount": 1,
+        "profile": {
+            "profileId": profile["id"],
+            "status": "running",
+            "startedAt": "2026-01-04T00:00:00.000Z",
+        },
+    }
+    assert body["request"]["requestId"].startswith("automation-")
+    assert "handoffOrigin" not in response.text
+    assert_no_forbidden_markers(response.text, str(config.store_root), "owner-token-should-not-leak", "argv-should-not-leak")
+
+
+def test_lease_status_and_release_never_return_handoff_material(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Lease Release")["profile"]
+    stopped_profiles = []
+    monkeypatch.setattr(
+        automation_api.chromium,
+        "launch_for_automation",
+        lambda store_root, profile_id: fake_automation_launch(profile_id, endpoint="http://127.0.0.1:45679"),
+    )
+
+    def stop_profile(store_root, profile_id):
+        stopped_profiles.append(profile_id)
+        return fake_automation_stop(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+    )
+    lease_id = create_response.json()["lease"]["id"]
+
+    status_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert set(status_body) == {"leaseApiVersion", "lease", "request"}
+    assert status_body["lease"]["id"] == lease_id
+    assert status_body["lease"]["status"] == "active"
+    assert "handoff" not in status_body
+    assert "http://127.0.0.1:45679" not in status_response.text
+    assert_no_forbidden_lease_surface(status_body)
+
+    release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert release_response.status_code == 200
+    release_body = release_response.json()
+    assert set(release_body) == {"leaseApiVersion", "lease", "runtime", "request"}
+    assert release_body["lease"]["id"] == lease_id
+    assert release_body["lease"]["status"] == "released"
+    assert release_body["lease"]["releasedAt"].endswith("Z")
+    assert release_body["runtime"] == {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "profile": {
+            "profileId": profile["id"],
+            "status": "stopped",
+            "stoppedAt": "2026-01-04T00:01:00.000Z",
+            "termination": "graceful",
+        },
+        "runningCount": 0,
+    }
+    assert stopped_profiles == [profile["id"]]
+    assert "handoff" not in release_body
+    assert "http://127.0.0.1:45679" not in release_response.text
+    assert_no_forbidden_lease_surface(release_body)
+
+    released_status_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert released_status_response.status_code == 200
+    assert released_status_response.json()["lease"]["status"] == "released"
+    assert "http://127.0.0.1:45679" not in released_status_response.text
+
+    second_release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert_lease_error_body(second_release_response, AUTOMATION_LEASE_RELEASED, 409)
+
+
+@pytest.mark.parametrize(
+    ("method", "url"),
+    [
+        ("POST", "/v1/profiles/profile-123/leases"),
+        ("POST", f"/v1/profiles/profile-123/leases?token={SENTINEL_TOKEN}"),
+        ("GET", "/v1/leases/lease_missing"),
+        ("DELETE", "/v1/leases/lease_missing"),
+    ],
+)
+def test_lease_routes_require_bearer_auth_and_ignore_query_token(tmp_path, method, url):
+    config = make_config(tmp_path)
+    app = create_app(config)
+
+    response = asgi_request(app, method, url)
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert_error_body(response, AUTOMATION_AUTH_REQUIRED)
+    assert_no_forbidden_markers(response.text, str(config.store_root), SENTINEL_TOKEN)
+
+
+@pytest.mark.parametrize(
+    "json_body",
+    [
+        [],
+        "not an object",
+        {"framework": "selenium"},
+        {"framework": ""},
+        {"ttlSeconds": 0},
+        {"ttlSeconds": -1},
+        {"ttlSeconds": 121},
+        {"ttlSeconds": "1"},
+        {"ttlSeconds": 1.5},
+        {"ttlSeconds": True},
+        {"unexpected": "field"},
+    ],
+)
+def test_lease_create_rejects_malformed_framework_ttl_and_unknown_fields_with_diagnostics(tmp_path, json_body):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Invalid Lease Body")["profile"]
+    app = create_app(config)
+
+    response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body=json_body,
+    )
+
+    error = assert_lease_error_body(response, INVALID_REQUEST, 400)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=INVALID_REQUEST,
+    )
+
+
+def test_lease_create_rejects_raw_invalid_json_with_lease_phase_400(tmp_path):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Invalid Json")["profile"]
+    app = create_app(config)
+
+    response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers={**automation_auth_headers(), "Content-Type": "application/json"},
+        raw_body="{not-json",
+    )
+
+    error = assert_lease_error_body(response, INVALID_REQUEST, 400)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=INVALID_REQUEST,
+    )
+    assert "{not-json" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_code", "expected_status"),
+    [
+        ("/v1/profiles/missing-profile/leases", PROFILE_NOT_FOUND, 404),
+        ("/v1/profiles/   /leases", INVALID_REQUEST, 400),
+    ],
+)
+def test_lease_create_rejects_unknown_and_blank_profiles_with_lease_phase(tmp_path, url, expected_code, expected_status):
+    config = make_config(tmp_path)
+    ProfileStore(config.store_root).create("Known Lease Profile")
+    app = create_app(config)
+
+    response = asgi_request(app, "POST", url, headers=automation_auth_headers(), json_body={})
+
+    error = assert_lease_error_body(response, expected_code, expected_status)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=expected_code,
+    )
+
+
+def test_lease_create_rejects_active_lease_for_same_profile_before_second_launch(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Busy Lease Profile")["profile"]
+    launch_calls = []
+
+    def launch_profile(store_root, profile_id):
+        launch_calls.append(profile_id)
+        return fake_automation_launch(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    app = create_app(config)
+
+    first_response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+    second_response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    assert first_response.status_code == 201
+    error = assert_lease_error_body(second_response, AUTOMATION_LEASE_PROFILE_BUSY, 409)
+    assert launch_calls == [profile["id"]]
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=AUTOMATION_LEASE_PROFILE_BUSY,
+    )
+
+
+def test_lease_create_maps_live_chromium_profile_conflict_to_busy(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Live Busy Profile")["profile"]
+
+    def busy_launch(store_root, profile_id):
+        raise SidecarError(code=CHROMIUM_ALREADY_RUNNING, message="Chromium is already running for this profile.")
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", busy_launch)
+    app = create_app(config)
+
+    response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    error = assert_lease_error_body(response, AUTOMATION_LEASE_PROFILE_BUSY, 409)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=AUTOMATION_LEASE_PROFILE_BUSY,
+    )
+
+
+@pytest.mark.parametrize(
+    "launch_result",
+    [
+        {"profileId": "profile-placeholder", "status": "running", "startedAt": "2026-01-04T00:00:00.000Z", "runningCount": 1},
+        {"profileId": "profile-placeholder", "status": "running", "startedAt": "2026-01-04T00:00:00.000Z", "runningCount": 1, "handoffOrigin": "ws://127.0.0.1:45678/devtools/browser/raw"},
+        {"profileId": "different-profile", "status": "running", "startedAt": "2026-01-04T00:00:00.000Z", "runningCount": 1, "handoffOrigin": "http://127.0.0.1:45678"},
+    ],
+)
+def test_lease_create_maps_malformed_handoff_result_to_503_without_partial_success(tmp_path, monkeypatch, launch_result):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Malformed Handoff")["profile"]
+    stop_calls = []
+
+    def launch_profile(store_root, profile_id):
+        return {**launch_result, "profileId": launch_result.get("profileId", profile_id)}
+
+    def stop_profile(store_root, profile_id):
+        stop_calls.append(profile_id)
+        return fake_automation_stop(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+
+    response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    error = assert_lease_error_body(response, AUTOMATION_LEASE_HANDOFF_FAILED, 503)
+    assert stop_calls == [profile["id"]]
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=AUTOMATION_LEASE_HANDOFF_FAILED,
+    )
+    assert "ws://" not in response.text
+    assert "45678" not in response.text
+
+
+def test_lease_create_maps_launcher_failure_to_handoff_failed(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Launcher Failure")["profile"]
+
+    def failing_launch(store_root, profile_id):
+        raise SidecarError(code=CHROMIUM_LAUNCH_FAILED, message="Chromium exited before it could be registered as running.")
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", failing_launch)
+    app = create_app(config)
+
+    response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
+
+    error = assert_lease_error_body(response, AUTOMATION_LEASE_HANDOFF_FAILED, 503)
+    assert_persisted_diagnostic(
+        config,
+        error,
+        method="automation.leases.create",
+        code=AUTOMATION_LEASE_HANDOFF_FAILED,
+    )
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_lease_status_and_release_reject_unknown_or_malformed_lease_ids_with_diagnostics(tmp_path, method):
+    config = make_config(tmp_path)
+    app = create_app(config)
+
+    unknown_response = asgi_request(app, method, "/v1/leases/lease_missing", headers=automation_auth_headers())
+
+    unknown_error = assert_lease_error_body(unknown_response, AUTOMATION_LEASE_NOT_FOUND, 404)
+    assert_persisted_diagnostic(
+        config,
+        unknown_error,
+        method=f"automation.leases.{'status' if method == 'GET' else 'release'}",
+        code=AUTOMATION_LEASE_NOT_FOUND,
+    )
+
+    malformed_response = asgi_request(app, method, "/v1/leases/not-a-lease", headers=automation_auth_headers())
+
+    malformed_error = assert_lease_error_body(malformed_response, INVALID_REQUEST, 400)
+    assert_persisted_diagnostic(
+        config,
+        malformed_error,
+        method=f"automation.leases.{'status' if method == 'GET' else 'release'}",
+        code=INVALID_REQUEST,
+    )
 
 
 def test_health_stays_public_when_token_query_param_is_supplied(tmp_path):

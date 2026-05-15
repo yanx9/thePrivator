@@ -10,6 +10,7 @@ import os
 import secrets
 import socket
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -32,6 +33,16 @@ from .protocol import (
     AUTOMATION_API_STARTUP_FAILED,
     AUTOMATION_AUTH_INVALID,
     AUTOMATION_AUTH_REQUIRED,
+    AUTOMATION_LEASE_EXPIRED,
+    AUTOMATION_LEASE_HANDOFF_FAILED,
+    AUTOMATION_LEASE_NOT_FOUND,
+    AUTOMATION_LEASE_PROFILE_BUSY,
+    AUTOMATION_LEASE_RELEASED,
+    CHROMIUM_ALREADY_RUNNING,
+    CHROMIUM_EXECUTABLE_NOT_FOUND,
+    CHROMIUM_LAUNCH_FAILED,
+    CHROMIUM_STOP_FAILED,
+    IDENTITY_CDP_FAILED,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
@@ -53,8 +64,12 @@ DEFAULT_PORT = 0
 MAX_AUTHORIZATION_HEADER_LENGTH = 8192
 PROFILE_API_VERSION = 1
 RUNTIME_API_VERSION = 1
+LEASE_API_VERSION = 1
 DEFAULT_PROFILE_LIST_LIMIT = 50
 MAX_PROFILE_LIST_LIMIT = 100
+DEFAULT_LEASE_TTL_SECONDS = 30
+MIN_LEASE_TTL_SECONDS = 1
+MAX_LEASE_TTL_SECONDS = 120
 _PROFILE_CURSOR_PREFIX = "p_"
 _PROFILE_CURSOR_MARKER = "profiles:"
 _MAX_PROFILE_CURSOR_LENGTH = 96
@@ -62,6 +77,9 @@ _URLSAFE_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 _AUTOMATION_PROFILES_LIST_METHOD = "automation.profiles.list"
 _AUTOMATION_PROFILES_STATUS_METHOD = "automation.profiles.status"
 _AUTOMATION_RUNTIME_STATUS_METHOD = "automation.runtime.status"
+_AUTOMATION_LEASES_CREATE_METHOD = "automation.leases.create"
+_AUTOMATION_LEASES_STATUS_METHOD = "automation.leases.status"
+_AUTOMATION_LEASES_RELEASE_METHOD = "automation.leases.release"
 
 ENV_HOST = "THEPRIVATOR_AUTOMATION_API_HOST"
 ENV_PORT = "THEPRIVATOR_AUTOMATION_API_PORT"
@@ -78,6 +96,7 @@ _SAFE_ERROR_DETAILS = {
     "http": {"phase": "http"},
     "profile": {"phase": "profile"},
     "runtime": {"phase": "runtime"},
+    "lease": {"phase": "lease"},
 }
 
 
@@ -124,6 +143,156 @@ class AutomationHttpError(Exception):
         Exception.__init__(self, self.message)
 
 
+@dataclass(frozen=True)
+class AutomationLeaseRecord:
+    """In-memory automation lease state without attach endpoint material."""
+
+    lease_id: str
+    profile_id: str
+    framework: str
+    status: str
+    created_at: str
+    expires_at: str
+    expires_at_epoch: float
+    ttl_seconds: int
+    released_at: Optional[str] = None
+    expired_at: Optional[str] = None
+
+    def as_safe_dict(self) -> JsonObject:
+        payload: JsonObject = {
+            "id": self.lease_id,
+            "profileId": self.profile_id,
+            "framework": self.framework,
+            "status": self.status,
+            "createdAt": self.created_at,
+            "expiresAt": self.expires_at,
+            "ttlSeconds": self.ttl_seconds,
+        }
+        if self.released_at is not None:
+            payload["releasedAt"] = self.released_at
+        if self.expired_at is not None:
+            payload["expiredAt"] = self.expired_at
+        return payload
+
+
+class AutomationLeaseManager:
+    """Process-local lease registry with per-profile active lease serialization."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._leases: dict[str, AutomationLeaseRecord] = {}
+        self._active_by_profile: dict[str, str] = {}
+
+    def create(self, store_root: Path, profile_id: str, *, framework: str, ttl_seconds: int) -> tuple[AutomationLeaseRecord, JsonObject, str]:
+        with self._lock:
+            self._cleanup_expired_locked(store_root)
+            active_lease_id = self._active_by_profile.get(profile_id)
+            if active_lease_id is not None:
+                active_lease = self._leases.get(active_lease_id)
+                if active_lease is not None and active_lease.status == "active":
+                    raise SidecarError(
+                        code=AUTOMATION_LEASE_PROFILE_BUSY,
+                        message="An automation lease is already active for this profile.",
+                    )
+                self._active_by_profile.pop(profile_id, None)
+
+            try:
+                launch_payload = chromium.launch_for_automation(store_root, profile_id)
+            except SidecarError as error:
+                raise _normalize_lease_launch_error(error) from error
+
+            try:
+                handoff_endpoint = _extract_lease_handoff_endpoint(launch_payload, profile_id)
+                runtime_payload = _lease_create_runtime_payload(profile_id, launch_payload)
+            except ValueError as exc:
+                _best_effort_stop_after_failed_handoff(store_root, profile_id)
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_HANDOFF_FAILED,
+                    message="Automation lease handoff could not be prepared.",
+                ) from exc
+
+            lease_id = _make_lease_id()
+            now_epoch = time.time()
+            created_at = _iso_from_epoch(now_epoch)
+            expires_at_epoch = now_epoch + ttl_seconds
+            lease = AutomationLeaseRecord(
+                lease_id=lease_id,
+                profile_id=profile_id,
+                framework=framework,
+                status="active",
+                created_at=created_at,
+                expires_at=_iso_from_epoch(expires_at_epoch),
+                expires_at_epoch=expires_at_epoch,
+                ttl_seconds=ttl_seconds,
+            )
+            self._leases[lease_id] = lease
+            self._active_by_profile[profile_id] = lease_id
+            return lease, runtime_payload, handoff_endpoint
+
+    def get(self, store_root: Path, lease_id: str) -> AutomationLeaseRecord:
+        with self._lock:
+            lease = self._leases.get(lease_id)
+            if lease is None:
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_NOT_FOUND,
+                    message="Automation lease was not found.",
+                )
+            return self._expire_if_due_locked(store_root, lease)
+
+    def release(self, store_root: Path, lease_id: str) -> tuple[AutomationLeaseRecord, JsonObject]:
+        with self._lock:
+            lease = self._leases.get(lease_id)
+            if lease is None:
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_NOT_FOUND,
+                    message="Automation lease was not found.",
+                )
+            lease = self._expire_if_due_locked(store_root, lease)
+            if lease.status == "released":
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_RELEASED,
+                    message="Automation lease was already released.",
+                )
+            if lease.status == "expired":
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_EXPIRED,
+                    message="Automation lease has expired.",
+                )
+
+            try:
+                stop_payload = chromium.stop(store_root, lease.profile_id)
+                runtime_payload = _lease_release_runtime_payload(lease.profile_id, stop_payload)
+            except SidecarError:
+                raise
+            except ValueError as exc:
+                raise SidecarError(
+                    code=CHROMIUM_STOP_FAILED,
+                    message="Automation lease release cleanup failed.",
+                ) from exc
+
+            released = replace(lease, status="released", released_at=_utc_now_iso())
+            self._leases[lease.lease_id] = released
+            self._active_by_profile.pop(lease.profile_id, None)
+            return released, runtime_payload
+
+    def _cleanup_expired_locked(self, store_root: Path) -> None:
+        for lease in list(self._leases.values()):
+            if lease.status == "active" and time.time() >= lease.expires_at_epoch:
+                self._expire_if_due_locked(store_root, lease)
+
+    def _expire_if_due_locked(self, store_root: Path, lease: AutomationLeaseRecord) -> AutomationLeaseRecord:
+        if lease.status != "active" or time.time() < lease.expires_at_epoch:
+            return lease
+        try:
+            chromium.stop(store_root, lease.profile_id)
+        except SidecarError:
+            raise
+        expired = replace(lease, status="expired", expired_at=_utc_now_iso())
+        self._leases[lease.lease_id] = expired
+        self._active_by_profile.pop(lease.profile_id, None)
+        return expired
+
+
 def create_app(config: AutomationApiConfig) -> FastAPI:
     """Create the versioned local automation API app."""
     app = FastAPI(
@@ -134,6 +303,7 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
         openapi_url=None,
     )
     app.state.automation_config = config
+    app.state.automation_lease_manager = AutomationLeaseManager()
 
     @app.middleware("http")
     async def add_request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -338,6 +508,129 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
                 "requestId": request.state.request_id,
             },
         }
+
+    @app.post("/v1/profiles/{profile_id}/leases")
+    async def create_profile_lease(
+        profile_id: str,
+        request: Request,
+        _authorized: None = Depends(require_token),
+    ) -> JSONResponse:
+        started = time.perf_counter()
+        try:
+            lease_request = await _parse_lease_create_request(request, started)
+            ProfileStore(_request_config(request).store_root).get(profile_id)
+            lease, runtime, handoff_endpoint = _request_lease_manager(request).create(
+                _request_config(request).store_root,
+                profile_id,
+                framework=lease_request["framework"],
+                ttl_seconds=lease_request["ttlSeconds"],
+            )
+            content: JsonObject = {
+                "leaseApiVersion": LEASE_API_VERSION,
+                "lease": lease.as_safe_dict(),
+                "handoff": {
+                    "browser": "chromium",
+                    "method": "connect-over-cdp",
+                    "endpoint": handoff_endpoint,
+                },
+                "runtime": runtime,
+                "request": {
+                    "requestId": request.state.request_id,
+                },
+            }
+            return JSONResponse(
+                status_code=201,
+                content=content,
+                headers={"Location": f"/v1/leases/{lease.lease_id}"},
+            )
+        except AutomationHttpError:
+            raise
+        except SidecarError as error:
+            _raise_lease_sidecar_http_error(request, error, started, method=_AUTOMATION_LEASES_CREATE_METHOD)
+            raise AssertionError("unreachable") from error
+        except Exception as exc:
+            detail_ref = make_detail_ref()
+            _raise_lease_http_error(
+                request,
+                503,
+                AUTOMATION_LEASE_HANDOFF_FAILED,
+                "Automation lease could not be created.",
+                detail_ref,
+                started,
+                method=_AUTOMATION_LEASES_CREATE_METHOD,
+            )
+            raise AssertionError("unreachable") from exc
+
+    @app.get("/v1/leases/{lease_id}")
+    async def lease_status(
+        lease_id: str,
+        request: Request,
+        _authorized: None = Depends(require_token),
+    ) -> JsonObject:
+        started = time.perf_counter()
+        try:
+            _validate_lease_id_or_raise(lease_id)
+            lease = _request_lease_manager(request).get(_request_config(request).store_root, lease_id)
+            return {
+                "leaseApiVersion": LEASE_API_VERSION,
+                "lease": lease.as_safe_dict(),
+                "request": {
+                    "requestId": request.state.request_id,
+                },
+            }
+        except AutomationHttpError:
+            raise
+        except SidecarError as error:
+            _raise_lease_sidecar_http_error(request, error, started, method=_AUTOMATION_LEASES_STATUS_METHOD)
+            raise AssertionError("unreachable") from error
+        except Exception as exc:
+            detail_ref = make_detail_ref()
+            _raise_lease_http_error(
+                request,
+                503,
+                INTERNAL_ERROR,
+                "Automation lease status is unavailable.",
+                detail_ref,
+                started,
+                method=_AUTOMATION_LEASES_STATUS_METHOD,
+            )
+            raise AssertionError("unreachable") from exc
+
+    @app.delete("/v1/leases/{lease_id}")
+    async def release_lease(
+        lease_id: str,
+        request: Request,
+        _authorized: None = Depends(require_token),
+    ) -> JsonObject:
+        started = time.perf_counter()
+        try:
+            _validate_lease_id_or_raise(lease_id)
+            lease, runtime = _request_lease_manager(request).release(_request_config(request).store_root, lease_id)
+            return {
+                "leaseApiVersion": LEASE_API_VERSION,
+                "lease": lease.as_safe_dict(),
+                "runtime": runtime,
+                "request": {
+                    "requestId": request.state.request_id,
+                },
+            }
+        except AutomationHttpError:
+            raise
+        except SidecarError as error:
+            _raise_lease_sidecar_http_error(request, error, started, method=_AUTOMATION_LEASES_RELEASE_METHOD)
+            raise AssertionError("unreachable") from error
+        except Exception as exc:
+            detail_ref = make_detail_ref()
+            _raise_lease_http_error(
+                request,
+                503,
+                INTERNAL_ERROR,
+                "Automation lease release failed.",
+                detail_ref,
+                started,
+                method=_AUTOMATION_LEASES_RELEASE_METHOD,
+            )
+            raise AssertionError("unreachable") from exc
 
     return app
 
@@ -640,6 +933,290 @@ def _proxy_host_for_summary(host: str) -> str:
     if parsed.version == 6:
         return f"[{host}]"
     return host
+
+
+async def _parse_lease_create_request(request: Request, started: float) -> JsonObject:
+    raw_body = await request.body()
+    if not raw_body:
+        payload: Any = {}
+    else:
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _raise_lease_http_error(
+                request,
+                400,
+                INVALID_REQUEST,
+                "Automation lease request body must be valid JSON.",
+                make_detail_ref(),
+                started,
+                method=_AUTOMATION_LEASES_CREATE_METHOD,
+            )
+            raise AssertionError("unreachable") from exc
+
+    if not isinstance(payload, Mapping):
+        _raise_lease_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Automation lease request body must be a JSON object.",
+            make_detail_ref(),
+            started,
+            method=_AUTOMATION_LEASES_CREATE_METHOD,
+        )
+
+    allowed_keys = {"framework", "ttlSeconds"}
+    if any(key not in allowed_keys for key in payload):
+        _raise_lease_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Automation lease request contains unsupported fields.",
+            make_detail_ref(),
+            started,
+            method=_AUTOMATION_LEASES_CREATE_METHOD,
+        )
+
+    framework = payload.get("framework", "playwright")
+    if framework != "playwright":
+        _raise_lease_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Automation lease framework is unsupported.",
+            make_detail_ref(),
+            started,
+            method=_AUTOMATION_LEASES_CREATE_METHOD,
+        )
+
+    ttl_seconds = payload.get("ttlSeconds", DEFAULT_LEASE_TTL_SECONDS)
+    if type(ttl_seconds) is not int or ttl_seconds < MIN_LEASE_TTL_SECONDS or ttl_seconds > MAX_LEASE_TTL_SECONDS:
+        _raise_lease_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Automation lease TTL is outside allowed bounds.",
+            make_detail_ref(),
+            started,
+            method=_AUTOMATION_LEASES_CREATE_METHOD,
+        )
+
+    return {"framework": framework, "ttlSeconds": ttl_seconds}
+
+
+def _request_lease_manager(request: Request) -> AutomationLeaseManager:
+    manager = getattr(request.app.state, "automation_lease_manager", None)
+    if not isinstance(manager, AutomationLeaseManager):
+        raise SidecarError(
+            code=AUTOMATION_LEASE_HANDOFF_FAILED,
+            message="Automation lease manager is unavailable.",
+        )
+    return manager
+
+
+def _normalize_lease_launch_error(error: SidecarError) -> SidecarError:
+    if error.code == CHROMIUM_ALREADY_RUNNING:
+        return SidecarError(
+            code=AUTOMATION_LEASE_PROFILE_BUSY,
+            message="An automation lease cannot start while this profile is already running.",
+            detail_ref=error.detail_ref,
+        )
+    if error.code in {CHROMIUM_EXECUTABLE_NOT_FOUND, CHROMIUM_LAUNCH_FAILED, IDENTITY_CDP_FAILED}:
+        return SidecarError(
+            code=AUTOMATION_LEASE_HANDOFF_FAILED,
+            message="Automation lease handoff could not be prepared.",
+            detail_ref=error.detail_ref,
+        )
+    return error
+
+
+def _extract_lease_handoff_endpoint(launch_payload: Mapping[str, Any], profile_id: str) -> str:
+    if not isinstance(launch_payload, Mapping):
+        raise ValueError("automation launch payload must be a mapping")
+    if launch_payload.get("profileId") != profile_id:
+        raise ValueError("automation launch profileId is malformed")
+    if launch_payload.get("status") != "running":
+        raise ValueError("automation launch status is malformed")
+    started_at = launch_payload.get("startedAt")
+    if not isinstance(started_at, str) or not started_at.endswith("Z"):
+        raise ValueError("automation launch startedAt is malformed")
+    running_count = launch_payload.get("runningCount")
+    if not isinstance(running_count, int) or running_count < 1:
+        raise ValueError("automation launch runningCount is malformed")
+    handoff_endpoint = launch_payload.get("handoffOrigin")
+    if not _is_safe_loopback_cdp_origin(handoff_endpoint):
+        raise ValueError("automation launch handoff origin is malformed")
+    return handoff_endpoint
+
+
+def _is_safe_loopback_cdp_origin(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    prefix = "http://127.0.0.1:"
+    if not value.startswith(prefix):
+        return False
+    port_text = value[len(prefix) :]
+    if not port_text or not port_text.isascii() or not port_text.isdigit():
+        return False
+    port = int(port_text, 10)
+    return 1 <= port <= 65535
+
+
+def _lease_create_runtime_payload(profile_id: str, launch_payload: Mapping[str, Any]) -> JsonObject:
+    handoff_endpoint = _extract_lease_handoff_endpoint(launch_payload, profile_id)
+    del handoff_endpoint
+    return {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "runningCount": launch_payload["runningCount"],
+        "profile": {
+            "profileId": profile_id,
+            "status": "running",
+            "startedAt": launch_payload["startedAt"],
+        },
+    }
+
+
+def _lease_release_runtime_payload(profile_id: str, stop_payload: Mapping[str, Any]) -> JsonObject:
+    if not isinstance(stop_payload, Mapping):
+        raise ValueError("automation stop payload must be a mapping")
+    if stop_payload.get("profileId") != profile_id:
+        raise ValueError("automation stop profileId is malformed")
+    if stop_payload.get("status") != "stopped":
+        raise ValueError("automation stop status is malformed")
+    stopped_at = stop_payload.get("stoppedAt")
+    termination = stop_payload.get("termination")
+    running_count = stop_payload.get("runningCount")
+    if not isinstance(stopped_at, str) or not stopped_at.endswith("Z"):
+        raise ValueError("automation stop stoppedAt is malformed")
+    if not isinstance(termination, str) or not termination:
+        raise ValueError("automation stop termination is malformed")
+    if not isinstance(running_count, int) or running_count < 0:
+        raise ValueError("automation stop runningCount is malformed")
+    return {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "profile": {
+            "profileId": profile_id,
+            "status": "stopped",
+            "stoppedAt": stopped_at,
+            "termination": termination,
+        },
+        "runningCount": running_count,
+    }
+
+
+def _best_effort_stop_after_failed_handoff(store_root: Path, profile_id: str) -> None:
+    try:
+        chromium.stop(store_root, profile_id)
+    except Exception:
+        pass
+
+
+def _raise_lease_sidecar_http_error(request: Request, error: SidecarError, started: float, *, method: str) -> None:
+    if error.code == INVALID_REQUEST:
+        _raise_lease_http_error(
+            request,
+            400,
+            INVALID_REQUEST,
+            "Automation lease request is invalid.",
+            error.detail_ref,
+            started,
+            method=method,
+        )
+
+    if error.code == PROFILE_NOT_FOUND:
+        _raise_lease_http_error(request, 404, PROFILE_NOT_FOUND, error.message, error.detail_ref, started, method=method)
+
+    if error.code == AUTOMATION_LEASE_NOT_FOUND:
+        _raise_lease_http_error(request, 404, AUTOMATION_LEASE_NOT_FOUND, error.message, error.detail_ref, started, method=method)
+
+    if error.code in {AUTOMATION_LEASE_PROFILE_BUSY, AUTOMATION_LEASE_RELEASED, AUTOMATION_LEASE_EXPIRED}:
+        _raise_lease_http_error(request, 409, error.code, error.message, error.detail_ref, started, method=method)
+
+    if error.code == CHROMIUM_ALREADY_RUNNING:
+        _raise_lease_http_error(
+            request,
+            409,
+            AUTOMATION_LEASE_PROFILE_BUSY,
+            "An automation lease cannot start while this profile is already running.",
+            error.detail_ref,
+            started,
+            method=method,
+        )
+
+    if error.code in {CHROMIUM_EXECUTABLE_NOT_FOUND, CHROMIUM_LAUNCH_FAILED, IDENTITY_CDP_FAILED, AUTOMATION_LEASE_HANDOFF_FAILED}:
+        _raise_lease_http_error(
+            request,
+            503,
+            AUTOMATION_LEASE_HANDOFF_FAILED,
+            "Automation lease handoff could not be prepared.",
+            error.detail_ref,
+            started,
+            method=method,
+        )
+
+    if error.code in {PROFILE_STORE_CORRUPT, PROFILE_STORE_UNAVAILABLE, PROFILE_STORE_WRITE_FAILED, CHROMIUM_STOP_FAILED}:
+        _raise_lease_http_error(request, 503, error.code, error.message, error.detail_ref, started, method=method)
+
+    _raise_lease_http_error(
+        request,
+        503,
+        INTERNAL_ERROR,
+        "Automation lease request failed unexpectedly.",
+        error.detail_ref,
+        started,
+        method=method,
+    )
+
+
+def _raise_lease_http_error(
+    request: Request,
+    status_code: int,
+    code: str,
+    message: str,
+    detail_ref: str,
+    started: float,
+    *,
+    method: str,
+) -> None:
+    _record_domain_error(request, method=method, code=code, detail_ref=detail_ref, started=started)
+    raise AutomationHttpError(
+        status_code=status_code,
+        code=code,
+        message=message,
+        phase="lease",
+        detail_ref=detail_ref,
+    )
+
+
+def _make_lease_id() -> str:
+    while True:
+        suffix = secrets.token_urlsafe(18).rstrip("=")
+        if suffix and all(character in _URLSAFE_BASE64_CHARS for character in suffix):
+            return f"lease_{suffix}"
+
+
+def _validate_lease_id_or_raise(lease_id: str) -> None:
+    if (
+        not isinstance(lease_id, str)
+        or not lease_id
+        or lease_id.strip() != lease_id
+        or len(lease_id) > 128
+        or not lease_id.startswith("lease_")
+    ):
+        raise SidecarError(
+            code=INVALID_REQUEST,
+            message="Automation lease id is invalid.",
+        )
+    suffix = lease_id[len("lease_") :]
+    if not suffix or any(character not in _URLSAFE_BASE64_CHARS for character in suffix):
+        raise SidecarError(
+            code=INVALID_REQUEST,
+            message="Automation lease id is invalid.",
+        )
+
+
+def _iso_from_epoch(epoch_seconds: float) -> str:
+    return datetime.fromtimestamp(epoch_seconds, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _raise_profile_sidecar_http_error(
