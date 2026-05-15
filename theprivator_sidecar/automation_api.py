@@ -13,10 +13,11 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, TextIO
+from typing import Any, Callable, Mapping, Optional, TextIO
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -80,6 +81,8 @@ _AUTOMATION_RUNTIME_STATUS_METHOD = "automation.runtime.status"
 _AUTOMATION_LEASES_CREATE_METHOD = "automation.leases.create"
 _AUTOMATION_LEASES_STATUS_METHOD = "automation.leases.status"
 _AUTOMATION_LEASES_RELEASE_METHOD = "automation.leases.release"
+_AUTOMATION_LEASES_EXPIRE_METHOD = "automation.leases.expire"
+_AUTOMATION_LEASES_SHUTDOWN_METHOD = "automation.leases.shutdown"
 
 ENV_HOST = "THEPRIVATOR_AUTOMATION_API_HOST"
 ENV_PORT = "THEPRIVATOR_AUTOMATION_API_PORT"
@@ -143,6 +146,15 @@ class AutomationHttpError(Exception):
         Exception.__init__(self, self.message)
 
 
+LeaseTimerFactory = Callable[[float, Callable[[], None]], Any]
+
+
+def _default_lease_timer_factory(delay_seconds: float, callback: Callable[[], None]) -> Any:
+    timer = threading.Timer(delay_seconds, callback)
+    timer.daemon = True
+    return timer
+
+
 @dataclass(frozen=True)
 class AutomationLeaseRecord:
     """In-memory automation lease state without attach endpoint material."""
@@ -157,6 +169,11 @@ class AutomationLeaseRecord:
     ttl_seconds: int
     released_at: Optional[str] = None
     expired_at: Optional[str] = None
+    cleaned_up_at: Optional[str] = None
+    cleanup_failed_at: Optional[str] = None
+    cleanup_error_code: Optional[str] = None
+    cleanup_detail_ref: Optional[str] = None
+    cleanup_runtime: Optional[JsonObject] = None
 
     def as_safe_dict(self) -> JsonObject:
         payload: JsonObject = {
@@ -172,19 +189,43 @@ class AutomationLeaseRecord:
             payload["releasedAt"] = self.released_at
         if self.expired_at is not None:
             payload["expiredAt"] = self.expired_at
+        if self.cleaned_up_at is not None:
+            payload["cleanedUpAt"] = self.cleaned_up_at
+        if self.cleanup_failed_at is not None:
+            payload["cleanupFailedAt"] = self.cleanup_failed_at
+        if self.cleanup_error_code is not None and self.cleanup_detail_ref is not None:
+            payload["cleanupError"] = {
+                "code": self.cleanup_error_code,
+                "detailRef": self.cleanup_detail_ref,
+            }
         return payload
+
+    def safe_runtime_payload(self) -> Optional[JsonObject]:
+        if self.cleanup_runtime is None:
+            return None
+        return dict(self.cleanup_runtime)
 
 
 class AutomationLeaseManager:
-    """Process-local lease registry with per-profile active lease serialization."""
+    """Process-local lease registry with timer-backed authority cleanup."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, timer_factory: Optional[LeaseTimerFactory] = None) -> None:
         self._lock = threading.RLock()
         self._leases: dict[str, AutomationLeaseRecord] = {}
         self._active_by_profile: dict[str, str] = {}
+        self._timers: dict[str, Any] = {}
+        self._timer_factory = timer_factory or _default_lease_timer_factory
+        self._launch_for_automation = chromium.launch_for_automation
+        self._stop_chromium = chromium.stop
+        self._closed = False
 
     def create(self, store_root: Path, profile_id: str, *, framework: str, ttl_seconds: int) -> tuple[AutomationLeaseRecord, JsonObject, str]:
         with self._lock:
+            if self._closed:
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_HANDOFF_FAILED,
+                    message="Automation lease manager is closed.",
+                )
             self._cleanup_expired_locked(store_root)
             active_lease_id = self._active_by_profile.get(profile_id)
             if active_lease_id is not None:
@@ -197,7 +238,7 @@ class AutomationLeaseManager:
                 self._active_by_profile.pop(profile_id, None)
 
             try:
-                launch_payload = chromium.launch_for_automation(store_root, profile_id)
+                launch_payload = self._launch_for_automation(store_root, profile_id)
             except SidecarError as error:
                 raise _normalize_lease_launch_error(error) from error
 
@@ -227,6 +268,16 @@ class AutomationLeaseManager:
             )
             self._leases[lease_id] = lease
             self._active_by_profile[profile_id] = lease_id
+            try:
+                self._schedule_expiry_locked(store_root, lease)
+            except Exception as exc:
+                self._leases.pop(lease_id, None)
+                self._active_by_profile.pop(profile_id, None)
+                _best_effort_stop_after_failed_handoff(store_root, profile_id)
+                raise SidecarError(
+                    code=AUTOMATION_LEASE_HANDOFF_FAILED,
+                    message="Automation lease expiry cleanup could not be scheduled.",
+                ) from exc
             return lease, runtime_payload, handoff_endpoint
 
     def get(self, store_root: Path, lease_id: str) -> AutomationLeaseRecord:
@@ -259,48 +310,144 @@ class AutomationLeaseManager:
                     message="Automation lease has expired.",
                 )
 
-            try:
-                stop_payload = chromium.stop(store_root, lease.profile_id)
-                runtime_payload = _lease_release_runtime_payload(lease.profile_id, stop_payload)
-            except SidecarError:
-                raise
-            except ValueError as exc:
+            released, runtime_payload, cleanup_error = self._finalize_cleanup_locked(
+                store_root,
+                lease,
+                status="released",
+                method=_AUTOMATION_LEASES_RELEASE_METHOD,
+            )
+            if cleanup_error is not None:
+                raise cleanup_error
+            if runtime_payload is None:
                 raise SidecarError(
                     code=CHROMIUM_STOP_FAILED,
-                    message="Automation lease release cleanup failed.",
-                ) from exc
-
-            released = replace(lease, status="released", released_at=_utc_now_iso())
-            self._leases[lease.lease_id] = released
-            self._active_by_profile.pop(lease.profile_id, None)
+                    message="Automation lease cleanup failed.",
+                )
             return released, runtime_payload
+
+    def close(self, store_root: Path) -> None:
+        """Best-effort shutdown cleanup for active lease-owned Chromium runtimes."""
+        with self._lock:
+            self._closed = True
+            active_leases = [lease for lease in self._leases.values() if lease.status == "active"]
+            for lease_id in list(self._timers):
+                self._cancel_timer_locked(lease_id)
+            for lease in active_leases:
+                current = self._leases.get(lease.lease_id)
+                if current is not None and current.status == "active":
+                    self._finalize_cleanup_locked(
+                        store_root,
+                        current,
+                        status="released",
+                        method=_AUTOMATION_LEASES_SHUTDOWN_METHOD,
+                    )
+
+    def _schedule_expiry_locked(self, store_root: Path, lease: AutomationLeaseRecord) -> None:
+        delay_seconds = max(0.0, lease.expires_at_epoch - time.time())
+        timer = self._timer_factory(
+            delay_seconds,
+            lambda lease_id=lease.lease_id, root=Path(store_root): self._expire_from_timer(root, lease_id),
+        )
+        self._timers[lease.lease_id] = timer
+        timer.start()
+
+    def _cancel_timer_locked(self, lease_id: str) -> None:
+        timer = self._timers.pop(lease_id, None)
+        if timer is None:
+            return
+        try:
+            timer.cancel()
+        except Exception:
+            pass
 
     def _cleanup_expired_locked(self, store_root: Path) -> None:
         for lease in list(self._leases.values()):
             if lease.status == "active" and time.time() >= lease.expires_at_epoch:
-                self._expire_if_due_locked(store_root, lease)
+                self._expire_locked(store_root, lease)
 
     def _expire_if_due_locked(self, store_root: Path, lease: AutomationLeaseRecord) -> AutomationLeaseRecord:
         if lease.status != "active" or time.time() < lease.expires_at_epoch:
             return lease
-        try:
-            chromium.stop(store_root, lease.profile_id)
-        except SidecarError:
-            raise
-        expired = replace(lease, status="expired", expired_at=_utc_now_iso())
-        self._leases[lease.lease_id] = expired
-        self._active_by_profile.pop(lease.profile_id, None)
+        return self._expire_locked(store_root, lease)
+
+    def _expire_from_timer(self, store_root: Path, lease_id: str) -> None:
+        with self._lock:
+            if self._closed:
+                self._cancel_timer_locked(lease_id)
+                return
+            lease = self._leases.get(lease_id)
+            if lease is None or lease.status != "active":
+                self._cancel_timer_locked(lease_id)
+                return
+            self._expire_locked(store_root, lease)
+
+    def _expire_locked(self, store_root: Path, lease: AutomationLeaseRecord) -> AutomationLeaseRecord:
+        expired, _runtime_payload, _cleanup_error = self._finalize_cleanup_locked(
+            store_root,
+            lease,
+            status="expired",
+            method=_AUTOMATION_LEASES_EXPIRE_METHOD,
+        )
         return expired
+
+    def _finalize_cleanup_locked(
+        self,
+        store_root: Path,
+        lease: AutomationLeaseRecord,
+        *,
+        status: str,
+        method: str,
+    ) -> tuple[AutomationLeaseRecord, Optional[JsonObject], Optional[SidecarError]]:
+        self._cancel_timer_locked(lease.lease_id)
+        self._active_by_profile.pop(lease.profile_id, None)
+        try:
+            stop_payload = self._stop_chromium(store_root, lease.profile_id)
+            runtime_payload = _lease_release_runtime_payload(lease.profile_id, stop_payload)
+        except Exception as exc:
+            cleanup_error = _normalize_lease_cleanup_error(exc)
+            cleanup_failed_at = _utc_now_iso()
+            failed = _lease_with_cleanup_state(
+                lease,
+                status=status,
+                status_at=cleanup_failed_at,
+                cleanup_failed_at=cleanup_failed_at,
+                cleanup_error=cleanup_error,
+            )
+            self._leases[lease.lease_id] = failed
+            _record_lease_cleanup_failure(store_root, method=method, error=cleanup_error)
+            return failed, None, cleanup_error
+
+        cleaned_up_at = _utc_now_iso()
+        cleaned = _lease_with_cleanup_state(
+            lease,
+            status=status,
+            status_at=cleaned_up_at,
+            cleaned_up_at=cleaned_up_at,
+            cleanup_runtime=runtime_payload,
+        )
+        self._leases[lease.lease_id] = cleaned
+        return cleaned, runtime_payload, None
 
 
 def create_app(config: AutomationApiConfig) -> FastAPI:
     """Create the versioned local automation API app."""
+
+    @asynccontextmanager
+    async def automation_lifespan(lifespan_app: FastAPI):  # type: ignore[no-untyped-def]
+        try:
+            yield
+        finally:
+            manager = getattr(lifespan_app.state, "automation_lease_manager", None)
+            if isinstance(manager, AutomationLeaseManager):
+                manager.close(config.store_root)
+
     app = FastAPI(
         title="ThePrivator Automation API",
         version=AUTOMATION_API_VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=automation_lifespan,
     )
     app.state.automation_config = config
     app.state.automation_lease_manager = AutomationLeaseManager()
@@ -571,13 +718,17 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
         try:
             _validate_lease_id_or_raise(lease_id)
             lease = _request_lease_manager(request).get(_request_config(request).store_root, lease_id)
-            return {
+            content: JsonObject = {
                 "leaseApiVersion": LEASE_API_VERSION,
                 "lease": lease.as_safe_dict(),
                 "request": {
                     "requestId": request.state.request_id,
                 },
             }
+            runtime_payload = lease.safe_runtime_payload()
+            if runtime_payload is not None:
+                content["runtime"] = runtime_payload
+            return content
         except AutomationHttpError:
             raise
         except SidecarError as error:
@@ -1012,6 +1163,62 @@ def _request_lease_manager(request: Request) -> AutomationLeaseManager:
             message="Automation lease manager is unavailable.",
         )
     return manager
+
+
+def _normalize_lease_cleanup_error(error: BaseException) -> SidecarError:
+    detail_ref = error.detail_ref if isinstance(error, SidecarError) else make_detail_ref()
+    return SidecarError(
+        code=CHROMIUM_STOP_FAILED,
+        message="Automation lease cleanup failed.",
+        detail_ref=detail_ref,
+    )
+
+
+def _lease_with_cleanup_state(
+    lease: AutomationLeaseRecord,
+    *,
+    status: str,
+    status_at: str,
+    cleaned_up_at: Optional[str] = None,
+    cleanup_failed_at: Optional[str] = None,
+    cleanup_error: Optional[SidecarError] = None,
+    cleanup_runtime: Optional[JsonObject] = None,
+) -> AutomationLeaseRecord:
+    released_at = lease.released_at
+    expired_at = lease.expired_at
+    if status == "released" and released_at is None:
+        released_at = status_at
+    if status == "expired" and expired_at is None:
+        expired_at = status_at
+    return replace(
+        lease,
+        status=status,
+        released_at=released_at,
+        expired_at=expired_at,
+        cleaned_up_at=cleaned_up_at,
+        cleanup_failed_at=cleanup_failed_at,
+        cleanup_error_code=cleanup_error.code if cleanup_error is not None else None,
+        cleanup_detail_ref=cleanup_error.detail_ref if cleanup_error is not None else None,
+        cleanup_runtime=cleanup_runtime,
+    )
+
+
+def _record_lease_cleanup_failure(store_root: Path, *, method: str, error: SidecarError) -> None:
+    started = time.perf_counter()
+    append_events(
+        store_root,
+        [
+            diagnostic_event(
+                request_id=None,
+                method=method,
+                status="error",
+                duration_ms=_elapsed_ms(started),
+                error_code=error.code,
+                detail_ref=error.detail_ref,
+            )
+        ],
+        method=method,
+    )
 
 
 def _normalize_lease_launch_error(error: SidecarError) -> SidecarError:

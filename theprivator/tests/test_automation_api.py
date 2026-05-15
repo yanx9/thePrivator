@@ -1,5 +1,6 @@
 """Contract tests for the loopback automation API sidecar mode."""
 
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from theprivator_sidecar.automation_api import (
     PROFILE_API_VERSION,
     RUNTIME_API_VERSION,
     AutomationApiConfig,
+    AutomationLeaseManager,
     AutomationStartupError,
     bind_loopback_socket,
     create_app,
@@ -47,6 +49,7 @@ from theprivator_sidecar.protocol import (
     AUTOMATION_LEASE_RELEASED,
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_LAUNCH_FAILED,
+    CHROMIUM_STOP_FAILED,
     INTERNAL_ERROR,
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
@@ -377,6 +380,35 @@ def fake_automation_stop(profile_id: str) -> dict[str, object]:
         "termination": "graceful",
         "runningCount": 0,
     }
+
+
+class FakeLeaseTimer:
+    def __init__(self, delay: float, callback) -> None:
+        self.delay = delay
+        self.callback = callback
+        self.started = False
+        self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        assert self.started is True
+        assert self.cancelled is False
+        self.callback()
+
+
+class FakeLeaseTimerFactory:
+    def __init__(self) -> None:
+        self.timers: list[FakeLeaseTimer] = []
+
+    def __call__(self, delay: float, callback) -> FakeLeaseTimer:
+        timer = FakeLeaseTimer(delay, callback)
+        self.timers.append(timer)
+        return timer
 
 
 def assert_persisted_diagnostic(config: AutomationApiConfig, error, *, method: str, code: str) -> None:
@@ -929,7 +961,9 @@ def test_lease_create_returns_one_time_playwright_handoff_and_safe_runtime(tmp_p
         "launch_for_automation",
         lambda store_root, profile_id: fake_automation_launch(profile_id),
     )
+    timer_factory = FakeLeaseTimerFactory()
     app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
 
     response = asgi_request(
         app,
@@ -950,6 +984,9 @@ def test_lease_create_returns_one_time_playwright_handoff_and_safe_runtime(tmp_p
     assert lease["framework"] == "playwright"
     assert lease["status"] == "active"
     assert lease["ttlSeconds"] == 1
+    assert len(timer_factory.timers) == 1
+    assert timer_factory.timers[0].started is True
+    assert 0 <= timer_factory.timers[0].delay <= 1
     assert lease["createdAt"].endswith("Z")
     assert lease["expiresAt"].endswith("Z")
     assert response.headers["location"] == f"/v1/leases/{lease['id']}"
@@ -987,7 +1024,9 @@ def test_lease_status_and_release_never_return_handoff_material(tmp_path, monkey
         return fake_automation_stop(profile_id)
 
     monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    timer_factory = FakeLeaseTimerFactory()
     app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
 
     create_response = asgi_request(
         app,
@@ -1027,6 +1066,8 @@ def test_lease_status_and_release_never_return_handoff_material(tmp_path, monkey
         "runningCount": 0,
     }
     assert stopped_profiles == [profile["id"]]
+    assert len(timer_factory.timers) == 1
+    assert timer_factory.timers[0].cancelled is True
     assert "handoff" not in release_body
     assert "http://127.0.0.1:45679" not in release_response.text
     assert_no_forbidden_lease_surface(release_body)
@@ -1040,6 +1081,205 @@ def test_lease_status_and_release_never_return_handoff_material(tmp_path, monkey
     second_release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
 
     assert_lease_error_body(second_release_response, AUTOMATION_LEASE_RELEASED, 409)
+
+
+def test_lease_expiry_timer_stops_runtime_without_polling_and_keeps_safe_tombstone(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Timer Expiry")['profile']
+    timer_factory = FakeLeaseTimerFactory()
+    launch_calls = []
+    stop_calls = []
+
+    def launch_profile(store_root, profile_id):
+        launch_calls.append(profile_id)
+        endpoint_port = 45680 + len(launch_calls)
+        return fake_automation_launch(profile_id, endpoint=f"http://127.0.0.1:{endpoint_port}")
+
+    def stop_profile(store_root, profile_id):
+        stop_calls.append(profile_id)
+        return fake_automation_stop(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"ttlSeconds": 1},
+    )
+    assert create_response.status_code == 201
+    lease_id = create_response.json()["lease"]["id"]
+    assert len(timer_factory.timers) == 1
+    assert timer_factory.timers[0].started is True
+    assert stop_calls == []
+
+    timer_factory.timers[0].fire()
+
+    assert stop_calls == [profile["id"]]
+    expired_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+    assert expired_response.status_code == 200
+    expired_body = expired_response.json()
+    assert set(expired_body) == {"leaseApiVersion", "lease", "runtime", "request"}
+    assert expired_body["lease"]["status"] == "expired"
+    assert expired_body["lease"]["expiredAt"].endswith("Z")
+    assert expired_body["lease"]["cleanedUpAt"].endswith("Z")
+    assert expired_body["runtime"] == {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "profile": {
+            "profileId": profile["id"],
+            "status": "stopped",
+            "stoppedAt": "2026-01-04T00:01:00.000Z",
+            "termination": "graceful",
+        },
+        "runningCount": 0,
+    }
+    assert "handoff" not in expired_body
+    assert "http://127.0.0.1:45681" not in expired_response.text
+    assert_no_forbidden_lease_surface(expired_body)
+
+    release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+    assert_lease_error_body(release_response, AUTOMATION_LEASE_EXPIRED, 409)
+
+    runtime_response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+    selected_response = asgi_get(app, f"/v1/profiles/{profile['id']}/status", headers=automation_auth_headers())
+    assert runtime_response.status_code == 200
+    assert selected_response.status_code == 200
+    assert "http://127.0.0.1:45681" not in runtime_response.text
+    assert "http://127.0.0.1:45681" not in selected_response.text
+    assert_no_forbidden_runtime_surface(runtime_response.json(), str(config.store_root))
+    assert_no_forbidden_runtime_surface(selected_response.json(), str(config.store_root))
+
+    second_create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"ttlSeconds": 1},
+    )
+    assert second_create_response.status_code == 201
+    assert launch_calls == [profile["id"], profile["id"]]
+
+
+def test_lease_expiry_cleanup_failure_clears_active_slot_and_reports_safe_error(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Expiry Cleanup Failure")['profile']
+    timer_factory = FakeLeaseTimerFactory()
+    launch_calls = []
+    stop_calls = []
+
+    def launch_profile(store_root, profile_id):
+        launch_calls.append(profile_id)
+        return fake_automation_launch(profile_id, endpoint="http://127.0.0.1:45682")
+
+    def stop_profile(store_root, profile_id):
+        stop_calls.append(profile_id)
+        raise SidecarError(
+            code=CHROMIUM_STOP_FAILED,
+            message="unsafe cleanup failure should not leak http://127.0.0.1:45682 or /tmp/profile",
+        )
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"ttlSeconds": 1},
+    )
+    lease_id = create_response.json()["lease"]["id"]
+
+    timer_factory.timers[0].fire()
+
+    assert stop_calls == [profile["id"]]
+    expired_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+    assert expired_response.status_code == 200
+    expired_body = expired_response.json()
+    assert set(expired_body) == {"leaseApiVersion", "lease", "request"}
+    assert expired_body["lease"]["status"] == "expired"
+    assert expired_body["lease"]["expiredAt"].endswith("Z")
+    assert expired_body["lease"]["cleanupFailedAt"].endswith("Z")
+    assert expired_body["lease"]["cleanupError"]["code"] == CHROMIUM_STOP_FAILED
+    assert expired_body["lease"]["cleanupError"]["detailRef"].startswith("sidecar-")
+    assert "45682" not in expired_response.text
+    assert "/tmp/profile" not in expired_response.text
+    assert "Traceback" not in expired_response.text
+    assert_no_forbidden_lease_surface(expired_body)
+
+    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
+
+    lookup = lookup_by_detail_ref(config.store_root, expired_body["lease"]["cleanupError"]["detailRef"])
+    assert lookup["found"] is True
+    entry = lookup["entries"][0]
+    assert entry["method"] == "automation.leases.expire"
+    assert entry["errorCode"] == CHROMIUM_STOP_FAILED
+
+    second_create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"ttlSeconds": 1},
+    )
+    assert second_create_response.status_code == 201
+    assert launch_calls == [profile["id"], profile["id"]]
+
+
+def test_lease_shutdown_stops_only_active_leases_and_cancels_timers(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    leased_profile = ProfileStore(config.store_root).create("Shutdown Leased")['profile']
+    unleased_profile = ProfileStore(config.store_root).create("Shutdown Unleased")['profile']
+    timer_factory = FakeLeaseTimerFactory()
+    stop_calls = []
+
+    monkeypatch.setattr(
+        automation_api.chromium,
+        "launch_for_automation",
+        lambda store_root, profile_id: fake_automation_launch(profile_id, endpoint="http://127.0.0.1:45683"),
+    )
+
+    def stop_profile(store_root, profile_id):
+        stop_calls.append(profile_id)
+        return fake_automation_stop(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{leased_profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"ttlSeconds": 1},
+    )
+    lease_id = create_response.json()["lease"]["id"]
+
+    async def run_shutdown_handlers() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(run_shutdown_handlers())
+
+    assert stop_calls == [leased_profile["id"]]
+    assert unleased_profile["id"] not in stop_calls
+    assert timer_factory.timers[0].cancelled is True
+    status_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["lease"]["status"] == "released"
+    assert status_body["lease"]["releasedAt"].endswith("Z")
+    assert status_body["lease"]["cleanedUpAt"].endswith("Z")
+    assert status_body["runtime"]["profile"]["status"] == "stopped"
+    assert "45683" not in status_response.text
+    assert_no_forbidden_lease_surface(status_body)
 
 
 @pytest.mark.parametrize(
@@ -1157,7 +1397,9 @@ def test_lease_create_rejects_active_lease_for_same_profile_before_second_launch
         return fake_automation_launch(profile_id)
 
     monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    timer_factory = FakeLeaseTimerFactory()
     app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=timer_factory)
 
     first_response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
     second_response = asgi_request(app, "POST", f"/v1/profiles/{profile['id']}/leases", headers=automation_auth_headers())
