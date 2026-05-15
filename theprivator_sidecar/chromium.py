@@ -306,6 +306,98 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     return {**_running_payload(record), "runningCount": len(updated)}
 
 
+def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> JsonObject:
+    """Launch Chromium for an ephemeral automation lease and return a CDP origin.
+
+    The returned origin is intentionally in-memory only. Runtime bookkeeping stays
+    limited to the existing ``RuntimeRecord`` shape so normal status surfaces do
+    not expose DevTools URLs, launch arguments, executable paths, or profile
+    storage paths.
+    """
+    profile = _load_profile(store_root, profile_id)
+    proxy_plan = build_proxy_runtime_plan(profile.proxy)
+    identity_plan = build_identity_runtime_plan(profile.identity)
+    registry = RuntimeRegistry(store_root)
+    records = registry.read()
+    active, _reconciled, changed = _reconcile_records(records)
+    if changed:
+        registry.write(active, error_code=CHROMIUM_LAUNCH_FAILED)
+
+    existing = active.get(profile.id)
+    if existing is not None and is_process_alive(existing.pid):
+        raise SidecarError(
+            code=CHROMIUM_ALREADY_RUNNING,
+            message="Chromium is already running for this profile.",
+        )
+
+    executable = discover_executable()
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        user_data_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium user data directory could not be prepared.",
+        ) from exc
+
+    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    owner_token = uuid.uuid4().hex
+    args = build_launch_args(
+        executable,
+        user_data_path,
+        "about:blank",
+        extra_args=[
+            *_runtime_launch_args(
+                identity_plan,
+                extension_artifact,
+                proxy_auth_artifact,
+                force_remote_debugging=True,
+            ),
+            *proxy_plan.launch_args,
+            *_proxy_proof_trust_args(),
+        ],
+    )
+    _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
+    process = _spawn_chromium(args, owner_token=owner_token)
+    try:
+        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
+        if process.poll() is not None or not is_process_alive(process.pid):
+            _reap_if_child(process.pid)
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium exited before it could be registered as running.",
+            )
+
+        endpoint = discover_devtools_endpoint(
+            user_data_path,
+            timeout_seconds=IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+        handoff_origin = _handoff_origin_from_endpoint(endpoint)
+
+        record = RuntimeRecord(
+            profile_id=profile.id,
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            user_data_dir=profile.storage.userDataDir,
+            owner_token=owner_token,
+        )
+        updated = dict(active)
+        updated[profile.id] = record
+        registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
+    except SidecarError:
+        _stop_child_after_failed_launch(process.pid)
+        raise
+    return {
+        "profileId": record.profile_id,
+        "status": "running",
+        "startedAt": record.started_at,
+        "runningCount": len(updated),
+        "handoffOrigin": handoff_origin,
+    }
+
+
 def open_identity_audit_page(
     store_root: Union[str, Path],
     profile_id: str,
@@ -793,6 +885,16 @@ def _apply_identity_cdp_to_endpoint_if_needed(identity_plan: IdentityRuntimePlan
     )
 
 
+def _handoff_origin_from_endpoint(endpoint: Any) -> str:
+    port = getattr(endpoint, "port", None)
+    if not isinstance(port, int) or port <= 0 or port > 65535:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        )
+    return f"http://127.0.0.1:{port}"
+
+
 def _open_public_audit_target(endpoint: Any, audit_page: Mapping[str, Any]) -> None:
     url = audit_page.get("url")
     if not isinstance(url, str) or not url:
@@ -1216,6 +1318,7 @@ __all__ = [
     "discover_executable",
     "is_process_alive",
     "launch",
+    "launch_for_automation",
     "open_identity_audit_page",
     "resolve_user_data_path",
     "status",

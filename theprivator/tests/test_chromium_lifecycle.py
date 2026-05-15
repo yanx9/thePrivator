@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import pytest
 
 from theprivator_sidecar import chromium
+from theprivator_sidecar.cdp import CdpEndpoint
 from theprivator_sidecar.identity import curated_preset
 from theprivator_sidecar.profiles import ProfileStore
 from theprivator_sidecar.proxy_proof import HttpsProxyCertificateStrategy
@@ -145,6 +146,44 @@ CHROMIUM_PUBLIC_FORBIDDEN_MARKERS = (
     "identity-extensions",
     "Traceback",
 )
+
+AUTOMATION_HANDOFF_FORBIDDEN_MARKERS = (
+    *CHROMIUM_PUBLIC_FORBIDDEN_MARKERS,
+    "debugPort",
+    "debug-port",
+    "webSocketDebuggerUrl",
+    "devtools/browser",
+    "ownerToken",
+    "owner_token",
+    "THEPRIVATOR_CHROMIUM_OWNER",
+    "--user-data-dir",
+    "profile-store/",
+    "chromium-processes.json",
+)
+
+
+def assert_automation_handoff_payload_is_safe(
+    payload: Mapping[str, Any],
+    *,
+    profile_id: str,
+    expected_origin: str,
+    running_count: int,
+    store_root: Path,
+) -> str:
+    assert set(payload) == {"profileId", "status", "startedAt", "runningCount", "handoffOrigin"}
+    assert payload["profileId"] == profile_id
+    assert payload["status"] == "running"
+    assert payload["startedAt"].endswith("Z")
+    assert payload["runningCount"] == running_count
+    assert payload["handoffOrigin"] == expected_origin
+    assert expected_origin.startswith("http://127.0.0.1:")
+    assert "/" not in expected_origin.removeprefix("http://127.0.0.1:")
+
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    assert str(store_root) not in encoded
+    for marker in AUTOMATION_HANDOFF_FORBIDDEN_MARKERS:
+        assert marker not in encoded
+    return encoded
 
 
 def assert_chromium_payload_omits_forbidden_markers(
@@ -291,6 +330,373 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
 
     stored_profile = read_profiles_payload(tmp_path)["profiles"][0]
     assert_no_runtime_truth(stored_profile)
+
+
+def test_launch_for_automation_direct_profile_forces_remote_debugging_and_returns_safe_origin(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "automation-direct-argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    user_data_path = tmp_path / profile["storage"]["userDataDir"]
+    user_data_path.mkdir(parents=True, exist_ok=True)
+    stale_active_port = user_data_path / "DevToolsActivePort"
+    stale_active_port.write_text("65535\n/devtools/browser/stale\n", encoding="utf-8")
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert Path(user_data_dir) == user_data_path
+        assert not stale_active_port.exists()
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("discover", kwargs))
+        return CdpEndpoint(
+            port=31337,
+            browser_target_path="/devtools/browser/test",
+            web_socket_debugger_url="ws://127.0.0.1:31337/devtools/browser/test",
+        )
+
+    def fail_apply_identity_cdp_overrides(*args, **kwargs):
+        raise AssertionError("direct automation launch should not apply identity CDP overrides")
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fail_apply_identity_cdp_overrides)
+
+    result = chromium.launch_for_automation(tmp_path, profile["id"])
+
+    try:
+        assert [call[0] for call in calls] == ["discover"]
+        assert_automation_handoff_payload_is_safe(
+            result,
+            profile_id=profile["id"],
+            expected_origin="http://127.0.0.1:31337",
+            running_count=1,
+            store_root=tmp_path,
+        )
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        assert argv.count("--remote-debugging-port=0") == 1
+        assert not any(arg.startswith("--load-extension=") for arg in argv)
+        assert not any(arg.startswith("--proxy-server=") for arg in argv)
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        assert status["profiles"][0] == {
+            "profileId": profile["id"],
+            "status": "running",
+            "pid": status["profiles"][0]["pid"],
+            "startedAt": result["startedAt"],
+            "userDataDir": profile["storage"]["userDataDir"],
+        }
+        registry_payload = json.loads(
+            (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "handoffOrigin" not in json.dumps(registry_payload)
+        assert "ws://" not in json.dumps(registry_payload)
+        assert "31337" not in json.dumps(registry_payload)
+        assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_launch_for_automation_masked_identity_with_authenticated_proxy_composes_runtime_artifacts(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    ProfileStore(tmp_path).update_proxy(profile["id"], authenticated_http_proxy("https"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "automation-identity-proxy-argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
+    user_data_path = tmp_path / profile["storage"]["userDataDir"]
+    user_data_path.mkdir(parents=True, exist_ok=True)
+    stale_active_port = user_data_path / "DevToolsActivePort"
+    stale_active_port.write_text("65535\n/devtools/browser/stale\n", encoding="utf-8")
+    calls = []
+
+    def fake_discover_devtools_endpoint(user_data_dir, **kwargs):
+        assert Path(user_data_dir) == user_data_path
+        assert not stale_active_port.exists()
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("discover", kwargs))
+        return CdpEndpoint(
+            port=32001,
+            browser_target_path="/devtools/browser/test",
+            web_socket_debugger_url="ws://127.0.0.1:32001/devtools/browser/test",
+        )
+
+    def fake_apply_identity_cdp_overrides(endpoint, overrides, **kwargs):
+        assert isinstance(endpoint, CdpEndpoint)
+        assert endpoint.port == 32001
+        assert "userAgent" in overrides
+        assert "deviceMetrics" in overrides
+        assert chromium.RuntimeRegistry(tmp_path).read() == {}
+        calls.append(("apply", sorted(overrides), kwargs))
+        return {"applied": ["userAgent", "deviceMetrics", "timezone", "locale"]}
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fake_apply_identity_cdp_overrides)
+
+    result = chromium.launch_for_automation(tmp_path, profile["id"])
+
+    try:
+        assert [call[0] for call in calls] == ["discover", "apply"]
+        assert_automation_handoff_payload_is_safe(
+            result,
+            profile_id=profile["id"],
+            expected_origin="http://127.0.0.1:32001",
+            running_count=1,
+            store_root=tmp_path,
+        )
+
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        joined_argv = "\n".join(argv)
+        assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
+            "--proxy-server=https://proxy.example.invalid:18443"
+        ]
+        assert argv.count("--remote-debugging-port=0") == 1
+        assert argv.count("--force-webrtc-ip-handling-policy=disable_non_proxied_udp") == 1
+        extension_dirs = assert_composed_extension_allowlist(argv)
+        extension_allowlist = next(arg for arg in argv if arg.startswith("--load-extension=")).split("=", 1)[1]
+        assert "direct://" not in joined_argv
+        assert "--proxy-bypass-list" not in joined_argv
+        assert "proxy-auth-user-sentinel" not in joined_argv
+        assert "proxy-auth-password-sentinel" not in joined_argv
+        assert "Proxy-Authorization" not in joined_argv
+        assert "@proxy.example.invalid" not in joined_argv
+        assert all(profile["id"] not in str(path) for path in extension_dirs)
+        assert "windows-10-chrome-120" not in joined_argv
+
+        status = chromium.status(tmp_path)
+        assert status["runningCount"] == 1
+        assert status["profiles"][0]["profileId"] == profile["id"]
+        assert_chromium_payload_omits_forbidden_markers(
+            status,
+            extra_forbidden=(
+                str(tmp_path),
+                extension_allowlist,
+                *(str(path) for path in extension_dirs),
+                result["handoffOrigin"],
+                "32001",
+            ),
+        )
+        registry_payload = json.loads(
+            (tmp_path / "profile-store" / "runtime" / "chromium-processes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert_chromium_payload_omits_forbidden_markers(
+            registry_payload,
+            extra_forbidden=(
+                str(tmp_path),
+                extension_allowlist,
+                *(str(path) for path in extension_dirs),
+                result["handoffOrigin"],
+                "32001",
+            ),
+        )
+        assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+def test_launch_for_automation_rejects_already_running_profile_before_second_spawn(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+
+    def fake_discover_devtools_endpoint(*args, **kwargs):
+        return CdpEndpoint(
+            port=31338,
+            browser_target_path="/devtools/browser/test",
+            web_socket_debugger_url="ws://127.0.0.1:31338/devtools/browser/test",
+        )
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    first = chromium.launch_for_automation(tmp_path, profile["id"])
+    assert first["status"] == "running"
+
+    def fail_discover_executable():
+        raise AssertionError("busy automation launch must fail before executable discovery")
+
+    def fail_spawn(*args, **kwargs):
+        raise AssertionError("busy automation launch must fail before spawning Chromium")
+
+    monkeypatch.setattr(chromium, "discover_executable", fail_discover_executable)
+    monkeypatch.setattr(chromium, "_spawn_chromium", fail_spawn)
+
+    try:
+        with pytest.raises(SidecarError) as exc_info:
+            chromium.launch_for_automation(tmp_path, profile["id"])
+
+        error = assert_sidecar_error(exc_info, CHROMIUM_ALREADY_RUNNING)
+        assert str(tmp_path) not in error.message
+        assert chromium.status(tmp_path)["runningCount"] == 1
+    finally:
+        chromium.stop(tmp_path, profile["id"])
+
+
+@pytest.mark.parametrize("bad_profile_id", [None, 42, "", "   "])
+def test_launch_for_automation_rejects_malformed_profile_ids(tmp_path, bad_profile_id):
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, bad_profile_id)  # type: ignore[arg-type]
+
+    assert_sidecar_error(exc_info, INVALID_REQUEST)
+    assert chromium.RuntimeRegistry(tmp_path).read() == {}
+
+
+def test_launch_for_automation_unknown_profile_id_uses_profile_store_not_found_error(
+    tmp_path, monkeypatch
+):
+    def fail_discover_executable():
+        raise AssertionError("profile lookup must fail before executable discovery")
+
+    monkeypatch.setattr(chromium, "discover_executable", fail_discover_executable)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, "missing-profile")
+
+    assert_sidecar_error(exc_info, PROFILE_NOT_FOUND)
+    assert chromium.RuntimeRegistry(tmp_path).read() == {}
+
+
+def test_launch_for_automation_proxy_auth_extension_failure_happens_before_spawn(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_proxy(profile["id"], authenticated_http_proxy("http"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+
+    def fail_generate_proxy_auth_extension(*args, **kwargs):
+        raise SidecarError(
+            code=PROXY_AUTH_HELPER_FAILED,
+            message="Proxy auth helper could not be prepared.",
+        )
+
+    def fail_if_spawned(*args, **kwargs):
+        raise AssertionError("Chromium must not spawn after proxy auth helper generation fails")
+
+    monkeypatch.setattr(chromium, "generate_proxy_auth_extension", fail_generate_proxy_auth_extension)
+    monkeypatch.setattr(chromium, "_spawn_chromium", fail_if_spawned)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, PROXY_AUTH_HELPER_FAILED)
+    encoded_error = json.dumps(error.to_dict(), sort_keys=True)
+    assert "proxy-auth-user-sentinel" not in encoded_error
+    assert "proxy-auth-password-sentinel" not in encoded_error
+    assert str(tmp_path) not in encoded_error
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_launch_for_automation_early_chromium_exit_leaves_no_runtime_record(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_EXIT_IMMEDIATELY", "1")
+
+    def fail_discover_devtools_endpoint(*args, **kwargs):
+        raise AssertionError("CDP discovery must not run after an early Chromium exit")
+
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fail_discover_devtools_endpoint)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, CHROMIUM_LAUNCH_FAILED)
+    assert str(fake_chromium) not in error.message
+    assert str(tmp_path) not in error.message
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_launch_for_automation_cdp_discovery_failure_stops_child_and_leaves_no_runtime_record(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setattr(chromium, "GRACEFUL_STOP_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(chromium, "FORCE_STOP_TIMEOUT_SECONDS", 0.1)
+    real_spawn = chromium._spawn_chromium
+    spawned_pids = []
+
+    def capture_spawn(args, *, owner_token):
+        process = real_spawn(args, owner_token=owner_token)
+        spawned_pids.append(process.pid)
+        return process
+
+    def fail_discover_devtools_endpoint(*args, **kwargs):
+        raise SidecarError(code=IDENTITY_CDP_FAILED, message="Identity CDP operation failed.")
+
+    monkeypatch.setattr(chromium, "_spawn_chromium", capture_spawn)
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fail_discover_devtools_endpoint)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, IDENTITY_CDP_FAILED)
+    assert str(tmp_path) not in error.message
+    assert spawned_pids
+    assert not chromium.is_process_alive(spawned_pids[0])
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
+
+
+def test_launch_for_automation_identity_cdp_apply_failure_stops_child_and_leaves_no_runtime_record(
+    tmp_path, monkeypatch
+):
+    profile = create_profile(tmp_path)
+    ProfileStore(tmp_path).update_identity(profile["id"], curated_preset("windows-10-chrome-120"))
+    fake_chromium = make_fake_chromium(tmp_path)
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setattr(chromium, "GRACEFUL_STOP_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(chromium, "FORCE_STOP_TIMEOUT_SECONDS", 0.1)
+    real_spawn = chromium._spawn_chromium
+    spawned_pids = []
+
+    def capture_spawn(args, *, owner_token):
+        process = real_spawn(args, owner_token=owner_token)
+        spawned_pids.append(process.pid)
+        return process
+
+    def fake_discover_devtools_endpoint(*args, **kwargs):
+        return CdpEndpoint(
+            port=31339,
+            browser_target_path="/devtools/browser/test",
+            web_socket_debugger_url="ws://127.0.0.1:31339/devtools/browser/test",
+        )
+
+    def fail_apply_identity_cdp_overrides(*args, **kwargs):
+        raise SidecarError(code=IDENTITY_CDP_FAILED, message="Identity CDP operation failed.")
+
+    monkeypatch.setattr(chromium, "_spawn_chromium", capture_spawn)
+    monkeypatch.setattr(chromium, "discover_devtools_endpoint", fake_discover_devtools_endpoint)
+    monkeypatch.setattr(chromium, "apply_identity_cdp_overrides", fail_apply_identity_cdp_overrides)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.launch_for_automation(tmp_path, profile["id"])
+
+    error = assert_sidecar_error(exc_info, IDENTITY_CDP_FAILED)
+    assert str(tmp_path) not in error.message
+    assert spawned_pids
+    assert not chromium.is_process_alive(spawned_pids[0])
+    assert chromium.status(tmp_path) == {"runningCount": 0, "profiles": [], "reconciled": []}
+    assert chromium.stop(tmp_path, profile["id"])["termination"] == "already-stopped"
+    assert_no_runtime_truth(read_profiles_payload(tmp_path)["profiles"][0])
 
 
 @pytest.mark.parametrize(
