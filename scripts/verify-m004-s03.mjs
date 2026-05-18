@@ -494,11 +494,11 @@ function redactS03Specific(value, context) {
   return safe;
 }
 
-function redactS03(value, context = createS03RedactionContext()) {
+export function redactS03(value, context = createS03RedactionContext()) {
   return redactS03Specific(redact(value, context), context);
 }
 
-function safeErrorForPublic(error) {
+export function safeErrorForPublic(error) {
   if (error instanceof VerifyFailure) {
     return {
       name: error.name,
@@ -635,11 +635,11 @@ function parseNdjsonLines(streamName, value, expectedCount = null, context = cre
   });
 }
 
-function sidecarRequest(id, method, params = {}) {
+export function sidecarRequest(id, method, params = {}) {
   return { id, method, params };
 }
 
-function runSidecarRequest(binaryPath, request, { timeoutMs = SIDECAR_TIMEOUT_MS, env = {}, context = createS03RedactionContext() } = {}) {
+export function runSidecarRequest(binaryPath, request, { timeoutMs = SIDECAR_TIMEOUT_MS, env = {}, context = createS03RedactionContext() } = {}) {
   const result = spawnSync(binaryPath, {
     cwd: ROOT_DIR,
     input: `${JSON.stringify(request)}\n`,
@@ -691,7 +691,7 @@ function runSidecarRequest(binaryPath, request, { timeoutMs = SIDECAR_TIMEOUT_MS
   return { response, diagnostic, diagnostics };
 }
 
-function sidecarSuccess(binaryPath, id, method, params = {}, options = {}) {
+export function sidecarSuccess(binaryPath, id, method, params = {}, options = {}) {
   const transcript = runSidecarRequest(binaryPath, sidecarRequest(id, method, params), options);
   const { response, diagnostic } = transcript;
   assert(response.id === id, "Sidecar success response id mismatch.", { phase: "profile-setup", action: method, requestId: id });
@@ -730,7 +730,7 @@ function createVerifierProfile({ binaryPath, storeRoot, context }) {
   };
 }
 
-function startAutomationApi({ binaryPath, storeRoot, token }) {
+export function startAutomationApi({ binaryPath, storeRoot, token }) {
   const child = spawn(binaryPath, ["automation-api"], {
     cwd: ROOT_DIR,
     env: {
@@ -770,7 +770,7 @@ function waitForExit(child, timeoutMs, phase) {
   });
 }
 
-async function stopAutomationApi(processState, { timeoutMs = SHUTDOWN_TIMEOUT_MS } = {}) {
+export async function stopAutomationApi(processState, { timeoutMs = SHUTDOWN_TIMEOUT_MS } = {}) {
   if (!processState?.child) {
     return { requested: false, exitCode: null, signal: null, alreadyExited: true };
   }
@@ -799,7 +799,7 @@ async function stopAutomationApi(processState, { timeoutMs = SHUTDOWN_TIMEOUT_MS
   }
 }
 
-function removeRuntimeRoot(storeRoot) {
+export function removeRuntimeRoot(storeRoot) {
   if (!storeRoot) {
     return false;
   }
@@ -807,7 +807,7 @@ function removeRuntimeRoot(storeRoot) {
   return !existsSync(storeRoot);
 }
 
-async function requestJson(url, { method = "GET", token, body, timeoutMs = HTTP_TIMEOUT_MS, phase = "http" } = {}) {
+export async function requestJson(url, { method = "GET", token, body, timeoutMs = HTTP_TIMEOUT_MS, phase = "http" } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`${phase} timed out.`)), timeoutMs);
   try {
@@ -852,14 +852,14 @@ async function requestJson(url, { method = "GET", token, body, timeoutMs = HTTP_
   }
 }
 
-function assertHealthWithHeader(response, context) {
+export function assertHealthWithHeader(response, context) {
   assertS02PublicEvidenceRedacted(response.body, context);
   const result = assertHealthResponse({ ...response, context });
   assertResponseHeaderRequestId(response.requestId, response.body?.request?.requestId, "health");
   return result;
 }
 
-async function verifyAuthFailures({ baseUrl, context }) {
+export async function verifyAuthFailures({ baseUrl, context }) {
   const missing = await requestJson(`${baseUrl}/v1/status`, { phase: "auth-missing" });
   const missingResult = assertProtectedAuthErrorResponse({
     ...missing,
@@ -880,7 +880,7 @@ async function verifyAuthFailures({ baseUrl, context }) {
   ];
 }
 
-async function createLease({ baseUrl, token, profileId, ttlSeconds, context }) {
+export async function createLease({ baseUrl, token, profileId, ttlSeconds, context }) {
   const response = await requestJson(`${baseUrl}/v1/profiles/${encodeURIComponent(profileId)}/leases`, {
     method: "POST",
     token,
@@ -897,7 +897,7 @@ async function createLease({ baseUrl, token, profileId, ttlSeconds, context }) {
   return result;
 }
 
-async function attachAndExercisePlaywright(endpoint) {
+export async function attachAndExercisePlaywright(endpoint) {
   let browser = null;
   let page = null;
   try {
@@ -938,7 +938,7 @@ async function attachAndExercisePlaywright(endpoint) {
   }
 }
 
-async function assertEndpointRevoked(endpoint) {
+export async function assertEndpointRevoked(endpoint) {
   let browser = null;
   try {
     browser = await playwrightChromium.connectOverCDP(endpoint, { timeout: ENDPOINT_REVOKED_TIMEOUT_MS });
@@ -965,7 +965,7 @@ function delay(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
-async function waitForLeaseStatus({ baseUrl, token, profileId, leaseId, expectedStatus, expectedTtlSeconds, context, timeoutMs = EXPIRY_WAIT_TIMEOUT_MS }) {
+export async function waitForLeaseStatus({ baseUrl, token, profileId, leaseId, expectedStatus, expectedTtlSeconds, context, timeoutMs = EXPIRY_WAIT_TIMEOUT_MS }) {
   const deadline = Date.now() + timeoutMs;
   let attempts = 0;
   let lastStatus = null;
@@ -1013,7 +1013,7 @@ function connectOnce(host, port, timeoutMs = 400) {
   });
 }
 
-async function assertListenerOpen({ host, port }) {
+export async function assertListenerOpen({ host, port }) {
   const open = await connectOnce(host, port);
   assert(open, "Automation API listener was not reachable after readiness.", { phase: "listener-open", port });
   return { open: true };
