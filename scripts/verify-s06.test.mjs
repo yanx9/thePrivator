@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writ
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import * as packagedVerifier from "./verify-s06.mjs";
 import {
   FORBIDDEN_PROFILE_RUNTIME_FIELDS,
   PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,
@@ -228,6 +229,52 @@ describe("verify-s06 guard helpers", () => {
     expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).not.toContain("credentials");
   });
 
+  it("exports only the packaged helper surface S05 needs without proxy secrets", () => {
+    const helperNames = [
+      "assertBuildArtifactsPresent",
+      "assertFreshBuildArtifacts",
+      "assertTauriGuardrails",
+      "assertWebDriverPreflight",
+      "createSmokeRunContext",
+      "startTauriDriverProcess",
+      "createTauriWebDriverSession",
+      "quitDriverSession",
+      "cleanupPackagedSmoke",
+      "safeSelectorContext",
+      "pollForValue",
+      "waitForVisibleElement",
+      "waitForVisibleText",
+      "waitForProfileCard",
+      "waitForProfileButton",
+      "waitForMetricValue",
+      "readMetricValue",
+      "readProfileSectionText",
+      "readProfileCardText",
+      "assertInitialPackagedUi",
+      "createSmokeProfile",
+      "openSmokeIdentityConfig",
+      "applySmokeIdentityPreset",
+      "configureSmokeProxy",
+      "runSavedProxyProof",
+      "assertPostSmokeProfileStore",
+      "assertPostSmokeDiagnostics",
+      "assertPostSmokeRedaction",
+      "startProxyFixture",
+      "fixtureObservationCounts",
+    ];
+
+    for (const name of helperNames) {
+      expect(packagedVerifier[name], name).toBeTypeOf("function");
+    }
+    expect(Object.keys(packagedVerifier)).not.toEqual(expect.arrayContaining([
+      "PACKAGED_SMOKE_PROXY_USERNAME",
+      "PACKAGED_SMOKE_PROXY_PASSWORD",
+      "PACKAGED_SMOKE_PROXY_TARGET_HOST",
+      "PACKAGED_SMOKE_PROXY_TARGET_PATH",
+      "GLOBAL_SENSITIVE_VALUES",
+    ]));
+  });
+
   it("rejects stale package artifacts from before the recorded build start", () => {
     const root = makeRoot();
     const beforeBuild = new Date("2026-01-01T00:00:00.000Z");
@@ -379,6 +426,24 @@ describe("verify-s06 guard helpers", () => {
       XDG_CACHE_HOME: join(context.smokeRoot, "cache"),
     });
     expect(JSON.stringify(context.log)).not.toContain(root);
+
+    const s05Context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "s05abc",
+      profilePrefix: "M004 Packaged Automation Smoke",
+      baseEnv: {},
+    });
+    expect(s05Context.smokeProfileName).toBe("M004 Packaged Automation Smoke 20260509T101112000Z-s05abc");
+    expect(JSON.stringify(s05Context.log)).not.toContain(root);
+    expect(() => createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "unsafe-prefix",
+      profilePrefix: "M004/Packaged Automation Smoke",
+      baseEnv: {},
+    })).toThrow(/profile prefix/i);
+
     expect(() => createSmokeRunContext({
       rootDir: root,
       now: new Date("2026-05-09T10:11:12.000Z"),

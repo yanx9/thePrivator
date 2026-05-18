@@ -700,16 +700,26 @@ function sanitizeRunIdPart(value, label) {
   return text;
 }
 
+function sanitizeProfilePrefix(value) {
+  const text = String(value ?? "").trim();
+  assert(text.length > 0 && text.length <= 96 && /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(text), "Packaged smoke profile prefix must be safe visible text.", {
+    code: "S06_PROFILE_PREFIX_UNSAFE",
+    label: "profilePrefix",
+  });
+  return text;
+}
+
 export function createSmokeRunContext(options = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR;
   const now = options.now ?? new Date();
   const nonce = sanitizeRunIdPart(options.nonce ?? randomBytes(4).toString("hex"), "nonce");
   const runId = sanitizeRunIdPart(options.runId ?? `${isoRunStamp(now)}-${nonce}`, "runId");
+  const profilePrefix = sanitizeProfilePrefix(options.profilePrefix ?? PACKAGED_SMOKE_PROFILE_PREFIX);
   const smokeRoot = join(rootDir, "src-tauri", "target", "s06-smoke-data", runId);
   const dataRoot = join(smokeRoot, "data");
   const configRoot = join(smokeRoot, "config");
   const cacheRoot = join(smokeRoot, "cache");
-  const smokeProfileName = `${PACKAGED_SMOKE_PROFILE_PREFIX} ${runId}`;
+  const smokeProfileName = `${profilePrefix} ${runId}`;
 
   if (existsSync(smokeRoot)) {
     fail("S06 smoke data root already exists; refusing to reuse a duplicate smoke profile name.", {
@@ -1121,7 +1131,7 @@ export function assertTauriGuardrails(options = {}) {
   };
 }
 
-function readTargetTriple(rootDir = ROOT_DIR) {
+export function readTargetTriple(rootDir = ROOT_DIR) {
   const result = spawnSync(executableForCommand("rustc"), ["--print", "host-tuple"], {
     cwd: rootDir,
     encoding: "utf8",
@@ -1467,7 +1477,7 @@ class LineProcess {
   }
 }
 
-async function startProxyFixture(config, runtime) {
+export async function startProxyFixture(config, runtime) {
   const redactionOptions = redactionOptionsForSmoke(runtime.rootDir, runtime.smokeContext);
   const child = spawn(PYTHON, ["-u", "-c", PROXY_FIXTURE_MANAGER], {
     cwd: runtime.rootDir,
@@ -1531,7 +1541,7 @@ async function startProxyFixture(config, runtime) {
   };
 }
 
-async function fixtureObservationCounts(fixture) {
+export async function fixtureObservationCounts(fixture) {
   if (!fixture) {
     return { proxy: 0, target: 0 };
   }
@@ -1551,7 +1561,7 @@ async function withTimeout(promise, timeoutMs, label) {
   }
 }
 
-async function quitDriverSession(driver) {
+export async function quitDriverSession(driver) {
   if (!driver) {
     return { status: "not-started" };
   }
@@ -1559,7 +1569,7 @@ async function quitDriverSession(driver) {
   return { status: "quit" };
 }
 
-async function startTauriDriverProcess({ rootDir, smokeContext, platform = process.platform, env = process.env }) {
+export async function startTauriDriverProcess({ rootDir, smokeContext, platform = process.platform, env = process.env }) {
   const tauriDriver = resolveTauriDriverExecutable({ rootDir, platform, env });
   const port = await allocateLoopbackPort();
   const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
@@ -1594,7 +1604,7 @@ async function startTauriDriverProcess({ rootDir, smokeContext, platform = proce
   };
 }
 
-async function createTauriWebDriverSession({ applicationPath, applicationRelativePath, driverProcess, rootDir, smokeContext }) {
+export async function createTauriWebDriverSession({ applicationPath, applicationRelativePath, driverProcess, rootDir, smokeContext }) {
   const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
   try {
     const capabilities = buildTauriWebDriverCapabilities(applicationPath);
@@ -1665,7 +1675,7 @@ async function getVisibleText(driver) {
   }
 }
 
-async function safeSelectorContext(driver, rootDir, smokeContext) {
+export async function safeSelectorContext(driver, rootDir, smokeContext) {
   const redactionOptions = redactionOptionsForSmoke(rootDir, smokeContext);
   const visibleText = await getVisibleText(driver);
   let buttons = [];
@@ -1713,7 +1723,7 @@ async function failUi(driver, runtime, message, details = {}) {
   }, redactionOptions);
 }
 
-async function pollForValue(driver, runtime, description, predicate, options = {}) {
+export async function pollForValue(driver, runtime, description, predicate, options = {}) {
   const timeoutMs = options.timeoutMs ?? UI_WAIT_TIMEOUT_MS;
   const started = Date.now();
   let lastMessage = null;
@@ -1737,7 +1747,7 @@ async function pollForValue(driver, runtime, description, predicate, options = {
   });
 }
 
-async function waitForVisibleElement(driver, by, runtime, description, options = {}) {
+export async function waitForVisibleElement(driver, by, runtime, description, options = {}) {
   try {
     const element = await driver.wait(until.elementLocated(by), options.timeoutMs ?? UI_WAIT_TIMEOUT_MS, undefined, UI_POLL_MS);
     await driver.wait(until.elementIsVisible(element), options.timeoutMs ?? UI_WAIT_TIMEOUT_MS, undefined, UI_POLL_MS);
@@ -1752,7 +1762,7 @@ async function waitForVisibleElement(driver, by, runtime, description, options =
   }
 }
 
-async function waitForVisibleText(driver, expectedText, runtime, options = {}) {
+export async function waitForVisibleText(driver, expectedText, runtime, options = {}) {
   return pollForValue(driver, runtime, `visible text ${expectedText}`, async () => {
     const text = await getVisibleText(driver);
     return text.includes(expectedText) ? { text: expectedText } : null;
@@ -1771,14 +1781,14 @@ function profileSectionByAriaLabel(profileName, ariaLabel) {
   return By.xpath(`${profileCardXPath(profileName)}//section[@aria-label=${xpathLiteral(ariaLabel)}]`);
 }
 
-async function waitForProfileCard(driver, profileName, runtime, options = {}) {
+export async function waitForProfileCard(driver, profileName, runtime, options = {}) {
   return waitForVisibleElement(driver, profileCardByName(profileName), runtime, `profile card ${profileName}`, {
     ...options,
     step: options.step ?? "profile-card",
   });
 }
 
-async function waitForProfileButton(driver, profileName, buttonText, runtime, options = {}) {
+export async function waitForProfileButton(driver, profileName, buttonText, runtime, options = {}) {
   return pollForValue(driver, runtime, `${buttonText} button for ${profileName}`, async () => {
     const cards = await driver.findElements(profileCardByName(profileName));
     for (const card of cards) {
@@ -1796,7 +1806,7 @@ async function waitForProfileButton(driver, profileName, buttonText, runtime, op
   }, { ...options, step: options.step ?? "profile-button" });
 }
 
-async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedValue, runtime, options = {}) {
+export async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedValue, runtime, options = {}) {
   const selector = By.xpath(`//*[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1][normalize-space()=${xpathLiteral(String(expectedValue))}]`);
   return waitForVisibleElement(driver, selector, runtime, `${sectionLabel} metric ${metricLabel}=${expectedValue}`, {
     ...options,
@@ -1804,7 +1814,7 @@ async function waitForMetricValue(driver, sectionLabel, metricLabel, expectedVal
   });
 }
 
-async function readMetricValue(driver, sectionLabel, metricLabel) {
+export async function readMetricValue(driver, sectionLabel, metricLabel) {
   try {
     const elements = await driver.findElements(By.xpath(`//*[@aria-label=${xpathLiteral(sectionLabel)}]//dt[normalize-space()=${xpathLiteral(metricLabel)}]/following-sibling::dd[1]`));
     for (const element of elements) {
@@ -1820,7 +1830,7 @@ async function readMetricValue(driver, sectionLabel, metricLabel) {
   return null;
 }
 
-async function readProfileSectionText(driver, profileName, ariaLabel) {
+export async function readProfileSectionText(driver, profileName, ariaLabel) {
   try {
     const regions = await driver.findElements(profileRegionByAriaLabel(profileName, ariaLabel));
     for (const region of regions) {
@@ -1835,7 +1845,7 @@ async function readProfileSectionText(driver, profileName, ariaLabel) {
   return "";
 }
 
-async function readProfileCardText(driver, profileName) {
+export async function readProfileCardText(driver, profileName) {
   try {
     const cards = await driver.findElements(profileCardByName(profileName));
     for (const card of cards) {
@@ -1850,7 +1860,7 @@ async function readProfileCardText(driver, profileName) {
   return "";
 }
 
-async function assertInitialPackagedUi(driver, runtime) {
+export async function assertInitialPackagedUi(driver, runtime) {
   await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-ui-initial" });
   await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "packaged-ui-initial" });
   await waitForVisibleText(driver, "Bring old ThePrivator profiles into the sidecar store deliberately.", runtime, { step: "packaged-ui-initial" });
@@ -1863,7 +1873,7 @@ async function assertInitialPackagedUi(driver, runtime) {
   };
 }
 
-async function createSmokeProfile(driver, runtime) {
+export async function createSmokeProfile(driver, runtime) {
   const input = await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "packaged-profile-create" });
   try {
     await input.clear();
@@ -1954,7 +1964,7 @@ async function waitForSmokeIdentityPresetControls(driver, runtime, options = {})
   }, { ...options, step: options.step ?? "packaged-identity-config" });
 }
 
-async function assertSmokeIdentitySummary(driver, runtime, options = {}) {
+export async function assertSmokeIdentitySummary(driver, runtime, options = {}) {
   const profileName = runtime.smokeContext.smokeProfileName;
   await waitForProfileSectionTexts(driver, profileName, `${profileName} saved identity summary`, [
     PACKAGED_SMOKE_PRESET_LABEL,
@@ -1971,7 +1981,7 @@ async function assertSmokeIdentitySummary(driver, runtime, options = {}) {
   };
 }
 
-async function openSmokeIdentityConfig(driver, runtime) {
+export async function openSmokeIdentityConfig(driver, runtime) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const configureButton = await waitForProfileButton(driver, profileName, "Configure identity", runtime, {
     step: "packaged-identity-config",
@@ -2009,7 +2019,7 @@ async function openSmokeIdentityConfig(driver, runtime) {
   };
 }
 
-async function applySmokeIdentityPreset(driver, runtime) {
+export async function applySmokeIdentityPreset(driver, runtime) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const controls = await waitForSmokeIdentityPresetControls(driver, runtime, { step: "packaged-identity-apply" });
   try {
@@ -2140,7 +2150,7 @@ async function openSmokeAuditPage(driver, runtime) {
   };
 }
 
-async function launchSmokeChromium(driver, runtime) {
+export async function launchSmokeChromium(driver, runtime) {
   const launchButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Launch Chromium", runtime, {
     step: "packaged-chromium-launch",
   });
@@ -2164,7 +2174,7 @@ async function launchSmokeChromium(driver, runtime) {
   };
 }
 
-async function stopSmokeChromium(driver, runtime, options = {}) {
+export async function stopSmokeChromium(driver, runtime, options = {}) {
   const step = options.step ?? "packaged-chromium-stop";
   const stopButton = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Stop Chromium", runtime, {
     step,
@@ -2191,7 +2201,7 @@ async function stopSmokeChromium(driver, runtime, options = {}) {
   };
 }
 
-async function assertRestartPersistence(driver, runtime) {
+export async function assertRestartPersistence(driver, runtime) {
   await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "packaged-restart-persistence" });
   await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "packaged-restart-persistence" });
   const identitySummary = await assertSmokeIdentitySummary(driver, runtime, { step: "packaged-restart-persistence" });
@@ -2407,7 +2417,7 @@ export function assertCurrentHttpSavedProxyProofUiState(state = {}, options = {}
   return summary;
 }
 
-async function latestVisibleDetailRef(driver, runtime, step) {
+export async function latestVisibleDetailRef(driver, runtime, step) {
   const visibleText = await getVisibleText(driver);
   const sidecarRefs = Array.from(visibleText.matchAll(/\bsidecar-[a-f0-9]{12}(?![a-f0-9])/gi)).map((match) => match[0]);
   const bridgeRefs = Array.from(visibleText.matchAll(/\bbridge-[A-Za-z0-9_.:-]{8,160}/g)).map((match) => match[0].replace(/(?:Lookup|Retry).*$/u, ""));
@@ -2423,7 +2433,7 @@ async function latestVisibleDetailRef(driver, runtime, step) {
   return detailRef;
 }
 
-async function lookupVisibleDiagnosticRef(driver, runtime, detailRef, options = {}) {
+export async function lookupVisibleDiagnosticRef(driver, runtime, detailRef, options = {}) {
   const step = options.step ?? "packaged-diagnostic-lookup";
   const lookupButton = await waitForVisibleElement(driver, By.xpath(`//button[@aria-label=${xpathLiteral(`Lookup diagnostics for ${detailRef}`)}]`), runtime, `diagnostic lookup button for ${detailRef}`, { step });
   try {
@@ -2441,7 +2451,7 @@ async function lookupVisibleDiagnosticRef(driver, runtime, detailRef, options = 
   return { detailRef: "visible", lookup: "matched-redacted-diagnostics" };
 }
 
-async function configureUnsupportedSocksProxyAndAssertProofFailure(driver, runtime, fixture) {
+export async function configureUnsupportedSocksProxyAndAssertProofFailure(driver, runtime, fixture) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const step = "packaged-socks-auth-negative-proof";
   const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, { step });
@@ -2504,7 +2514,7 @@ async function configureUnsupportedSocksProxyAndAssertProofFailure(driver, runti
   };
 }
 
-async function configureSmokeProxy(driver, runtime, fixture) {
+export async function configureSmokeProxy(driver, runtime, fixture) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, {
     step: "packaged-proxy-configure",
@@ -2702,7 +2712,7 @@ async function clickRunSavedProxyProofButton(driver, runtime, button, attempt, s
   }
 }
 
-async function runSavedProxyProof(driver, runtime, options = {}) {
+export async function runSavedProxyProof(driver, runtime, options = {}) {
   const profileName = runtime.smokeContext.smokeProfileName;
   const step = options.step ?? "packaged-saved-proxy-proof";
   const previousRequest = await readMetricValue(driver, `${profileName} proxy-check observability`, "Request");
@@ -2775,7 +2785,7 @@ async function runSavedProxyProof(driver, runtime, options = {}) {
   };
 }
 
-async function assertProxyRuntimeGuardWhileRunning(driver, runtime) {
+export async function assertProxyRuntimeGuardWhileRunning(driver, runtime) {
   const profileName = runtime.smokeContext.smokeProfileName;
   await waitForProfileSectionTexts(driver, profileName, proxyConfigSectionLabel(profileName), [
     "saved proxy edits apply on the next launch",
@@ -3771,7 +3781,7 @@ async function attemptOwnedChromiumCleanup(driver, runtime) {
   return cleanup;
 }
 
-async function cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved }) {
+export async function cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved }) {
   return runStepAsync("cleanup", async () => {
     const cleanup = {
       smokeProfileName: runtime?.smokeContext?.smokeProfileName,
