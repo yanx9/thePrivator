@@ -35,7 +35,7 @@ from theprivator_sidecar.automation_api import (
     run_from_env,
     safe_startup_error_payload,
 )
-from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
 from theprivator_sidecar.profiles import ProfileStore
 from theprivator_sidecar.protocol import (
     AUTOMATION_API_BIND_FAILED,
@@ -1032,6 +1032,259 @@ def test_lease_create_returns_one_time_playwright_handoff_and_safe_runtime(tmp_p
     assert body["request"]["requestId"].startswith("automation-")
     assert "handoffOrigin" not in response.text
     assert_no_forbidden_markers(response.text, str(config.store_root), "owner-token-should-not-leak", "argv-should-not-leak")
+
+
+def test_lease_create_uses_canonical_launch_helper_for_identity_proxy_profile_and_safe_fields(
+    tmp_path,
+    monkeypatch,
+):
+    config = make_config(tmp_path)
+    store = ProfileStore(config.store_root)
+    profile = store.create("Identity Proxy Lease")['profile']
+    profile = store.update_identity(profile["id"], curated_preset("windows-10-chrome-120"))["profile"]
+    profile = store.update_proxy(profile["id"], fixed_proxy())["profile"]
+    endpoint = "http://127.0.0.1:45684"
+    private_markers = (
+        str(config.store_root),
+        profile["storage"]["userDataDir"],
+        "raw-launch-argv",
+        "webSocketDebuggerUrl",
+        "devtools/browser/private",
+        "proxy-auth-extension",
+        "identity-extension",
+        "--load-extension",
+        "--remote-debugging-port=0",
+        "direct://fallback",
+    )
+    launch_calls = []
+
+    def spy_launch(*args, **kwargs):
+        launch_calls.append((args, kwargs))
+        return {
+            **fake_automation_launch(profile["id"], endpoint=endpoint),
+            "debugPort": 45684,
+            "webSocketDebuggerUrl": "ws://127.0.0.1:45684/devtools/browser/private",
+            "launchArgs": [
+                "raw-launch-argv",
+                f"--proxy-server=http://{SENTINEL_USERNAME}:{SENTINEL_PASSWORD}@proxy.example.invalid:8080",
+                "--load-extension=/private/proxy-auth-extension,/private/identity-extension",
+                "--remote-debugging-port=0",
+                "direct://fallback",
+            ],
+            "userDataDir": str(config.store_root / profile["storage"]["userDataDir"]),
+        }
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", spy_launch)
+    app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=FakeLeaseTimerFactory())
+
+    response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+        json_body={"framework": "playwright", "ttlSeconds": 1},
+    )
+
+    assert response.status_code == 201
+    assert launch_calls == [((config.store_root, profile["id"]), {})]
+    body = response.json()
+    assert set(body) == {"leaseApiVersion", "lease", "handoff", "runtime", "request"}
+    assert set(body["lease"]) == {"id", "profileId", "framework", "status", "createdAt", "expiresAt", "ttlSeconds"}
+    assert body["lease"] == {
+        "id": body["lease"]["id"],
+        "profileId": profile["id"],
+        "framework": "playwright",
+        "status": "active",
+        "createdAt": body["lease"]["createdAt"],
+        "expiresAt": body["lease"]["expiresAt"],
+        "ttlSeconds": 1,
+    }
+    assert body["handoff"] == {
+        "browser": "chromium",
+        "method": "connect-over-cdp",
+        "endpoint": endpoint,
+    }
+    assert body["runtime"] == {
+        "runtimeApiVersion": RUNTIME_API_VERSION,
+        "runningCount": 1,
+        "profile": {
+            "profileId": profile["id"],
+            "status": "running",
+            "startedAt": "2026-01-04T00:00:00.000Z",
+        },
+    }
+    assert body["lease"]["id"].startswith("lease_")
+    assert body["lease"]["createdAt"].endswith("Z")
+    assert body["lease"]["expiresAt"].endswith("Z")
+    assert body["request"]["requestId"].startswith("automation-")
+    assert response.headers["location"] == f"/v1/leases/{body['lease']['id']}"
+    assert response.text.count(endpoint) == 1
+    assert "handoffOrigin" not in response.text
+    assert_no_forbidden_lease_surface(body, *private_markers)
+
+
+def test_identity_proxy_lease_public_surfaces_hide_handoff_and_launch_internals(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    store = ProfileStore(config.store_root)
+    profile = store.create("Surface Guard")['profile']
+    profile = store.update_identity(profile["id"], curated_preset("windows-10-chrome-120"))["profile"]
+    profile = store.update_proxy(profile["id"], fixed_proxy())["profile"]
+    endpoint = "http://127.0.0.1:45685"
+    private_markers = (
+        str(config.store_root),
+        profile["storage"]["userDataDir"],
+        endpoint,
+        "45685",
+        "raw-launch-argv",
+        "webSocketDebuggerUrl",
+        "devtools/browser/private",
+        "proxy-auth-extension",
+        "identity-extension",
+        "--load-extension",
+        "--remote-debugging-port=0",
+        "direct://fallback",
+    )
+
+    def launch_profile(store_root, profile_id):
+        return {
+            **fake_automation_launch(profile_id, endpoint=endpoint),
+            "debugPort": 45685,
+            "webSocketDebuggerUrl": "ws://127.0.0.1:45685/devtools/browser/private",
+            "launchArgs": [
+                "raw-launch-argv",
+                f"--proxy-server=http://{SENTINEL_USERNAME}:{SENTINEL_PASSWORD}@proxy.example.invalid:8080",
+                "--load-extension=/private/proxy-auth-extension,/private/identity-extension",
+                "--remote-debugging-port=0",
+                "direct://fallback",
+            ],
+            "userDataDir": str(config.store_root / profile["storage"]["userDataDir"]),
+        }
+
+    def stop_profile(store_root, profile_id):
+        return fake_automation_stop(profile_id)
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    monkeypatch.setattr(automation_api.chromium, "stop", stop_profile)
+    app = create_app(config)
+    app.state.automation_lease_manager = AutomationLeaseManager(timer_factory=FakeLeaseTimerFactory())
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+    )
+    assert create_response.status_code == 201
+    assert create_response.text.count(endpoint) == 1
+    assert "handoffOrigin" not in create_response.text
+    lease_id = create_response.json()["lease"]["id"]
+
+    runtime_response = asgi_get(app, "/v1/runtime/status", headers=automation_auth_headers())
+    profiles_response = asgi_get(app, "/v1/profiles", headers=automation_auth_headers())
+    profile_response = asgi_get(app, f"/v1/profiles/{profile['id']}/status", headers=automation_auth_headers())
+    lease_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert runtime_response.status_code == 200
+    assert profiles_response.status_code == 200
+    assert profile_response.status_code == 200
+    assert lease_response.status_code == 200
+    assert "handoff" not in runtime_response.text
+    assert "handoff" not in profiles_response.text
+    assert "handoff" not in profile_response.text
+    assert "handoff" not in lease_response.text
+    assert_no_forbidden_runtime_surface(runtime_response.json(), *private_markers)
+    assert_no_forbidden_profile_surface(profiles_response.json(), *private_markers)
+    assert_no_forbidden_profile_surface(profile_response.json(), *private_markers)
+    assert_no_forbidden_runtime_surface(profile_response.json(), *private_markers)
+    assert_no_forbidden_lease_surface(lease_response.json(), *private_markers)
+
+    release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert release_response.status_code == 200
+    release_body = release_response.json()
+    assert release_body["lease"]["status"] == "released"
+    assert release_body["runtime"]["profile"] == {
+        "profileId": profile["id"],
+        "status": "stopped",
+        "stoppedAt": "2026-01-04T00:01:00.000Z",
+        "termination": "graceful",
+    }
+    assert "handoff" not in release_response.text
+    assert_no_forbidden_lease_surface(release_body, *private_markers)
+
+
+def test_lease_release_after_external_stop_returns_safe_tombstone_and_clears_active_slot(
+    tmp_path,
+    monkeypatch,
+):
+    config = make_config(tmp_path)
+    profile = ProfileStore(config.store_root).create("Externally Stopped Lease")['profile']
+    endpoints = ["http://127.0.0.1:45686", "http://127.0.0.1:45687"]
+    launch_calls = []
+
+    def launch_profile(store_root, profile_id):
+        launch_calls.append((store_root, profile_id))
+        return fake_automation_launch(profile_id, endpoint=endpoints[len(launch_calls) - 1])
+
+    monkeypatch.setattr(automation_api.chromium, "launch_for_automation", launch_profile)
+    timer_factory = FakeLeaseTimerFactory()
+    manager = AutomationLeaseManager(timer_factory=timer_factory)
+    app = create_app(config)
+    app.state.automation_lease_manager = manager
+
+    create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+    )
+    assert create_response.status_code == 201
+    assert create_response.text.count(endpoints[0]) == 1
+    lease_id = create_response.json()["lease"]["id"]
+    assert manager._active_by_profile == {profile["id"]: lease_id}
+
+    external_stop = chromium.stop(config.store_root, profile["id"])
+    assert external_stop["termination"] == "already-stopped"
+
+    release_response = asgi_request(app, "DELETE", f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+
+    assert release_response.status_code == 200
+    release_body = release_response.json()
+    assert release_body["lease"]["status"] == "released"
+    assert release_body["lease"]["releasedAt"].endswith("Z")
+    assert release_body["lease"]["cleanedUpAt"].endswith("Z")
+    assert release_body["runtime"]["profile"]["profileId"] == profile["id"]
+    assert release_body["runtime"]["profile"]["status"] == "stopped"
+    assert release_body["runtime"]["profile"]["termination"] == "already-stopped"
+    assert release_body["runtime"]["profile"]["stoppedAt"].endswith("Z")
+    assert release_body["runtime"]["runningCount"] == 0
+    assert manager._active_by_profile == {}
+    assert timer_factory.timers[0].cancelled is True
+    assert "handoff" not in release_response.text
+    assert_no_forbidden_lease_surface(
+        release_body,
+        endpoints[0],
+        "45686",
+        str(config.store_root),
+        profile["storage"]["userDataDir"],
+    )
+
+    released_status_response = asgi_get(app, f"/v1/leases/{lease_id}", headers=automation_auth_headers())
+    assert released_status_response.status_code == 200
+    assert released_status_response.json()["lease"]["status"] == "released"
+    assert released_status_response.json()["runtime"]["profile"]["termination"] == "already-stopped"
+    assert_no_forbidden_lease_surface(released_status_response.json(), endpoints[0], "45686")
+
+    second_create_response = asgi_request(
+        app,
+        "POST",
+        f"/v1/profiles/{profile['id']}/leases",
+        headers=automation_auth_headers(),
+    )
+    assert second_create_response.status_code == 201
+    assert second_create_response.text.count(endpoints[1]) == 1
+    assert launch_calls == [(config.store_root, profile["id"]), (config.store_root, profile["id"])]
 
 
 def test_lease_status_and_release_never_return_handoff_material(tmp_path, monkeypatch):
