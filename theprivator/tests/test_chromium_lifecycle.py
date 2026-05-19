@@ -376,6 +376,7 @@ def test_launch_for_automation_direct_profile_forces_remote_debugging_and_return
         )
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         assert argv.count("--remote-debugging-port=0") == 1
+        assert argv.count("--remote-allow-origins=*") == 1
         assert not any(arg.startswith("--load-extension=") for arg in argv)
         assert not any(arg.startswith("--proxy-server=") for arg in argv)
 
@@ -458,6 +459,7 @@ def test_launch_for_automation_masked_identity_with_authenticated_proxy_composes
             "--proxy-server=https://proxy.example.invalid:18443"
         ]
         assert argv.count("--remote-debugging-port=0") == 1
+        assert argv.count("--remote-allow-origins=*") == 1
         assert argv.count("--force-webrtc-ip-handling-policy=disable_non_proxied_udp") == 1
         extension_dirs = assert_composed_extension_allowlist(argv)
         extension_allowlist = next(arg for arg in argv if arg.startswith("--load-extension=")).split("=", 1)[1]
@@ -910,6 +912,7 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         joined_argv = "\n".join(argv)
         assert "--remote-debugging-port=0" in argv
+        assert "--remote-allow-origins=*" in argv
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=socks5://127.0.0.1:9050"
@@ -1024,6 +1027,7 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
 
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         assert "--remote-debugging-port=0" in argv
+        assert "--remote-allow-origins=*" in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=http://proxy.example.invalid:18080"
         ]
@@ -1113,6 +1117,7 @@ def test_audit_open_stopped_masked_identity_with_authenticated_proxy_composes_ru
             "--proxy-server=https://proxy.example.invalid:18443"
         ]
         assert argv.count("--remote-debugging-port=0") == 1
+        assert argv.count("--remote-allow-origins=*") == 1
         assert argv.count("--force-webrtc-ip-handling-policy=disable_non_proxied_udp") == 1
         extension_dirs = assert_composed_extension_allowlist(argv)
         extension_allowlist = next(arg for arg in argv if arg.startswith("--load-extension=")).split("=", 1)[1]

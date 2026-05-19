@@ -95,6 +95,7 @@ _SAFE_CHROMIUM_ARGS = (
     "--disable-features=TranslateUI",
 )
 _REMOTE_DEBUGGING_ARG = "--remote-debugging-port=0"
+_REMOTE_ALLOW_ORIGINS_ARG = "--remote-allow-origins=*"
 _PROXY_PROOF_SPKI_ARG_PREFIX = "--ignore-certificate-errors-spki-list="
 _LOAD_EXTENSION_PREFIX = "--load-extension="
 _DISABLE_EXTENSIONS_EXCEPT_PREFIX = "--disable-extensions-except="
@@ -547,7 +548,7 @@ def _runtime_launch_args(
         )
     )
     if force_remote_debugging or identity_plan.requires_cdp:
-        args.append(_REMOTE_DEBUGGING_ARG)
+        args.extend([_REMOTE_DEBUGGING_ARG, _REMOTE_ALLOW_ORIGINS_ARG])
     args.extend(identity_plan.launch_flags)
     return _validate_extra_launch_args(args)
 
@@ -589,7 +590,7 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
                 code=CHROMIUM_LAUNCH_FAILED,
                 message="Chromium launch arguments could not be prepared.",
             )
-        if arg == _REMOTE_DEBUGGING_ARG or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
+        if arg in {_REMOTE_DEBUGGING_ARG, _REMOTE_ALLOW_ORIGINS_ARG} or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
             safe_args.append(arg)
             continue
         if arg.startswith(PROXY_SERVER_ARG_PREFIX):

@@ -1,14 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VerifyFailure } from "./verify-m004-s01.mjs";
 import {
   S05_CLIPBOARD_STATE_KEY,
   S05_CLIPBOARD_TOKEN_KEY,
   S05_PROFILE_PREFIX,
+  S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS,
+  S05_REQUIRED_DIAGNOSTIC_SUCCESS_METHODS,
   S05_REQUIRED_PACKAGED_HELPERS,
   VERIFY_EVENT,
+  assertS05PostSmokeDiagnostics,
   assertS05PublicEvidenceRedacted,
   buildS05FinalSummary,
   clearPrivateClipboardCapture,
@@ -29,6 +32,16 @@ function makeRoot() {
   const root = mkdtempSync(join(tmpdir(), "theprivator-m004-s05-test-"));
   tempRoots.push(root);
   return root;
+}
+
+function writeJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function writeDiagnostics(path, rows) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${rows.map((row) => typeof row === "string" ? row : JSON.stringify(row)).join("\n")}\n`, "utf8");
 }
 
 function makeContext() {
@@ -429,5 +442,99 @@ describe("verify-m004-s05 public evidence redaction", () => {
     expect(encoded).not.toContain(endpoint);
     expect(encoded).not.toContain(proxyAuthority);
     expect(() => assertS05PublicEvidenceRedacted(summary, context)).not.toThrow();
+  });
+
+  it("builds a full lease summary with safe failure, Playwright, diagnostics, and profile-store proof", () => {
+    const { context, token, leaseId, endpoint, apiBaseUrl, targetUrl, proxyAuthority, appDataRoot } = makeContext();
+    const summary = buildS05FinalSummary({
+      status: "pass",
+      mode: "full",
+      packageProof: { buildFresh: true, artifactsChecked: true, artifactCount: 5, preflightStatus: "pass" },
+      ui: { profileCreated: true, identityConfigured: true, proxyConfigured: true, copyFlowUsed: true, apiStarted: true },
+      api: { started: true, stopped: true, status: "running", statusCode: 200, requestId: "automation-full1" },
+      http: {
+        health: { statusCode: 200, requestId: "automation-health-full" },
+        profiles: { statusCode: 200, requestId: "automation-profiles-full" },
+        runtime: { statusCode: 200, requestId: "automation-runtime-full", runningCount: 0 },
+      },
+      failureMatrix: [
+        { caseName: "invalid-ttl", statusCode: 400, errorCode: "INVALID_REQUEST", errorPhase: "lease", requestCorrelated: true, detailRefPresent: true },
+        { caseName: "unknown-lease", statusCode: 404, errorCode: "AUTOMATION_LEASE_NOT_FOUND", errorPhase: "lease", requestCorrelated: true, detailRefPresent: true },
+      ],
+      leaseFlow: {
+        create: { statusCode: 201, leaseStatus: "active", requestId: "automation-create-full", runtimeStatus: "running", runningCount: 1, ttlSeconds: 30 },
+        active: { statusCode: 200, leaseStatus: "active", requestId: "automation-active-full", ttlSeconds: 30 },
+        release: { statusCode: 200, leaseStatus: "released", requestId: "automation-release-full", runtimeStatus: "stopped", runningCount: 0 },
+        releasedReuse: { statusCode: 409, errorCode: "AUTOMATION_LEASE_RELEASED", errorPhase: "lease", requestCorrelated: true, detailRefPresent: true },
+        revocation: { status: "pass" },
+        expiry: { statusCode: 200, leaseStatus: "expired", requestId: "automation-expiry-full", runningCount: 0, ttlSeconds: 1 },
+        expiredReuse: { statusCode: 409, errorCode: "AUTOMATION_LEASE_EXPIRED", errorPhase: "lease", requestCorrelated: true, detailRefPresent: true },
+        expiredRevocation: { status: "pass" },
+      },
+      playwright: { attached: true, navigated: true, targetMarker: true, identityMatches: 8, proxyObservationCount: 2 },
+      profileStore: { storeVersion: 3, profileCount: 1, identity: { presetId: "ubuntu-linux-chrome-120" }, proxy: { credentialState: "configured" }, persistedRuntimeFields: 0 },
+      diagnostics: { requiredMethods: ["profiles.create", "chromium.launch"], leaseFailureMethods: S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS, typedFailureCount: 5, totalRowsRead: 12, validRows: 12, malformedRows: 0 },
+      cleanup: { appStopped: true, apiStopped: true, listenerClosed: true, runtimeStopped: true, fixtureStopped: true, retainedSmokeData: true, diagnosticsScanned: true },
+      redaction: { status: "clean", scanned: true, forbiddenMarkerCount: 0 },
+      checks: [{ name: "redaction-scan", status: "pass", durationMs: 3 }],
+    }, context);
+    const encoded = JSON.stringify(summary);
+    expect(summary.proofScope).toMatchObject({ playwrightAttach: true, cleanupVerified: true });
+    expect(summary.failures).toHaveLength(2);
+    expect(summary.profileStore).toMatchObject({ scanned: true, storeVersion: 3, identityPresetApplied: true, proxyConfigured: true });
+    expect(summary.diagnostics).toMatchObject({ scanned: true, leaseFailureMethodCount: S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS.length, typedFailureCount: 5 });
+    for (const privateMarker of [token, leaseId, endpoint, apiBaseUrl, targetUrl, proxyAuthority, appDataRoot]) {
+      expect(encoded).not.toContain(privateMarker);
+    }
+    expect(() => assertS05PublicEvidenceRedacted(summary, context)).not.toThrow();
+  });
+
+  it("asserts S05 diagnostics include typed Automation API lease failures without leaking paths", () => {
+    const root = makeRoot();
+    const smokeContext = packagedHarness.createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-10T11:12:13.000Z"),
+      nonce: "s05diag",
+      profilePrefix: S05_PROFILE_PREFIX,
+      baseEnv: {},
+    });
+    const appDataRoot = join(smokeContext.dataRoot, "theprivator-desktop");
+    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+      storeVersion: 3,
+      profiles: [{ id: "profile-s05diag", name: smokeContext.smokeProfileName }],
+    });
+    const diagnosticsPath = join(appDataRoot, "profile-store", "diagnostics", "events.jsonl");
+    const baseRow = {
+      schemaVersion: 1,
+      ts: "2026-05-10T11:12:13.000Z",
+      source: "python-sidecar",
+      event: "sidecar.request",
+      durationMs: 1,
+      logPath: "profile-store/diagnostics/events.jsonl",
+    };
+    writeDiagnostics(diagnosticsPath, [
+      ...S05_REQUIRED_DIAGNOSTIC_SUCCESS_METHODS.map((method, index) => ({ ...baseRow, status: "ok", requestId: `s05-ok-${index}`, method, errorCode: null, detailRef: null })),
+      { ...baseRow, status: "error", requestId: "s05-invalid-ttl", method: "automation.leases.create", errorCode: "INVALID_REQUEST", detailRef: "sidecar-invalid-ttl" },
+      { ...baseRow, status: "error", requestId: "s05-unknown-profile", method: "automation.leases.create", errorCode: "PROFILE_NOT_FOUND", detailRef: "sidecar-unknown-profile" },
+      { ...baseRow, status: "error", requestId: "s05-unknown-lease", method: "automation.leases.status", errorCode: "AUTOMATION_LEASE_NOT_FOUND", detailRef: "sidecar-unknown-lease" },
+      { ...baseRow, status: "error", requestId: "s05-released", method: "automation.leases.release", errorCode: "AUTOMATION_LEASE_RELEASED", detailRef: "sidecar-released" },
+      { ...baseRow, status: "error", requestId: "s05-expired", method: "automation.leases.release", errorCode: "AUTOMATION_LEASE_EXPIRED", detailRef: "sidecar-expired" },
+    ]);
+
+    const context = createS05RedactionContext({ rootDir: root, smokeRoots: [smokeContext.smokeRoot], appDataRoots: [appDataRoot] });
+    const proof = assertS05PostSmokeDiagnostics({ rootDir: root, smokeContext, context });
+
+    expect(proof.leaseFailureMethods).toEqual(S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS);
+    expect(proof.typedFailureCount).toBe(5);
+    expect(JSON.stringify(proof)).not.toContain(root);
+
+    writeDiagnostics(diagnosticsPath, [
+      ...S05_REQUIRED_DIAGNOSTIC_SUCCESS_METHODS.filter((method) => method !== "chromium.status").map((method, index) => ({ ...baseRow, status: "ok", requestId: `s05-ok-missing-${index}`, method, errorCode: null, detailRef: null })),
+      { ...baseRow, status: "error", requestId: "s05-invalid-ttl", method: "automation.leases.create", errorCode: "INVALID_REQUEST", detailRef: "sidecar-invalid-ttl" },
+      { ...baseRow, status: "error", requestId: "s05-unknown-profile", method: "automation.leases.create", errorCode: "PROFILE_NOT_FOUND", detailRef: "sidecar-unknown-profile" },
+      { ...baseRow, status: "error", requestId: "s05-unknown-lease", method: "automation.leases.status", errorCode: "AUTOMATION_LEASE_NOT_FOUND", detailRef: "sidecar-unknown-lease" },
+    ]);
+    const error = expectSafeFailure(() => assertS05PostSmokeDiagnostics({ rootDir: root, smokeContext, context }), [root, appDataRoot]);
+    expect(error.details).toMatchObject({ code: "S05_DIAGNOSTICS_SUCCESS_METHOD_MISSING", expectedMethod: "chromium.status" });
   });
 });

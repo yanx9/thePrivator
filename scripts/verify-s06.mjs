@@ -2514,7 +2514,9 @@ export async function configureUnsupportedSocksProxyAndAssertProofFailure(driver
   };
 }
 
-export async function configureSmokeProxy(driver, runtime, fixture) {
+export async function configureSmokeProxy(driver, runtime, fixture, options = {}) {
+  const proxyUsername = options.credentials?.username ?? PACKAGED_SMOKE_PROXY_USERNAME;
+  const proxyPassword = options.credentials?.password ?? PACKAGED_SMOKE_PROXY_PASSWORD;
   const profileName = runtime.smokeContext.smokeProfileName;
   const configureButton = await waitForProfileButton(driver, profileName, "Configure proxy", runtime, {
     step: "packaged-proxy-configure",
@@ -2538,8 +2540,8 @@ export async function configureSmokeProxy(driver, runtime, fixture) {
   await setProxyPanelInput(driver, runtime, "Host", fixture.ready.proxy.host, { step: "packaged-proxy-configure" });
   await setProxyPanelInput(driver, runtime, "Port", fixture.ready.proxy.port, { step: "packaged-proxy-configure" });
   await clickProxyPanelLabel(driver, runtime, "Replace credentials", { step: "packaged-proxy-configure" });
-  await setProxyPanelInput(driver, runtime, "Replacement username", PACKAGED_SMOKE_PROXY_USERNAME, { step: "packaged-proxy-configure" });
-  await setProxyPanelInput(driver, runtime, "Replacement password", PACKAGED_SMOKE_PROXY_PASSWORD, { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Replacement username", proxyUsername, { step: "packaged-proxy-configure" });
+  await setProxyPanelInput(driver, runtime, "Replacement password", proxyPassword, { step: "packaged-proxy-configure" });
 
   const checkButton = await waitForProfileButton(driver, profileName, "Check proxy", runtime, { step: "packaged-proxy-check" });
   try {
