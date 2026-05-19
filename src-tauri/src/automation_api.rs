@@ -14,6 +14,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 
@@ -528,6 +530,14 @@ impl AutomationApiLauncher for TauriAutomationApiLauncher {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            // PyInstaller sidecars can leave the serving process alive after the
+            // bootloader parent exits. Put the sidecar tree in its own process
+            // group so Stop API and supervisor Drop can revoke the whole local
+            // listener authority instead of only the immediate child handle.
+            command.process_group(0);
+        }
 
         let mut child = command
             .spawn()
@@ -585,7 +595,20 @@ impl AutomationApiChild for StdAutomationApiChild {
     }
 
     fn kill(&mut self) -> Result<(), ()> {
-        self.child.kill().map_err(|_| ())
+        #[cfg(unix)]
+        {
+            let pgid = self.child.id() as libc::pid_t;
+            let group_kill = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let child_kill = self.child.kill();
+            if group_kill == 0 || child_kill.is_ok() {
+                return Ok(());
+            }
+            return Err(());
+        }
+        #[cfg(not(unix))]
+        {
+            self.child.kill().map_err(|_| ())
+        }
     }
 }
 
@@ -721,10 +744,12 @@ fn reconcile_child_locked(state: &mut AutomationApiLifecycleState) {
 }
 
 fn stop_child(child: &mut dyn AutomationApiChild, timeout: Duration) -> Result<(), ()> {
-    if child.try_wait()?.is_some() {
+    let already_exited = child.try_wait()?.is_some();
+    let kill_result = child.kill();
+    if already_exited {
         return Ok(());
     }
-    if child.kill().is_err() && child.try_wait()?.is_none() {
+    if kill_result.is_err() && child.try_wait()?.is_none() {
         return Err(());
     }
     wait_until_stopped(child, timeout)

@@ -4,16 +4,23 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VerifyFailure } from "./verify-m004-s01.mjs";
 import {
+  S05_CLIPBOARD_STATE_KEY,
+  S05_CLIPBOARD_TOKEN_KEY,
   S05_PROFILE_PREFIX,
   S05_REQUIRED_PACKAGED_HELPERS,
   VERIFY_EVENT,
   assertS05PublicEvidenceRedacted,
   buildS05FinalSummary,
+  clearPrivateClipboardCapture,
   createS05RedactionContext,
   findS05ForbiddenPublicMarker,
+  installPrivateClipboardCapture,
   packagedHarness,
   parseArgs,
+  readPrivateClipboardToken,
   safeS05ErrorForPublic,
+  validateAutomationApiStatusMetrics,
+  validatePrivateAutomationApiToken,
 } from "./verify-m004-s05.mjs";
 
 const tempRoots = [];
@@ -327,5 +334,100 @@ describe("verify-m004-s05 public evidence redaction", () => {
 
     const argumentError = expectSafeFailure(() => parseArgs(["--token=should-not-leak"]), ["--token=should-not-leak"]);
     expect(argumentError.details).toMatchObject({ code: "S05_UNKNOWN_ARGUMENT", unknownArgumentCount: 1 });
+    expect(parseArgs(["--lifecycle-only", "--skip-build"])).toMatchObject({ lifecycleOnly: true, skipBuild: true });
+  });
+
+  it("validates Automation API UI metrics without allowing unsafe loopback or copy states", () => {
+    const metrics = validateAutomationApiStatusMetrics({
+      lifecycle: "running · running",
+      loopbackUrl: "http://127.0.0.1:43123",
+      port: "43123",
+      scope: "loopback",
+      copyAvailable: "yes",
+    });
+    expect(metrics).toMatchObject({ apiBaseUrl: "http://127.0.0.1:43123", port: 43123, copyAvailable: true });
+
+    expectSafeFailure(() => validateAutomationApiStatusMetrics({
+      lifecycle: "running · running",
+      loopbackUrl: "http://localhost:43123",
+      port: "43123",
+      scope: "loopback",
+      copyAvailable: "yes",
+    }), ["http://localhost:43123"]);
+    expectSafeFailure(() => validateAutomationApiStatusMetrics({
+      lifecycle: "running · running",
+      loopbackUrl: "http://127.0.0.1:43123",
+      port: "43123",
+      scope: "loopback",
+      copyAvailable: "no",
+    }));
+  });
+
+  it("captures copied tokens only through the private clipboard hook helpers", async () => {
+    const scripts = [];
+    const driver = {
+      async executeScript(script) {
+        scripts.push(script);
+        if (script.includes(S05_CLIPBOARD_STATE_KEY)) {
+          return { installed: true, captured: false };
+        }
+        if (script.includes(S05_CLIPBOARD_TOKEN_KEY) && script.startsWith("return")) {
+          return "tpapi-privateCapture123";
+        }
+        return null;
+      },
+    };
+
+    await expect(installPrivateClipboardCapture(driver)).resolves.toEqual({ hookInstalled: true });
+    await expect(readPrivateClipboardToken(driver, { timeoutMs: 25, pollMs: 1 })).resolves.toBe("tpapi-privateCapture123");
+    await expect(clearPrivateClipboardCapture(driver)).resolves.toEqual({ privateClipboardCleared: true });
+    expect(scripts.join("\n")).toContain(S05_CLIPBOARD_TOKEN_KEY);
+  });
+
+  it("fails clipboard hook and token-shape errors without echoing captured values", async () => {
+    const unavailableDriver = {
+      async executeScript() {
+        return { installed: false, captured: false, errorName: "TypeError" };
+      },
+    };
+    await expect(installPrivateClipboardCapture(unavailableDriver)).rejects.toMatchObject({
+      details: expect.objectContaining({ code: "S05_CLIPBOARD_HOOK_UNAVAILABLE" }),
+    });
+
+    const invalid = "raw-secret-token-value-that-should-not-echo";
+    const error = expectSafeFailure(() => validatePrivateAutomationApiToken(invalid), [invalid]);
+    expect(error.details).toMatchObject({ code: "S05_TOKEN_SHAPE_INVALID", prefixPresent: false });
+  });
+
+  it("builds a lifecycle-only summary that exposes protected discovery proof without private authority", () => {
+    const { context, token, apiBaseUrl, endpoint, proxyAuthority } = makeContext();
+    const summary = buildS05FinalSummary({
+      status: "pass",
+      mode: "lifecycle-only",
+      packageProof: { buildFresh: false, artifactsChecked: true, artifactCount: 5, preflightStatus: "pass" },
+      ui: { profileCreated: true, identityConfigured: true, proxyConfigured: true, copyFlowUsed: true, apiStarted: true },
+      api: { started: true, stopped: true, status: "running", statusCode: 200, requestId: "automation-lifecycle1" },
+      http: {
+        health: { statusCode: 200, requestId: "automation-health1" },
+        auth: [
+          { statusCode: 401, errorCode: "AUTOMATION_AUTH_REQUIRED", requestId: "automation-auth1", detailRef: "sidecar-auth1" },
+          { statusCode: 401, errorCode: "AUTOMATION_AUTH_INVALID", requestId: "automation-auth2", detailRef: "sidecar-auth2" },
+        ],
+        profiles: { statusCode: 200, requestId: "automation-profiles1" },
+        profileStatus: { statusCode: 200, requestId: "automation-profile1", status: "stopped" },
+        runtime: { statusCode: 200, requestId: "automation-runtime1", status: "stopped" },
+      },
+      cleanup: { appStopped: true, apiStopped: true, listenerClosed: true, runtimeStopped: true, fixtureStopped: true, retainedSmokeData: true },
+      redaction: { status: "clean", scanned: true, forbiddenMarkerCount: 0 },
+      checks: [{ name: "packaged-token-copy-private", status: "pass", durationMs: 3 }],
+    }, context);
+    const encoded = JSON.stringify(summary);
+    expect(summary.mode).toBe("lifecycle-only");
+    expect(summary.proofScope).toMatchObject({ automationApi: true, protectedHttp: true, cleanupVerified: true });
+    expect(encoded).not.toContain(token);
+    expect(encoded).not.toContain(apiBaseUrl);
+    expect(encoded).not.toContain(endpoint);
+    expect(encoded).not.toContain(proxyAuthority);
+    expect(() => assertS05PublicEvidenceRedacted(summary, context)).not.toThrow();
   });
 });
