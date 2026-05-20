@@ -9,9 +9,13 @@ import {
   VERIFY_EVENT,
   assertM005CapabilityConfig,
   assertM005PublicEvidenceRedacted,
+  assertM005ReadmeDocs,
+  assertM005SourceGuardrails,
   buildM005FinalSummary,
+  buildM005FullSummary,
   createM005RedactionContext,
   findM005ForbiddenPublicMarker,
+  formatM005CommandFailure,
   parseArgs,
   redactM005,
   runCapabilityOnlyVerification,
@@ -81,6 +85,34 @@ function seedCapabilityRoot({ permissions } = {}) {
   return root;
 }
 
+function seedSourceGuardRoot({ appSource, clientSource, readme } = {}) {
+  const root = seedCapabilityRoot();
+  mkdirSync(join(root, "src", "sidecar"), { recursive: true });
+  writeFileSync(join(root, "scripts-placeholder"), "", "utf8");
+  writeFileSync(join(root, "src", "App.tsx"), appSource ?? "import { exportProfileCookies, replaceProfileCookies } from './sidecar/client';\n", "utf8");
+  writeFileSync(
+    join(root, "src", "App.test.tsx"),
+    "import { describe, it } from 'vitest';\ndescribe('app', () => { it('uses inline fixtures', () => {}); });\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "src", "sidecar", "client.ts"),
+    clientSource ?? 'invoke<unknown>("profile_cookies_export", {});\ninvoke<unknown>("profile_cookies_replace", {});\n',
+    "utf8",
+  );
+  writeFileSync(join(root, "src", "sidecar", "client.test.ts"), "import { describe } from 'vitest';\n", "utf8");
+  writeFileSync(join(root, "src", "sidecar", "types.ts"), "export type CookieExportFormat = 'netscape' | 'theprivator-json';\n", "utf8");
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  writeFileSync(join(root, "scripts", "verify-m005-s01.mjs"), "export const verifier = true;\n", "utf8");
+  writeFileSync(join(root, "scripts", "verify-m005-s01.test.mjs"), "import { describe } from 'vitest';\n", "utf8");
+  writeFileSync(
+    join(root, "README.md"),
+    readme ?? "Use `npm run verify:m005:s01` for the M005 S01 cookie portability proof. It documents no-frontend-filesystem and no-path-leak boundaries while deferring packaged real-dialog proof to S04.\n",
+    "utf8",
+  );
+  return root;
+}
+
 describe("verify-m005-s01 argument contract", () => {
   it("recognizes sidecar-only and help flags without enabling future modes", () => {
     expect(parseArgs(["--sidecar-only"])).toMatchObject({ sidecarOnly: true, capabilityOnly: false, help: false });
@@ -125,6 +157,16 @@ describe("verify-m005-s01 capability boundary", () => {
     }
   });
 
+  it("fails closed on malformed capability JSON fixtures", () => {
+    const root = seedCapabilityRoot();
+    try {
+      writeFileSync(join(root, "src-tauri", "capabilities", "default.json"), "{ not-json", "utf8");
+      expect(() => assertM005CapabilityConfig({ rootDir: root })).toThrow(VerifyFailure);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("emits redacted capability-only verifier events", () => {
     const root = seedCapabilityRoot();
     const lines = captureConsole();
@@ -136,6 +178,42 @@ describe("verify-m005-s01 capability boundary", () => {
       const parsedEvents = lines.map((line) => JSON.parse(line));
       expect(parsedEvents.some((event) => event.phase === "capability.dialog-boundary" && event.status === "pass")).toBe(true);
       expect(findM005ForbiddenPublicMarker(parsedEvents)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("verify-m005-s01 source and docs guardrails", () => {
+  it("accepts inline source fixtures that keep cookie portability behind dialog and fixed wrappers", () => {
+    const root = seedSourceGuardRoot();
+    try {
+      expect(assertM005SourceGuardrails({ rootDir: root })).toMatchObject({
+        frontendFilesystemAuthority: "absent",
+        ignoredArtifactImports: "absent",
+        uiUsesTypedWrappers: true,
+        clientUsesFixedCommands: true,
+      });
+      expect(assertM005ReadmeDocs({ rootDir: root })).toMatchObject({
+        command: "documented",
+        packagedDialogProof: "deferred-to-s04",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects frontend filesystem authority, ignored artifact references, and missing README boundaries", () => {
+    const root = seedSourceGuardRoot({
+      appSource: "import { readTextFile } from '@tauri-apps/plugin-fs';\n",
+      readme: "Cookie verifier notes without the canonical command.\n",
+    });
+    try {
+      writeFileSync(join(root, "scripts", "verify-m005-s01.test.mjs"), "import '../." + "gsd/local-only-plan.md';\n", "utf8");
+      expect(() => assertM005SourceGuardrails({ rootDir: root })).toThrow(VerifyFailure);
+      writeFileSync(join(root, "scripts", "verify-m005-s01.test.mjs"), "import { describe } from 'vitest';\n", "utf8");
+      expect(() => assertM005SourceGuardrails({ rootDir: root })).toThrow(VerifyFailure);
+      expect(() => assertM005ReadmeDocs({ rootDir: root })).toThrow(VerifyFailure);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -170,6 +248,33 @@ describe("verify-m005-s01 redaction helpers", () => {
     expect(encoded).toContain("<redacted-key:cookie_value>");
   });
 
+  it("formats failing subprocess tails without leaking paths, cookie material, credentials, debug markers, raw diagnostics, or stack traces", () => {
+    const context = createM005RedactionContext({
+      storeRoot: "/private/app-data-root-should-not-leak",
+      selectedPaths: ["/private/selected-cookies.json"],
+      cookieDomains: ["m005-cookie-domain.invalid"],
+      cookieValues: ["m005-secret-cookie-value"],
+      extraSensitiveValues: ["tpapi-token-should-not-leak"],
+    });
+    const failure = formatM005CommandFailure("npm test -- --run focused", {
+      status: 1,
+      signal: null,
+      stdout: "exported m005-cookie-domain.invalid from /private/selected-cookies.json",
+      stderr: "Traceback with Authorization Bearer tpapi-token-should-not-leak and --remote-debugging-port=9222 plus m005-secret-cookie-value",
+      error: null,
+    }, context);
+    const encoded = JSON.stringify(failure);
+
+    expect(encoded).not.toContain("/private/selected-cookies.json");
+    expect(encoded).not.toContain("m005-cookie-domain.invalid");
+    expect(encoded).not.toContain("m005-secret-cookie-value");
+    expect(encoded).not.toContain("tpapi-token-should-not-leak");
+    expect(encoded).not.toContain("Traceback");
+    expect(encoded).not.toContain("Authorization");
+    expect(encoded).not.toContain("--remote-debugging-port");
+    expect(findM005ForbiddenPublicMarker(failure, context)).toBeNull();
+  });
+
   it("allows the existing persisted diagnostic lookup logPath but rejects unsafe path keys", () => {
     const safe = {
       schemaVersion: 1,
@@ -193,6 +298,7 @@ describe("verify-m005-s01 final summary", () => {
       status: "pass",
       checks: [{ name: "sidecar.export-json", status: "pass", durationMs: 5 }],
       sidecar: {
+        emptyExported: true,
         exportedJson: true,
         exportedNetscape: true,
         replaced: true,
@@ -201,13 +307,48 @@ describe("verify-m005-s01 final summary", () => {
         unsupportedFormatRejected: true,
         busyRejected: true,
         diagnosticsRedacted: true,
-        counts: { jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 },
+        cleanup: { status: "removed", retained: false },
+        counts: { zeroJsonExported: 0, jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 },
       },
     });
 
     expect(summary.event).toBe(VERIFY_EVENT);
     expect(summary.mode).toBe("sidecar-only");
-    expect(summary.sidecar.counts).toEqual({ jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 });
+    expect(summary.sidecar.emptyExported).toBe(true);
+    expect(summary.sidecar.cleanup).toEqual({ status: "removed", retained: false });
+    expect(summary.sidecar.counts).toEqual({ zeroJsonExported: 0, jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 });
+    expect(findM005ForbiddenPublicMarker(summary)).toBeNull();
+  });
+
+  it("builds a full summary shape for downstream source-proof consumers without leaking forbidden markers", () => {
+    const summary = buildM005FullSummary({
+      status: "pass",
+      checks: [
+        { name: "node.focused-vitest", status: "pass", durationMs: 1 },
+        { name: "cleanup.temp-fixtures", status: "pass", durationMs: 1 },
+      ],
+      commands: { focusedVitest: "pass", typescriptBuild: "pass", sidecarBuild: "pass", rustCommandTests: "pass" },
+      capability: { filesystemAuthority: "absent", shellOpenAuthority: "absent", dialogPlugin: "registered" },
+      sourceGuardrails: { scannedFiles: 9, frontendFilesystemAuthority: "absent", ignoredArtifactImports: "absent" },
+      docs: { command: "documented", packagedDialogProof: "deferred-to-s04", authorityBoundary: "documented" },
+      sidecar: {
+        emptyExported: true,
+        exportedJson: true,
+        exportedNetscape: true,
+        replaced: true,
+        invalidImportPreservedRows: true,
+        oversizedImportPreservedRows: true,
+        unsupportedFormatRejected: true,
+        busyRejected: true,
+        diagnosticsRedacted: true,
+        cleanup: { status: "removed", retained: false },
+        counts: { zeroJsonExported: 0, jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 },
+      },
+    });
+
+    expect(summary.mode).toBe("full");
+    expect(summary.commands).toMatchObject({ focusedVitest: "pass", rustCommandTests: "pass" });
+    expect(summary.docs.packagedDialogProof).toBe("deferred-to-s04");
     expect(findM005ForbiddenPublicMarker(summary)).toBeNull();
   });
 });
@@ -218,6 +359,7 @@ describe("verify-m005-s01 source sidecar smoke", () => {
     const summary = runSidecarOnlySmoke();
 
     expect(summary.status).toBe("pass");
+    expect(summary.sidecar.emptyExported).toBe(true);
     expect(summary.sidecar.exportedJson).toBe(true);
     expect(summary.sidecar.exportedNetscape).toBe(true);
     expect(summary.sidecar.replaced).toBe(true);
@@ -226,14 +368,17 @@ describe("verify-m005-s01 source sidecar smoke", () => {
     expect(summary.sidecar.unsupportedFormatRejected).toBe(true);
     expect(summary.sidecar.busyRejected).toBe(true);
     expect(summary.sidecar.diagnosticsRedacted).toBe(true);
-    expect(summary.sidecar.counts).toMatchObject({ jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 });
+    expect(summary.sidecar.cleanup).toEqual({ status: "removed", retained: false });
+    expect(summary.sidecar.counts).toMatchObject({ zeroJsonExported: 0, jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 });
 
     const parsedEvents = lines.map((line) => JSON.parse(line));
+    expect(parsedEvents.some((event) => event.phase === "sidecar.zero-cookie-export" && event.exportedCount === 0 && event.warningCount === 0)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.export-json" && event.exportedCount === 2)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.export-netscape" && event.warningCount === 1)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.replace-json" && event.importedCount === 2)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.unsupported-format-rejected" && event.errorCode === "PORTABILITY_UNSUPPORTED_FORMAT")).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.busy-profile-rejected" && event.errorCode === "PORTABILITY_PROFILE_BUSY")).toBe(true);
+    expect(parsedEvents.some((event) => event.phase === "cleanup.temp-fixtures" && event.cleanupStatus === "removed")).toBe(true);
     expect(findM005ForbiddenPublicMarker(parsedEvents)).toBeNull();
   });
 

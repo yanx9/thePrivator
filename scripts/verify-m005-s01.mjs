@@ -58,6 +58,24 @@ const STATIC_FORBIDDEN_PATTERNS = Object.freeze([
   { markerClass: "credential", pattern: /\b(?:Authorization|Bearer|Proxy-Authorization|credentials?|username|password|secret|token)\b/i },
   { markerClass: "launch_args", pattern: /\b(?:--user-data-dir|--proxy-server|--load-extension|argv|args|env)\b/i },
 ]);
+const M005_FOCUSED_VITEST_FILES = Object.freeze([
+  "scripts/verify-m005-s01.test.mjs",
+  "src/sidecar/client.test.ts",
+  "src/App.test.tsx",
+]);
+const M005_SOURCE_GUARD_FILES = Object.freeze([
+  "scripts/verify-m005-s01.mjs",
+  "scripts/verify-m005-s01.test.mjs",
+  "src/App.tsx",
+  "src/App.test.tsx",
+  "src/sidecar/client.ts",
+  "src/sidecar/client.test.ts",
+  "src/sidecar/types.ts",
+  "src-tauri/src/lib.rs",
+  "src-tauri/src/sidecar.rs",
+]);
+const IGNORED_ARTIFACT_REFERENCE_PATTERN = /(?:^|["'`\s/(])(?:\.gsd|\.planning|\.audits)(?:[\/"'`\s)]|$)/;
+const FRONTEND_FILESYSTEM_AUTHORITY_PATTERN = /@tauri-apps\/plugin-fs|\b(?:readTextFile|writeTextFile|readFile|writeFile)\s*\(/;
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -132,8 +150,13 @@ export function redactM005Text(value, context = createM005RedactionContext()) {
     .replace(/Traceback|traceback|stack trace/gi, "<redacted:raw_diag>")
     .replace(/stdout|stderr|raw diagnostics?|rawDiagnostics?|rawBody|rawPayload/gi, "<redacted:raw_diag>")
     .replace(/DevToolsActivePort|debugPort|--remote-debugging-port(?:=|\s+)\d*|remote-debugging|cdp:\/\/|cdpEndpoint|devtoolsPort/gi, "<redacted:debug_endpoint>")
-    .replace(/Authorization|Bearer|Proxy-Authorization|credentials?|username|password|secret|token/gi, "<redacted:credential>")
+    .replace(/Authorization|Bearer|Proxy-Authorization|credentials?|username|password|secret|token/gi, "<redacted:private>")
     .replace(/--user-data-dir|--proxy-server|--load-extension|argv|args|env/gi, "<redacted:launch_args>");
+}
+
+export function redactedM005Tail(value, context = createM005RedactionContext(), maxLength = 1_200) {
+  const text = redactM005Text(value ?? "", context);
+  return text.length > maxLength ? text.slice(-maxLength) : text;
 }
 
 export function redactM005(value, context = createM005RedactionContext()) {
@@ -238,10 +261,52 @@ function runStep(name, action, context) {
   } catch (error) {
     const durationMs = Math.round(performance.now() - started);
     const message = error instanceof Error ? error.message : String(error);
+    const details = error?.details ? redactM005(error.details, context) : undefined;
     STEP_RESULTS.push({ name, status: "fail", durationMs, message });
-    emit({ phase: name, status: "fail", durationMs, message }, context);
+    emit({ phase: name, status: "fail", durationMs, message, ...(details ? { details } : {}) }, context);
     throw error;
   }
+}
+
+function commandName(command, args) {
+  return [command, ...args].join(" ");
+}
+
+export function formatM005CommandFailure(label, result, context = createM005RedactionContext()) {
+  const combinedOutput = `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`;
+  return redactM005({
+    phase: "subprocess",
+    command: label,
+    exitCode: typeof result?.status === "number" ? result.status : null,
+    signal: result?.signal ?? null,
+    errorCode: result?.error?.code ?? null,
+    timedOut: result?.error?.code === "ETIMEDOUT",
+    redactedTail: redactedM005Tail(combinedOutput, context),
+    guidance: result?.error?.code === "ETIMEDOUT"
+      ? "The child process was terminated after the bounded M005/S01 verifier timeout."
+      : "Inspect the named focused command locally; public verifier output includes only a redacted tail.",
+  }, context);
+}
+
+function runM005CommandStep(name, command, args, timeoutMs, { rootDir = ROOT_DIR, context = createM005RedactionContext({ rootDir }) } = {}) {
+  return runStep(name, () => {
+    const label = commandName(command, args);
+    const result = spawnSync(executable(command), args, {
+      cwd: rootDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+
+    if (result.error || result.status !== 0) {
+      const failure = formatM005CommandFailure(label, result, context);
+      const verb = result.error?.code === "ETIMEDOUT" ? "timed out" : `exited with status ${result.status ?? "unknown"}`;
+      fail(`${label} ${verb}.`, failure);
+    }
+
+    return { command: label };
+  }, context);
 }
 
 function parseJsonLine(line, label, context) {
@@ -296,8 +361,8 @@ export function runSourceSidecarRequest(payload, { rootDir = ROOT_DIR, python = 
       outputTail: redactM005Text(`${result.stdout ?? ""}\n${result.stderr ?? ""}`, context).slice(-500),
     });
   }
-  const [response] = parseNdjson(result.stdout, 1, "sidecar stdout", context);
-  const [diagnostic] = parseNdjson(result.stderr, 1, "sidecar stderr", context);
+  const [response] = parseNdjson(result.stdout, 1, "sidecar response stream", context);
+  const [diagnostic] = parseNdjson(result.stderr, 1, "sidecar diagnostic stream", context);
   return { response, diagnostic };
 }
 
@@ -496,19 +561,100 @@ export function assertM005CapabilityConfig({ rootDir = ROOT_DIR } = {}) {
   };
 }
 
-export function runCapabilityOnlyVerification({ rootDir = ROOT_DIR } = {}) {
-  resetM005VerificationState();
+export function runCapabilityOnlyVerification({ rootDir = ROOT_DIR, resetState = true, emitFinal = true } = {}) {
+  if (resetState) resetM005VerificationState();
+  const stepStart = STEP_RESULTS.length;
   const result = runStep("capability.dialog-boundary", () => assertM005CapabilityConfig({ rootDir }), createM005RedactionContext({ rootDir }));
   const summary = {
     event: VERIFY_EVENT,
     status: "pass",
     mode: "capability-only",
     capability: result,
-    checks: STEP_RESULTS.map((check) => ({ name: check.name, status: check.status, durationMs: check.durationMs })),
+    checks: STEP_RESULTS.slice(stepStart).map((check) => ({ name: check.name, status: check.status, durationMs: check.durationMs })),
   };
   assertM005PublicEvidenceRedacted(summary, createM005RedactionContext({ rootDir }));
-  emit({ status: "pass", summary }, createM005RedactionContext({ rootDir }));
+  if (emitFinal) emit({ status: "pass", summary }, createM005RedactionContext({ rootDir }));
   return summary;
+}
+
+function assertFileExists(rootDir, relativePath) {
+  const absolutePath = join(rootDir, relativePath);
+  assert(existsSync(absolutePath), "M005/S01 verifier source scan expected a tracked file to exist.", {
+    phase: "source-guardrail",
+    file: relativePath,
+  });
+  return absolutePath;
+}
+
+export function assertM005SourceGuardrails({ rootDir = ROOT_DIR } = {}) {
+  const scannedFiles = [];
+  for (const relativePath of M005_SOURCE_GUARD_FILES) {
+    const absolutePath = assertFileExists(rootDir, relativePath);
+    const source = readFileSync(absolutePath, "utf8");
+    scannedFiles.push(relativePath);
+    assert(!IGNORED_ARTIFACT_REFERENCE_PATTERN.test(source), "M005/S01 verifier and tests must not import ignored planning artifacts.", {
+      phase: "source-guardrail",
+      file: relativePath,
+      markerClass: "ignored_artifact_reference",
+    });
+  }
+
+  const appSource = readFileSync(assertFileExists(rootDir, "src/App.tsx"), "utf8");
+  assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(appSource), "Cookie portability UI must not gain frontend filesystem authority.", {
+    phase: "source-guardrail",
+    file: "src/App.tsx",
+    markerClass: "frontend_filesystem_authority",
+  });
+  assert(!appSource.includes('"profile_cookies_export"') && !appSource.includes('"profile_cookies_replace"'), "Cookie portability UI must call typed client wrappers instead of raw invoke command names.", {
+    phase: "source-guardrail",
+    file: "src/App.tsx",
+    markerClass: "raw_cookie_invoke_in_ui",
+  });
+
+  const clientSource = readFileSync(assertFileExists(rootDir, "src/sidecar/client.ts"), "utf8");
+  assert(!clientSource.includes('"portability.cookies.export"') && !clientSource.includes('"portability.cookies.replace"'), "TypeScript client must not expose raw sidecar portability method strings.", {
+    phase: "source-guardrail",
+    file: "src/sidecar/client.ts",
+    markerClass: "raw_sidecar_method_in_client",
+  });
+  assert(clientSource.includes('invoke<unknown>("profile_cookies_export"') && clientSource.includes('invoke<unknown>("profile_cookies_replace"'), "TypeScript client must keep fixed cookie portability Tauri wrappers.", {
+    phase: "source-guardrail",
+    file: "src/sidecar/client.ts",
+    markerClass: "missing_fixed_wrappers",
+  });
+
+  return {
+    scannedFiles: scannedFiles.length,
+    frontendFilesystemAuthority: "absent",
+    ignoredArtifactImports: "absent",
+    uiUsesTypedWrappers: true,
+    clientUsesFixedCommands: true,
+  };
+}
+
+export function assertM005ReadmeDocs({ rootDir = ROOT_DIR } = {}) {
+  const readme = readFileSync(assertFileExists(rootDir, "README.md"), "utf8");
+  assert(readme.includes("npm run verify:m005:s01"), "README must document the canonical M005/S01 verifier command.", {
+    phase: "docs",
+    markerClass: "missing_command",
+  });
+  assert(/M005\s*S01|cookie portability/i.test(readme), "README must name the cookie portability source proof.", {
+    phase: "docs",
+    markerClass: "missing_scope",
+  });
+  assert(/S04/i.test(readme) && /packaged/i.test(readme) && /dialog/i.test(readme), "README must defer packaged real-dialog proof to S04.", {
+    phase: "docs",
+    markerClass: "missing_s04_boundary",
+  });
+  assert(/no-frontend-filesystem|no frontend filesystem/i.test(readme) && /no-path-leak|path leak|selected locations/i.test(readme), "README must document the frontend filesystem and selected-location redaction boundary.", {
+    phase: "docs",
+    markerClass: "missing_authority_boundary",
+  });
+  return {
+    command: "documented",
+    packagedDialogProof: "deferred-to-s04",
+    authorityBoundary: "documented",
+  };
 }
 
 function createStoreProfile(context) {
@@ -664,6 +810,7 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
     status,
     mode: "sidecar-only",
     sidecar: {
+      emptyExported: Boolean(sidecar?.emptyExported),
       exportedJson: Boolean(sidecar?.exportedJson),
       exportedNetscape: Boolean(sidecar?.exportedNetscape),
       replaced: Boolean(sidecar?.replaced),
@@ -672,7 +819,12 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
       unsupportedFormatRejected: Boolean(sidecar?.unsupportedFormatRejected),
       busyRejected: Boolean(sidecar?.busyRejected),
       diagnosticsRedacted: Boolean(sidecar?.diagnosticsRedacted),
+      cleanup: {
+        status: sidecar?.cleanup?.status ?? "unknown",
+        retained: Boolean(sidecar?.cleanup?.retained),
+      },
       counts: {
+        zeroJsonExported: Number(sidecar?.counts?.zeroJsonExported ?? 0),
         jsonExported: Number(sidecar?.counts?.jsonExported ?? 0),
         netscapeExported: Number(sidecar?.counts?.netscapeExported ?? 0),
         imported: Number(sidecar?.counts?.imported ?? 0),
@@ -686,8 +838,57 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
   return summary;
 }
 
-export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepTemp = false } = {}) {
-  resetM005VerificationState();
+export function buildM005FullSummary({ status, checks, commands, capability, sourceGuardrails, docs, sidecar }) {
+  const summary = {
+    event: VERIFY_EVENT,
+    status,
+    mode: "full",
+    commands: {
+      focusedVitest: commands?.focusedVitest ?? "unknown",
+      typescriptBuild: commands?.typescriptBuild ?? "unknown",
+      sidecarBuild: commands?.sidecarBuild ?? "unknown",
+      rustCommandTests: commands?.rustCommandTests ?? "unknown",
+    },
+    capability,
+    sourceGuardrails,
+    docs,
+    sidecar,
+    checks: checks.map((check) => ({ name: check.name, status: check.status, durationMs: check.durationMs })),
+  };
+  assert(!findM005ForbiddenPublicMarker(summary), "M005 full summary was not redaction-safe.");
+  return summary;
+}
+
+function recordCleanupStep(storeRoot, { keepTemp, context }) {
+  const started = performance.now();
+  const duration = () => Math.round(performance.now() - started);
+  if (keepTemp) {
+    const durationMs = duration();
+    const cleanup = { status: "retained", retained: true };
+    STEP_RESULTS.push({ name: "cleanup.temp-fixtures", status: "pass", durationMs });
+    emit({ phase: "cleanup.temp-fixtures", status: "pass", durationMs, cleanupStatus: cleanup.status, retained: cleanup.retained }, context);
+    return cleanup;
+  }
+
+  try {
+    rmSync(storeRoot, { recursive: true, force: true });
+    const durationMs = duration();
+    const cleanup = { status: "removed", retained: false };
+    STEP_RESULTS.push({ name: "cleanup.temp-fixtures", status: "pass", durationMs });
+    emit({ phase: "cleanup.temp-fixtures", status: "pass", durationMs, cleanupStatus: cleanup.status, retained: cleanup.retained }, context);
+    return cleanup;
+  } catch (error) {
+    const durationMs = duration();
+    const cleanup = { status: "failed", retained: true, errorCode: error?.code ?? "CLEANUP_FAILED" };
+    STEP_RESULTS.push({ name: "cleanup.temp-fixtures", status: "fail", durationMs });
+    emit({ phase: "cleanup.temp-fixtures", status: "fail", durationMs, cleanupStatus: cleanup.status, errorCode: cleanup.errorCode }, context);
+    return cleanup;
+  }
+}
+
+export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepTemp = false, resetState = true, emitFinal = true } = {}) {
+  if (resetState) resetM005VerificationState();
+  const sidecarStepStart = STEP_RESULTS.length;
   void rootDir;
   void python;
   const storeRoot = mkdtempSync(join(tmpdir(), "theprivator-m005-s01-"));
@@ -696,6 +897,7 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
   const secondCookieValue = "m005-second-secret-cookie-value";
   const replacementValue = "m005-replacement-secret-cookie-value";
   const exportJsonPath = join(storeRoot, "export-should-not-leak.json");
+  const zeroExportJsonPath = join(storeRoot, "zero-export-should-not-leak.json");
   const exportTxtPath = join(storeRoot, "export-should-not-leak.txt");
   const importJsonPath = join(storeRoot, "import-should-not-leak.json");
   const malformedJsonPath = join(storeRoot, "malformed-should-not-leak.json");
@@ -704,7 +906,7 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
   const busyExportPath = join(storeRoot, "busy-should-not-leak.json");
   const redactionContext = createM005RedactionContext({
     storeRoot,
-    selectedPaths: [exportJsonPath, exportTxtPath, importJsonPath, malformedJsonPath, oversizedPath, unsupportedPath, busyExportPath],
+    selectedPaths: [exportJsonPath, zeroExportJsonPath, exportTxtPath, importJsonPath, malformedJsonPath, oversizedPath, unsupportedPath, busyExportPath],
     cookieDomains: [cookieDomain, `.${cookieDomain}`],
     cookieValues: [cookieValue, secondCookieValue, replacementValue],
   });
@@ -727,11 +929,31 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
         storeRoot,
         profileRoot: dirname(userDataRoot),
         userDataRoot,
-        selectedPaths: [exportJsonPath, exportTxtPath, importJsonPath, malformedJsonPath, oversizedPath, unsupportedPath, busyExportPath],
+        selectedPaths: [exportJsonPath, zeroExportJsonPath, exportTxtPath, importJsonPath, malformedJsonPath, oversizedPath, unsupportedPath, busyExportPath],
         cookieDomains: [cookieDomain, `.${cookieDomain}`],
         cookieValues: [cookieValue, secondCookieValue, replacementValue],
       });
       return { value: id, log: { profileReady: true } };
+    }, context.redactionContext);
+
+    runStep("sidecar.zero-cookie-export", () => {
+      const result = remember(
+        runSourceSidecarRequest({
+          id: "m005-export-zero-json",
+          method: PORTABILITY_EXPORT,
+          params: { storeRoot, profileId, destinationPath: zeroExportJsonPath, format: FORMAT_THEPRIVATOR_JSON },
+        }, { context: context.redactionContext }),
+        { requestId: "m005-export-zero-json", method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null },
+      );
+      const payload = assertPortabilitySuccess(result.response, { requestId: "m005-export-zero-json", operation: "export", format: FORMAT_THEPRIVATOR_JSON });
+      assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
+      assert(payload.exportedCount === 0 && payload.skippedCount === 0 && payload.warningCount === 0, "Zero-cookie export did not report clean zero counts.", { phase: "zero-cookie" });
+      const exported = JSON.parse(readFileSync(zeroExportJsonPath, "utf8"));
+      assert(exported.format === "theprivator.cookies" && exported.version === 1, "Zero-cookie JSON export used the wrong schema.", { phase: "zero-cookie" });
+      assert(Array.isArray(exported.cookies) && exported.cookies.length === 0, "Zero-cookie JSON export did not write an empty cookie list.", { phase: "zero-cookie" });
+      sidecar.emptyExported = true;
+      sidecar.counts.zeroJsonExported = payload.exportedCount;
+      return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
     }, context.redactionContext);
 
     runStep("fixture.cookie-db", () => {
@@ -887,16 +1109,75 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       return { emittedEvents: VERIFIER_EVENTS.length };
     }, context.redactionContext);
 
-    const summary = buildM005FinalSummary({ status: "pass", checks: STEP_RESULTS, sidecar });
-    emit({ status: "pass", summary }, context.redactionContext);
+    const cleanup = recordCleanupStep(storeRoot, { keepTemp, context: context.redactionContext });
+    sidecar.cleanup = cleanup;
+    if (cleanup.status === "failed") {
+      fail("M005/S01 temporary cookie fixture cleanup failed.", {
+        phase: "cleanup",
+        cleanupStatus: cleanup.status,
+        errorCode: cleanup.errorCode,
+      });
+    }
+
+    const summary = buildM005FinalSummary({ status: "pass", checks: STEP_RESULTS.slice(sidecarStepStart), sidecar });
+    if (emitFinal) emit({ status: "pass", summary }, context.redactionContext);
     return summary;
   } finally {
-    if (!keepTemp) rmSync(storeRoot, { recursive: true, force: true });
+    if (!sidecar.cleanup) {
+      sidecar.cleanup = recordCleanupStep(storeRoot, { keepTemp, context: context.redactionContext });
+    }
   }
 }
 
+export function runFullVerification({ rootDir = ROOT_DIR } = {}) {
+  resetM005VerificationState();
+  const context = createM005RedactionContext({ rootDir });
+  const commands = {};
+
+  runM005CommandStep(
+    "node.focused-vitest",
+    "npm",
+    ["test", "--", "--run", ...M005_FOCUSED_VITEST_FILES],
+    120_000,
+    { rootDir, context },
+  );
+  commands.focusedVitest = "pass";
+
+  runM005CommandStep("frontend.typecheck-build", "npm", ["run", "build"], 120_000, { rootDir, context });
+  commands.typescriptBuild = "pass";
+
+  runM005CommandStep("sidecar.build", "npm", ["run", "sidecar:build"], 300_000, { rootDir, context });
+  commands.sidecarBuild = "pass";
+
+  runM005CommandStep(
+    "rust.cookie-command-tests",
+    "cargo",
+    ["test", "--manifest-path", "src-tauri/Cargo.toml", "profile_cookies"],
+    180_000,
+    { rootDir, context },
+  );
+  commands.rustCommandTests = "pass";
+
+  const capability = runCapabilityOnlyVerification({ rootDir, resetState: false, emitFinal: false }).capability;
+  const sourceGuardrails = runStep("source.cookie-guardrails", () => assertM005SourceGuardrails({ rootDir }), context);
+  const docs = runStep("docs.readme-proof-boundary", () => assertM005ReadmeDocs({ rootDir }), context);
+  const sidecarSummary = runSidecarOnlySmoke({ rootDir, resetState: false, emitFinal: false });
+  const summary = buildM005FullSummary({
+    status: "pass",
+    checks: STEP_RESULTS,
+    commands,
+    capability,
+    sourceGuardrails,
+    docs,
+    sidecar: sidecarSummary.sidecar,
+  });
+  assertM005PublicEvidenceRedacted(summary, context);
+  emit({ status: "pass", summary }, context);
+  return summary;
+}
+
 function printHelp() {
-  console.log(`Usage: npm run verify:m005:s01 -- [--sidecar-only] [--capability-only]\n\n--sidecar-only      Run the source-sidecar cookie portability smoke fixture.\n--capability-only   Verify the Tauri dialog/fixed-command permission boundary.\n`);
+  console.log(`Usage: npm run verify:m005:s01 -- [--sidecar-only] [--capability-only]\n\nDefault            Run the full M005/S01 source-level proof.\n--sidecar-only      Run only the source-sidecar cookie portability smoke fixture.\n--capability-only   Verify only the Tauri dialog/fixed-command permission boundary.\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -909,14 +1190,26 @@ export async function main(argv = process.argv.slice(2)) {
     runCapabilityOnlyVerification();
     return 0;
   }
-  runSidecarOnlySmoke();
+  if (args.sidecarOnly) {
+    runSidecarOnlySmoke();
+    return 0;
+  }
+  runFullVerification();
   return 0;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.log(JSON.stringify({ event: VERIFY_EVENT, status: "fail", message }));
+    const details = error?.details ? redactM005(error.details) : undefined;
+    const failure = redactM005({
+      event: VERIFY_EVENT,
+      status: "fail",
+      message,
+      ...(details ? { details } : {}),
+      checks: STEP_RESULTS.map((check) => ({ name: check.name, status: check.status, durationMs: check.durationMs })),
+    });
+    console.log(JSON.stringify(failure));
     process.exit(1);
   });
 }
