@@ -271,6 +271,7 @@ def _commit_validated_package(store_root: Union[str, Path], package: ValidatedPa
     }
     create_result: Optional[JsonObject] = None
     created_profile_id: Optional[str] = None
+    existing_profile_ids = _profile_ids_from_collection(store.list())
     try:
         create_result = store.create_profile_package_import(
             target_name,
@@ -278,13 +279,26 @@ def _commit_validated_package(store_root: Union[str, Path], package: ValidatedPa
             proxy=package.proxy,
             metadata=metadata,
         )
-        created_profile = create_result.get("profile")
-        if not isinstance(created_profile, Mapping) or not isinstance(created_profile.get("id"), str):
+        if not isinstance(create_result, Mapping):
+            created_profile_id = _created_profile_id_since(store, existing_profile_ids)
             raise PackageImportCommitError(
                 code=PORTABILITY_PACKAGE_IMPORT_FAILED,
                 message="Profile package import failed.",
             )
-        created_profile_id = created_profile["id"]
+        created_profile_id = _created_profile_id_from_create_result(create_result) or _created_profile_id_since(
+            store,
+            existing_profile_ids,
+        )
+        created_profile = create_result.get("profile")
+        if (
+            created_profile_id is None
+            or not isinstance(created_profile, Mapping)
+            or created_profile.get("id") != created_profile_id
+        ):
+            raise PackageImportCommitError(
+                code=PORTABILITY_PACKAGE_IMPORT_FAILED,
+                message="Profile package import failed.",
+            )
         imported_record = store.get(created_profile_id)
         destination = chromium.resolve_user_data_path(store_root, imported_record)
         _copy_prepared_payload(package.payload_temp_dir, destination)
@@ -907,6 +921,34 @@ def _copy_directory_contents(source: Path, destination: Path) -> None:
                 code=PORTABILITY_PACKAGE_PAYLOAD_FAILED,
                 message="Profile package payload could not be restored.",
             ) from exc
+
+
+def _created_profile_id_from_create_result(result: Mapping[str, Any]) -> Optional[str]:
+    profile = result.get("profile")
+    if isinstance(profile, Mapping) and isinstance(profile.get("id"), str):
+        return profile["id"]
+    return None
+
+
+def _created_profile_id_since(store: ProfileStore, existing_profile_ids: set[str]) -> Optional[str]:
+    try:
+        created_ids = _profile_ids_from_collection(store.list()) - existing_profile_ids
+    except SidecarError:
+        return None
+    if len(created_ids) == 1:
+        return next(iter(created_ids))
+    return None
+
+
+def _profile_ids_from_collection(collection: Mapping[str, Any]) -> set[str]:
+    profiles = collection.get("profiles")
+    if not isinstance(profiles, list):
+        return set()
+    return {
+        profile["id"]
+        for profile in profiles
+        if isinstance(profile, Mapping) and isinstance(profile.get("id"), str)
+    }
 
 
 def _rollback_created_profile(store_root: Union[str, Path], profile_id: str) -> None:

@@ -29,6 +29,7 @@ from theprivator_sidecar.profile_package import (
 from theprivator_sidecar.profiles import ProfileStore, STORE_VERSION, utc_now_iso
 from theprivator_sidecar.protocol import (
     PORTABILITY_PACKAGE_CHECKSUM_MISMATCH,
+    PORTABILITY_PACKAGE_IMPORT_FAILED,
     PORTABILITY_PACKAGE_INVALID,
     PORTABILITY_PACKAGE_PAYLOAD_FAILED,
     PORTABILITY_PACKAGE_TOO_LARGE,
@@ -79,6 +80,47 @@ def assert_public_package_payload_safe(payload: Any, *, store_root: Path) -> str
     for marker in PUBLIC_FORBIDDEN_MARKERS:
         assert marker not in encoded
     return encoded
+
+
+def capture_package_temp_dirs(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    captured: list[Path] = []
+    original_temporary_directory = profile_package.tempfile.TemporaryDirectory
+
+    def temporary_directory(*args: Any, **kwargs: Any) -> Any:
+        manager = original_temporary_directory(*args, **kwargs)
+        captured.append(Path(manager.name))
+        return manager
+
+    class TempfileProxy:
+        TemporaryDirectory = staticmethod(temporary_directory)
+
+    monkeypatch.setattr(profile_package, "tempfile", TempfileProxy)
+    return captured
+
+
+def assert_package_temp_dirs_cleaned(temp_dirs: Sequence[Path]) -> None:
+    assert temp_dirs, "expected package import to allocate a temporary directory"
+    for temp_dir in temp_dirs:
+        assert not temp_dir.exists(), f"package temp directory was retained: {temp_dir}"
+
+
+def assert_failed_import_left_no_state(
+    store_root: Path,
+    temp_dirs: Sequence[Path],
+    *,
+    allow_empty_profiles_file: bool = False,
+) -> None:
+    profiles_file = store_root / "profile-store" / "profiles.json"
+    if profiles_file.exists():
+        assert allow_empty_profiles_file, "profiles.json was created before import mutation"
+        payload = json.loads(profiles_file.read_text(encoding="utf-8"))
+        assert payload["profiles"] == []
+
+    profiles_dir = store_root / "profile-store" / "profiles"
+    if profiles_dir.exists():
+        assert list(profiles_dir.iterdir()) == []
+
+    assert_package_temp_dirs_cleaned(temp_dirs)
 
 
 def fixed_proxy_with_credentials() -> Mapping[str, Any]:
@@ -393,6 +435,94 @@ def test_import_profile_package_validates_then_creates_copy_and_restores_payload
     assert "credentials" not in stored_imported["proxy"]
     assert PROXY_USER_SENTINEL not in json.dumps(stored_imported, sort_keys=True)
     assert PROXY_PASSWORD_SENTINEL not in json.dumps(stored_imported, sort_keys=True)
+
+
+def test_import_pre_mutation_failure_leaves_no_profile_state_or_temp_dirs(tmp_path, monkeypatch):
+    temp_dirs = capture_package_temp_dirs(monkeypatch)
+    package_path = tmp_path / "not-a-zip.tpkg"
+    package_path.write_text("not a zip with manifest.json or payload/secret", encoding="utf-8")
+    import_root = tmp_path / "pre-mutation-store"
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(import_root, package_path)
+
+    error = assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
+    assert "manifest.json" not in json.dumps(error.to_dict(), sort_keys=True)
+    assert_failed_import_left_no_state(import_root, temp_dirs)
+
+
+def test_import_payload_copy_failure_rolls_back_record_directory_and_temp_dirs(tmp_path, monkeypatch):
+    temp_dirs = capture_package_temp_dirs(monkeypatch)
+    payload = b"portable-payload"
+    manifest, member = manifest_with_payload("Default/Preferences", payload)
+    package_path = tmp_path / "payload-copy-failure.tpkg"
+    write_package(package_path, manifest, extra_members={member: payload})
+    import_root = tmp_path / "payload-copy-store"
+
+    def fail_copy_prepared_payload(source: Path, destination: Path) -> None:
+        assert source.exists()
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "partial-payload").write_text("partial", encoding="utf-8")
+        raise profile_package.PackageImportCommitError(
+            code=PORTABILITY_PACKAGE_PAYLOAD_FAILED,
+            message="Profile package payload could not be restored.",
+        )
+
+    monkeypatch.setattr(profile_package, "_copy_prepared_payload", fail_copy_prepared_payload)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(import_root, package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_PAYLOAD_FAILED)
+    assert_failed_import_left_no_state(import_root, temp_dirs, allow_empty_profiles_file=True)
+
+
+def test_import_cookie_restore_failure_rolls_back_without_cookie_material(tmp_path, monkeypatch):
+    temp_dirs = capture_package_temp_dirs(monkeypatch)
+    payload = b"portable-payload"
+    manifest, member = manifest_with_payload("Default/Preferences", payload)
+    package_path = tmp_path / "cookie-restore-failure.tpkg"
+    write_package(package_path, manifest, extra_members={member: payload})
+    import_root = tmp_path / "cookie-restore-store"
+
+    def fail_cookie_restore(store_root: Path, profile: Any, raw: bytes) -> Mapping[str, Any]:
+        user_data_dir = chromium.resolve_user_data_path(store_root, profile)
+        assert (user_data_dir / "Default" / "Preferences").exists()
+        raise SidecarError(
+            code="PORTABILITY_COOKIE_DB_WRITE_FAILED",
+            message=f"{COOKIE_VALUE_SENTINEL} Traceback stack should not escape",
+        )
+
+    monkeypatch.setattr(profile_package.cookies, "restore_theprivator_cookie_payload", fail_cookie_restore)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(import_root, package_path)
+
+    error = assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_IMPORT_FAILED)
+    encoded = json.dumps(error.to_dict(), sort_keys=True)
+    assert COOKIE_VALUE_SENTINEL not in encoded
+    assert "Traceback" not in encoded
+    assert_failed_import_left_no_state(import_root, temp_dirs, allow_empty_profiles_file=True)
+
+
+def test_import_malformed_create_result_rolls_back_created_profile(tmp_path, monkeypatch):
+    temp_dirs = capture_package_temp_dirs(monkeypatch)
+    package_path = tmp_path / "malformed-create-result.tpkg"
+    write_package(package_path, minimal_manifest())
+    import_root = tmp_path / "malformed-create-store"
+    original_create = ProfileStore.create_profile_package_import
+
+    def create_then_return_malformed(self: ProfileStore, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        result = original_create(self, *args, **kwargs)
+        return {**result, "profile": {"name": "missing id"}}
+
+    monkeypatch.setattr(ProfileStore, "create_profile_package_import", create_then_return_malformed)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(import_root, package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_IMPORT_FAILED)
+    assert_failed_import_left_no_state(import_root, temp_dirs, allow_empty_profiles_file=True)
 
 
 def test_import_checksum_failure_happens_before_profile_mutation_and_does_not_echo_paths(tmp_path):
@@ -758,3 +888,95 @@ def test_profile_package_dispatch_returns_only_safe_diagnostics_and_dto_fields(t
     assert str(destination) not in log_text
     for marker in PUBLIC_FORBIDDEN_MARKERS:
         assert marker not in log_text
+
+
+def test_failed_profile_package_import_diagnostics_are_typed_correlated_and_redacted(tmp_path, monkeypatch):
+    from theprivator_sidecar.diagnostics import DIAGNOSTIC_RELATIVE_LOG_PATH, lookup_by_detail_ref
+
+    temp_dirs = capture_package_temp_dirs(monkeypatch)
+    store_root = tmp_path / "import-store-root-should-not-leak"
+    source_path = tmp_path / "selected-package-path-should-not-leak.tpkg"
+    manifest = minimal_manifest()
+    manifest["profile"]["proxy"] = fixed_proxy_with_credentials()
+    manifest["profile"]["proxySummary"] = {
+        "proxyVersion": PROXY_VERSION,
+        "mode": FIXED_SERVER_PROXY_MODE,
+        "credentialState": "configured",
+        "summary": f"http://{PROXY_USER_SENTINEL}:{PROXY_PASSWORD_SENTINEL}@proxy.example.invalid:8080",
+    }
+    write_package(
+        source_path,
+        manifest,
+        extra_members={"metadata/rawDiagnostics.json": b"Traceback raw stdout stderr stack"},
+    )
+
+    response, diagnostics = handle_request_line(
+        request_line(
+            {
+                "id": "pkg-import-failed",
+                "method": "portability.profile_package.import",
+                "params": {
+                    "storeRoot": str(store_root),
+                    "sourcePath": str(source_path),
+                },
+            }
+        )
+    )
+
+    assert response["ok"] is False
+    assert response["id"] == "pkg-import-failed"
+    error = response["error"]
+    assert error["code"] == PORTABILITY_PACKAGE_INVALID
+    assert error["recoverable"] is True
+    assert error["detailRef"].startswith("sidecar-")
+    assert diagnostics[0] == {
+        "event": "sidecar.request",
+        "requestId": "pkg-import-failed",
+        "method": "portability.profile_package.import",
+        "status": "error",
+        "durationMs": diagnostics[0]["durationMs"],
+        "errorCode": PORTABILITY_PACKAGE_INVALID,
+        "detailRef": error["detailRef"],
+    }
+
+    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
+    assert lookup == {
+        "found": True,
+        "logPath": DIAGNOSTIC_RELATIVE_LOG_PATH,
+        "entries": [lookup["entries"][0]],
+    }
+    entry = lookup["entries"][0]
+    assert entry["event"] == "sidecar.request"
+    assert entry["requestId"] == "pkg-import-failed"
+    assert entry["method"] == "portability.profile_package.import"
+    assert entry["status"] == "error"
+    assert entry["errorCode"] == PORTABILITY_PACKAGE_INVALID
+    assert entry["detailRef"] == error["detailRef"]
+
+    combined = json.dumps(
+        {"response": response, "diagnostics": diagnostics, "lookup": lookup},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    forbidden_values = (
+        *PUBLIC_FORBIDDEN_MARKERS,
+        str(tmp_path),
+        str(store_root),
+        str(source_path),
+        "selected-package-path-should-not-leak",
+        "metadata/rawDiagnostics.json",
+        "raw stdout",
+        "stderr",
+        "stack",
+        "proxy.example.invalid:8080",
+    )
+    for marker in forbidden_values:
+        assert marker not in combined
+
+    diagnostic_log = store_root / "profile-store" / "diagnostics" / "events.jsonl"
+    assert diagnostic_log.is_file()
+    log_text = diagnostic_log.read_text(encoding="utf-8")
+    assert "portability.profile_package.import" in log_text
+    for marker in forbidden_values:
+        assert marker not in log_text
+    assert_failed_import_left_no_state(store_root, temp_dirs)
