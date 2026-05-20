@@ -1,21 +1,49 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter as hostPathDelimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { By } from "selenium-webdriver";
 import { ROOT_DIR, VerifyFailure, executable } from "./verify-m004-s01.mjs";
+import {
+  COOKIE_MEMBER,
+  MANIFEST_MEMBER,
+  PACKAGE_FORMAT,
+  PACKAGE_VERSION,
+  PAYLOAD_PREFIX,
+  assertM005S02PackageContentClean,
+  createM005S02PackageScanContext,
+} from "./verify-m005-s02.mjs";
 import {
   assertBuildArtifactsPresent as assertS06BuildArtifactsPresent,
   assertFreshBuildArtifacts as assertS06FreshBuildArtifacts,
+  assertInitialPackagedUi as assertS06InitialPackagedUi,
   assertWebDriverPreflight as assertS06WebDriverPreflight,
+  cleanupPackagedSmoke as cleanupS06PackagedSmoke,
+  createSmokeProfile as createS06SmokeProfile,
+  createSmokeRunContext as createS06SmokeRunContext,
+  createTauriWebDriverSession as createS06TauriWebDriverSession,
+  quitDriverSession as quitS06DriverSession,
+  readMetricValue as readS06MetricValue,
+  readProfileCardText as readS06ProfileCardText,
+  readProfileSectionText as readS06ProfileSectionText,
   readTargetTriple as readS06TargetTriple,
+  resolveChromiumExecutable as resolveS06ChromiumExecutable,
+  startTauriDriverProcess as startS06TauriDriverProcess,
+  waitForProfileCard as waitS06ProfileCard,
+  waitForVisibleElement as waitS06VisibleElement,
+  waitForVisibleText as waitS06VisibleText,
 } from "./verify-s06.mjs";
 
 export const VERIFY_EVENT = "verify.m005.s04";
 export const SIDECAR_EXTERNAL_BIN = "binaries/theprivator-sidecar";
 export const DEFAULT_BUILD_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_BUILD_TIMEOUT_MS ?? 20 * 60_000);
 export const DEFAULT_COMMAND_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_COMMAND_TIMEOUT_MS ?? 30_000);
+export const DEFAULT_FIXTURE_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_FIXTURE_TIMEOUT_MS ?? 10_000);
+export const M005_S04_PROFILE_PREFIX = "M005 Packaged Portability Smoke";
+export const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
+export const PYTHON = process.env.PYTHON ?? "python3";
 
 const STEP_RESULTS = [];
 const VERIFIER_EVENTS = [];
@@ -385,6 +413,458 @@ export function runCommand(name, command, args = [], { rootDir = ROOT_DIR, timeo
   }, context);
 }
 
+export async function runStepAsync(name, action, context = createM005S04PublicScanContext()) {
+  const started = performance.now();
+  try {
+    const { publicResult, returnValue } = unpackStepResult(await action());
+    const durationMs = Math.round(performance.now() - started);
+    STEP_RESULTS.push({ name, status: "pass", durationMs });
+    emit({ phase: name, ...publicResult, status: "pass", durationMs }, context);
+    return returnValue;
+  } catch (error) {
+    const durationMs = Math.round(performance.now() - started);
+    STEP_RESULTS.push({ name, status: "fail", durationMs, message: error instanceof Error ? error.message : String(error) });
+    emit({ phase: name, status: "fail", durationMs, message: error instanceof Error ? error.message : String(error), details: formatM005S04FailureDetails(error, context, name) }, context);
+    throw error;
+  }
+}
+
+function parseJsonText(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    fail(`${label} must be valid JSON.`, { phase: "json-read", label, parser: "json", rawPayloadSuppressed: true });
+  }
+}
+
+function parseJsonLine(text, label) {
+  return parseJsonText(String(text ?? "").trim(), label);
+}
+
+function pathInside(root, candidate) {
+  if (!root || !candidate) return false;
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return relativePath === "" || (relativePath.length > 0 && !relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function isSafeRelativeStorePath(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 240) return false;
+  if (value.includes("\\") || value.includes("\0") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
+  const parts = value.split("/");
+  return parts.every((part) => part.length > 0 && part !== "." && part !== ".." && /^[A-Za-z0-9._-]+$/.test(part));
+}
+
+function collectProfileStoreFiles(root, output = [], state = { visited: 0 }) {
+  if (!root || !existsSync(root)) return output;
+  if (state.visited++ > 6_000) fail("M005/S04 profile-store discovery exceeded its bounded walk limit.", { phase: "profile-store", markerClass: "profile_store_scan_limit" });
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = join(root, entry.name);
+    if (entry.isDirectory()) {
+      collectProfileStoreFiles(fullPath, output, state);
+    } else if (entry.isFile() && entry.name === "profiles.json" && basename(dirname(fullPath)) === "profile-store") {
+      output.push(fullPath);
+    }
+  }
+  return output;
+}
+
+function readBoundedText(path, { maxBytes = 128 * 1024 } = {}) {
+  const stats = statSync(path);
+  const length = Math.min(stats.size, maxBytes);
+  if (length === 0) return { text: "", truncated: false, size: stats.size };
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, stats.size - length);
+    let text = buffer.toString("utf8");
+    const truncated = stats.size > maxBytes;
+    if (truncated) {
+      const firstNewline = text.indexOf("\n");
+      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
+    }
+    return { text, truncated, size: stats.size };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function runPythonJsonFixture(script, input, context, label, { rootDir = ROOT_DIR, timeoutMs = DEFAULT_FIXTURE_TIMEOUT_MS } = {}) {
+  const result = spawnSync(executable(PYTHON), ["-c", script], {
+    cwd: rootDir,
+    input: JSON.stringify(input),
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: timeoutMs,
+    maxBuffer: 6 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    fail(`${label} fixture failed.`, {
+      phase: "fixture",
+      label,
+      exitCode: result.status ?? null,
+      errorCode: result.error?.code ?? null,
+      timedOut: result.error?.code === "ETIMEDOUT",
+      outputSuppressed: true,
+      markerClasses: collectM005S04MarkerClasses(`${result.stdout ?? ""}\n${result.stderr ?? ""}`, context),
+    });
+  }
+  const output = String(result.stdout ?? "").trim();
+  return output ? parseJsonLine(output, `${label} fixture output`) : {};
+}
+
+export function createM005S04SmokeRunContext({ rootDir = ROOT_DIR, baseEnv = process.env, now, nonce, runId, createSmokeRunContext = createS06SmokeRunContext } = {}) {
+  const smokeContext = createSmokeRunContext({
+    rootDir,
+    baseEnv,
+    now,
+    nonce,
+    runId,
+    profilePrefix: M005_S04_PROFILE_PREFIX,
+  });
+  return {
+    value: smokeContext,
+    log: {
+      runId: smokeContext.runId,
+      profileName: "generated",
+      isolatedRoots: "created",
+      rootScope: "private",
+    },
+  };
+}
+
+export function assertM005S04ChromiumExecutable({ rootDir = ROOT_DIR, platform = process.platform, env = process.env, resolveChromiumExecutable = resolveS06ChromiumExecutable } = {}) {
+  const chromium = resolveChromiumExecutable({ rootDir, platform, env });
+  return { chromium: chromium?.name ? "available" : "available", source: chromium?.source ?? "detected" };
+}
+
+export function discoverM005S04SourceProfile({ rootDir = ROOT_DIR, smokeContext, profileName = smokeContext?.smokeProfileName } = {}) {
+  assert(smokeContext?.smokeRoot && smokeContext?.dataRoot, "Smoke context is required for M005/S04 profile-store discovery.", { phase: "profile-store", markerClass: "missing_smoke_context" });
+  assert(typeof profileName === "string" && profileName.length > 0, "M005/S04 source profile name is required.", { phase: "profile-store", markerClass: "missing_profile_name" });
+  const candidates = collectProfileStoreFiles(smokeContext.smokeRoot).sort();
+  assert(candidates.length > 0, "Missing profile-store/profiles.json under the isolated M005/S04 smoke root.", { phase: "profile-store", markerClass: "profile_store_missing", candidateCount: 0 });
+
+  let inspectedProfiles = 0;
+  for (const profileStorePath of candidates) {
+    const payload = readJsonFile(profileStorePath, "profile-store/profiles.json");
+    assert(isPlainObject(payload), "profile-store/profiles.json root must be an object.", { phase: "profile-store", markerClass: "profile_store_malformed" });
+    assert(Array.isArray(payload.profiles), "profile-store/profiles.json profiles field must be an array.", { phase: "profile-store", markerClass: "profile_store_malformed" });
+    inspectedProfiles += payload.profiles.length;
+    const profile = payload.profiles.find((item) => item?.name === profileName);
+    if (!profile) continue;
+
+    const appDataRoot = dirname(dirname(profileStorePath));
+    assert(pathInside(smokeContext.dataRoot, profileStorePath), "profile-store/profiles.json must stay under the verifier XDG data root.", { phase: "profile-store", markerClass: "profile_store_outside_xdg" });
+    assert(typeof profile.id === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(profile.id), "M005/S04 source profile id was missing or unsafe.", { phase: "profile-store", markerClass: "profile_store_malformed", profileIdPresent: typeof profile.id === "string" });
+    const storage = profile.storage;
+    assert(isPlainObject(storage), "M005/S04 source profile storage metadata is missing.", { phase: "profile-store", markerClass: "profile_storage_missing" });
+    assert(isSafeRelativeStorePath(storage.profileDir), "M005/S04 source profile storage.profileDir must be a safe relative store path.", { phase: "profile-store", markerClass: "profile_storage_malformed" });
+    assert(isSafeRelativeStorePath(storage.userDataDir) && storage.userDataDir === `${storage.profileDir}/user-data`, "M005/S04 source profile storage.userDataDir must be a safe relative user-data path.", { phase: "profile-store", markerClass: "profile_storage_malformed" });
+    const userDataRoot = join(appDataRoot, storage.userDataDir);
+    assert(pathInside(appDataRoot, userDataRoot), "M005/S04 source profile user data root must stay inside the app-data root.", { phase: "profile-store", markerClass: "profile_storage_malformed" });
+
+    return {
+      value: { profileStorePath, appDataRoot, userDataRoot, payload, profile },
+      log: {
+        profileFound: true,
+        profileCount: payload.profiles.length,
+        storeVersion: Number(payload.storeVersion ?? 0),
+        privateProfileId: "derived",
+        storage: "safe-relative-store-paths",
+        appDataScope: "isolated",
+      },
+    };
+  }
+
+  fail("profile-store/profiles.json did not contain the generated M005/S04 source profile.", {
+    phase: "profile-store",
+    markerClass: "source_profile_missing",
+    candidateCount: candidates.length,
+    inspectedProfiles,
+  });
+}
+
+export function createM005S04CookieDbFixture({ userDataRoot, appDataRoot, cookieDomain = "m005-s04-cookie.invalid", cookieName = "m005_s04_session", cookieValue = "m005-s04-cookie-value", secondCookieName = "m005_s04_theme", secondCookieValue = "m005-s04-second-cookie-value" } = {}, context = createM005S04PublicScanContext({ appDataRoot, userDataRoot, cookieDomains: [cookieDomain], cookieNames: [cookieName, secondCookieName], cookieValues: [cookieValue, secondCookieValue] })) {
+  assert(typeof userDataRoot === "string" && userDataRoot.length > 0, "M005/S04 cookie fixture requires a user data root.", { phase: "cookie-fixture", markerClass: "missing_user_data_root" });
+  if (appDataRoot) assert(pathInside(appDataRoot, userDataRoot), "M005/S04 cookie fixture user data root must stay inside the isolated app-data root.", { phase: "cookie-fixture", markerClass: "fixture_scope_violation" });
+  const script = String.raw`
+import json, sqlite3, sys
+from pathlib import Path
+from theprivator_sidecar.cookies import _CANONICAL_COOKIE_SCHEMA, unix_time_to_chrome
+payload = json.load(sys.stdin)
+db_path = Path(payload["userDataRoot"]) / "Default" / "Network" / "Cookies"
+db_path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db_path)
+try:
+    conn.execute(_CANONICAL_COOKIE_SCHEMA)
+    conn.execute("DELETE FROM cookies")
+    now = unix_time_to_chrome(1_700_000_000)
+    expiry = unix_time_to_chrome(1_900_000_000)
+    rows = [
+        (now, payload["cookieDomain"], "", payload["cookieName"], payload["cookieValue"], b"", "/", expiry, 1, 1, now, 1, 1, 2, 1, 2, 443, 0, now, 0, 0),
+        (now, "." + payload["cookieDomain"], "", payload["secondCookieName"], payload["secondCookieValue"], b"", "/session", 0, 0, 0, now, 0, 0, 1, -1, 1, 80, 0, now, 0, 0),
+    ]
+    conn.executemany("INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, priority, samesite, source_scheme, source_port, is_same_party, last_update_utc, source_type, has_cross_site_ancestor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.commit()
+finally:
+    conn.close()
+print(json.dumps({"count": 2, "dbCreated": True}))
+`;
+  const result = runPythonJsonFixture(script, { userDataRoot, cookieDomain, cookieName, cookieValue, secondCookieName, secondCookieValue }, context, "cookie-db-create");
+  const dbPath = join(userDataRoot, "Default", "Network", "Cookies");
+  return {
+    value: { dbPath, count: result.count, cookies: [{ domain: cookieDomain, name: cookieName, value: cookieValue }, { domain: `.${cookieDomain}`, name: secondCookieName, value: secondCookieValue }] },
+    log: { cookieDb: "created", dbLocation: "Default/Network/Cookies", rowCount: Number(result.count ?? 0), pathScope: "isolated" },
+  };
+}
+
+export function inspectM005S04CookieDbRows({ userDataRoot, appDataRoot, expectedRows = [] } = {}, context = createM005S04PublicScanContext({ appDataRoot, userDataRoot, cookieDomains: expectedRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedRows.map((row) => row.name).filter(Boolean), cookieValues: expectedRows.map((row) => row.value).filter(Boolean) })) {
+  assert(typeof userDataRoot === "string" && userDataRoot.length > 0, "M005/S04 cookie DB inspection requires a user data root.", { phase: "cookie-db", markerClass: "missing_user_data_root" });
+  if (appDataRoot) assert(pathInside(appDataRoot, userDataRoot), "M005/S04 cookie DB inspection user data root must stay inside the isolated app-data root.", { phase: "cookie-db", markerClass: "fixture_scope_violation" });
+  const script = String.raw`
+import json, sqlite3, sys
+from pathlib import Path
+payload = json.load(sys.stdin)
+db_path = Path(payload["userDataRoot"]) / "Default" / "Network" / "Cookies"
+if not db_path.exists():
+    print(json.dumps({"count": 0, "expectedRowsPresent": False, "missingExpectedCount": len(payload.get("expectedRows", [])), "dbPresent": False}))
+    sys.exit(0)
+conn = sqlite3.connect(db_path)
+try:
+    rows = [{"domain": row[0], "name": row[1], "value": row[2]} for row in conn.execute("SELECT host_key, name, value FROM cookies ORDER BY host_key, path, name").fetchall()]
+finally:
+    conn.close()
+missing = []
+for expected in payload.get("expectedRows", []):
+    if not any(row["domain"] == expected.get("domain") and row["name"] == expected.get("name") and row["value"] == expected.get("value") for row in rows):
+        missing.append(expected)
+print(json.dumps({"count": len(rows), "expectedRowsPresent": len(missing) == 0, "missingExpectedCount": len(missing), "dbPresent": True, "rows": rows}))
+`;
+  const result = runPythonJsonFixture(script, { userDataRoot, expectedRows }, context, "cookie-db-inspect");
+  return {
+    value: { rows: result.rows ?? [], count: Number(result.count ?? 0), expectedRowsPresent: Boolean(result.expectedRowsPresent), dbPresent: Boolean(result.dbPresent) },
+    log: { cookieDb: result.dbPresent ? "present" : "missing", rowCount: Number(result.count ?? 0), expectedRowsPresent: Boolean(result.expectedRowsPresent), missingExpectedCount: Number(result.missingExpectedCount ?? 0) },
+  };
+}
+
+export function writeM005S04CookieImportFixtures({ smokeRoot, cookieDomain = "m005-s04-import.invalid", cookieName = "m005_s04_import", cookieValue = "m005-s04-import-value", secondCookieName = "m005_s04_netscape", secondCookieValue = "m005-s04-netscape-value" } = {}, context = createM005S04PublicScanContext({ tempRoot: smokeRoot, cookieDomains: [cookieDomain], cookieNames: [cookieName, secondCookieName], cookieValues: [cookieValue, secondCookieValue] })) {
+  assert(typeof smokeRoot === "string" && smokeRoot.length > 0, "M005/S04 import fixtures require a smoke root.", { phase: "fixture", markerClass: "missing_smoke_root" });
+  const fixtureRoot = join(smokeRoot, "fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const jsonPath = join(fixtureRoot, "cookies-import.theprivator.json");
+  const netscapePath = join(fixtureRoot, "cookies-import.netscape.txt");
+  const cookies = [
+    { domain: cookieDomain, name: cookieName, value: cookieValue, path: "/", secure: true, httpOnly: true, expires: 1_900_000_000, sameSite: "Lax" },
+    { domain: `.${cookieDomain}`, name: secondCookieName, value: secondCookieValue, path: "/session", secure: false, httpOnly: false, expires: null, sameSite: "None" },
+  ];
+  writeFileSync(jsonPath, `${JSON.stringify({ format: "theprivator.cookies", version: 1, cookies }, null, 2)}\n`, "utf8");
+  writeFileSync(netscapePath, [
+    "# Netscape HTTP Cookie File",
+    `#HttpOnly_${cookieDomain}\tTRUE\t/\tTRUE\t1900000000\t${cookieName}\t${cookieValue}`,
+    `.${cookieDomain}\tTRUE\t/session\tFALSE\t0\t${secondCookieName}\t${secondCookieValue}`,
+    "",
+  ].join("\n"), "utf8");
+  return {
+    value: { jsonPath, netscapePath, cookies },
+    log: { importFixtures: "created", fixtureFormatCount: 2, cookieCount: cookies.length, pathScope: "smoke-root" },
+  };
+}
+
+export function writeM005S04PayloadFixtures({ userDataRoot, appDataRoot, selectedPackagePath } = {}, context = createM005S04PublicScanContext({ appDataRoot, userDataRoot, selectedPaths: selectedPackagePath ? [selectedPackagePath] : [] })) {
+  assert(typeof userDataRoot === "string" && userDataRoot.length > 0, "M005/S04 payload fixtures require a user data root.", { phase: "payload-fixture", markerClass: "missing_user_data_root" });
+  if (appDataRoot) assert(pathInside(appDataRoot, userDataRoot), "M005/S04 payload fixture user data root must stay inside the isolated app-data root.", { phase: "payload-fixture", markerClass: "fixture_scope_violation" });
+  const preferencesPath = join(userDataRoot, "Default", "Preferences");
+  const storagePath = join(userDataRoot, "Default", "Local Storage", "leveldb", "000003.log");
+  const runtimeDebugPath = join(userDataRoot, "DevToolsActivePort");
+  const singletonPath = join(userDataRoot, "SingletonLock");
+  const cookieJournalPath = join(userDataRoot, "Default", "Network", "Cookies-journal");
+  mkdirSync(dirname(preferencesPath), { recursive: true });
+  mkdirSync(dirname(storagePath), { recursive: true });
+  mkdirSync(dirname(cookieJournalPath), { recursive: true });
+  writeFileSync(preferencesPath, `${JSON.stringify({ profile: { name: "M005 S04 safe payload" }, browser: { check_default_browser: false } }, null, 2)}\n`, "utf8");
+  writeFileSync(storagePath, "m005-s04-safe-local-storage-payload\n", "utf8");
+  writeFileSync(runtimeDebugPath, "9222\nws://127.0.0.1:9222/devtools/browser/m005-s04-should-not-package\n", "utf8");
+  writeFileSync(singletonPath, "m005-s04-runtime-singleton\n", "utf8");
+  writeFileSync(cookieJournalPath, "m005-s04-cookie-journal-runtime\n", "utf8");
+  if (selectedPackagePath) {
+    mkdirSync(dirname(selectedPackagePath), { recursive: true });
+    writeFileSync(selectedPackagePath, "placeholder selected package destination must not be packaged\n", "utf8");
+  }
+  return {
+    value: { preferencesPath, storagePath, runtimeDebugPath, singletonPath, cookieJournalPath, selectedPackagePath: selectedPackagePath ?? null },
+    log: { payloadFixtures: "created", safePayloadFileCount: 2, volatileRuntimeFileCount: 3, selectedDestinationFixture: Boolean(selectedPackagePath), pathScope: "isolated-profile" },
+  };
+}
+
+export function inspectM005S04PackageArchive({ packagePath, rootDir = ROOT_DIR, appDataRoot, selectedPaths = [], packageScanContext } = {}, context = createM005S04PublicScanContext({ rootDir, appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean) })) {
+  assert(typeof packagePath === "string" && packagePath.length > 0, "M005/S04 package archive inspection requires a package path.", { phase: "package-inspection", markerClass: "missing_package_path" });
+  const script = String.raw`
+import hashlib, json, sys, zipfile
+payload = json.load(sys.stdin)
+try:
+    with zipfile.ZipFile(payload["packagePath"], "r") as archive:
+        members = []
+        for info in archive.infolist():
+            raw = archive.read(info.filename)
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = ""
+            members.append({"name": info.filename, "byteCount": info.file_size, "sha256": hashlib.sha256(raw).hexdigest(), "text": text})
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        cookie_payload = json.loads(archive.read("cookies/theprivator-cookies.json").decode("utf-8"))
+except Exception as exc:
+    print(json.dumps({"ok": False, "errorType": exc.__class__.__name__}))
+    sys.exit(0)
+print(json.dumps({"ok": True, "members": members, "manifest": manifest, "cookiePayload": cookie_payload}))
+`;
+  const inspection = runPythonJsonFixture(script, { packagePath }, context, "package-archive-inspect");
+  assert(inspection.ok === true, "M005/S04 package archive could not be inspected as a valid .tpkg ZIP.", { phase: "package-inspection", markerClass: "package_malformed", errorType: inspection.errorType ?? "unknown" });
+  const memberNames = inspection.members.map((member) => member.name);
+  const scanContext = packageScanContext ?? createM005S02PackageScanContext({ rootDir, storeRoot: appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean), packageMemberNames: memberNames });
+  const scan = assertM005S02PackageContentClean(inspection, scanContext);
+  const runtimeMemberCount = memberNames.filter((name) => /(?:^|\/)DevToolsActivePort$|(?:^|\/)Singleton|Default\/Network\/Cookies(?:-journal)?$/i.test(name)).length;
+  assert(runtimeMemberCount === 0, "M005/S04 package archive included volatile runtime or raw cookie database members.", { phase: "package-inspection", markerClass: "runtime_member", runtimeMemberCount });
+  const manifest = inspection.manifest ?? {};
+  assert(manifest.format === PACKAGE_FORMAT && manifest.version === PACKAGE_VERSION, "M005/S04 package archive manifest format or version mismatch.", { phase: "package-inspection", markerClass: "manifest_mismatch", formatOk: manifest.format === PACKAGE_FORMAT, versionOk: manifest.version === PACKAGE_VERSION });
+  assert(memberNames.includes(MANIFEST_MEMBER) && memberNames.includes(COOKIE_MEMBER), "M005/S04 package archive missed required fixed members.", { phase: "package-inspection", markerClass: "missing_package_member", requiredMemberCount: 2 });
+  const payloadFileCount = memberNames.filter((name) => name.startsWith(PAYLOAD_PREFIX)).length;
+  const cookieCount = Number(manifest.cookies?.cookieCount ?? inspection.cookiePayload?.cookies?.length ?? 0);
+  const summary = {
+    archive: "valid",
+    memberCount: memberNames.length,
+    manifestPresent: true,
+    cookieMemberPresent: true,
+    payloadFileCount,
+    cookieCount,
+    payloadByteCount: Number(manifest.payload?.byteCount ?? 0),
+    warningCount: Array.isArray(manifest.warnings) ? manifest.warnings.length : 0,
+    scanClean: true,
+    scannedMembers: Number(scan.scannedMembers ?? memberNames.length),
+    runtimeMembersSkipped: true,
+  };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { inspection, scan }, log: summary };
+}
+
+const SAFE_DIAGNOSTIC_KEYS = new Set(["schemaVersion", "ts", "requestId", "logPath", "event", "source", "method", "status", "durationMs", "errorCode", "detailRef"]);
+const SAFE_DIAGNOSTIC_SOURCES = new Set(["python-sidecar", "tauri-bridge", "ui"]);
+const SAFE_DIAGNOSTIC_EVENTS = new Set(["sidecar.request", "bridge.request", "ui.action"]);
+const SAFE_DIAGNOSTIC_STATUSES = new Set(["ok", "error", "started"]);
+
+function assertSafeDiagnosticToken(value, label) {
+  assert(value === null || value === undefined || (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)), `M005/S04 diagnostics ${label} used an unsafe token.`, { phase: "diagnostics", markerClass: "diagnostic_token_unsafe", label });
+}
+
+export function inspectM005S04Diagnostics({ appDataRoot, requiredMethods = FIXED_SIDECAR_METHODS, maxBytes = 128 * 1024, maxLines = 500 } = {}, context = createM005S04PublicScanContext({ appDataRoot })) {
+  assert(typeof appDataRoot === "string" && appDataRoot.length > 0, "M005/S04 diagnostics inspection requires an app-data root.", { phase: "diagnostics", markerClass: "missing_app_data_root" });
+  const diagnosticsPath = join(appDataRoot, DIAGNOSTIC_RELATIVE_LOG_PATH);
+  assert(existsSync(diagnosticsPath), "Missing M005/S04 diagnostics JSONL under the packaged app-data root.", { phase: "diagnostics", markerClass: "diagnostics_missing" });
+  const { text, truncated } = readBoundedText(diagnosticsPath, { maxBytes });
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-maxLines);
+  const records = [];
+  let malformedRows = 0;
+  for (const [index, line] of lines.entries()) {
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      malformedRows += 1;
+      continue;
+    }
+    if (!isPlainObject(record)) {
+      malformedRows += 1;
+      continue;
+    }
+    const unsafeKeys = Object.keys(record).filter((key) => !SAFE_DIAGNOSTIC_KEYS.has(key));
+    assert(unsafeKeys.length === 0, "M005/S04 diagnostics JSONL contained unsafe raw diagnostic fields.", { phase: "diagnostics", markerClass: "diagnostics_forbidden_field", row: index + 1, unsafeFieldCount: unsafeKeys.length });
+    const marker = findM005S04ForbiddenPublicMarker(record, context);
+    assert(!marker, "M005/S04 diagnostics JSONL contained forbidden public material.", { phase: "diagnostics", markerClass: marker?.markerClass ?? "diagnostics_forbidden_marker", row: index + 1, fieldPath: marker?.fieldPath ?? "$" });
+    assert(record.logPath === DIAGNOSTIC_RELATIVE_LOG_PATH, "M005/S04 diagnostics JSONL used an unsafe logPath.", { phase: "diagnostics", markerClass: "diagnostics_log_path_unsafe", row: index + 1 });
+    assert(SAFE_DIAGNOSTIC_EVENTS.has(record.event), "M005/S04 diagnostics JSONL used an unsafe event.", { phase: "diagnostics", markerClass: "diagnostics_event_unsafe", row: index + 1 });
+    assert(SAFE_DIAGNOSTIC_SOURCES.has(record.source), "M005/S04 diagnostics JSONL used an unsafe source.", { phase: "diagnostics", markerClass: "diagnostics_source_unsafe", row: index + 1 });
+    assert(SAFE_DIAGNOSTIC_STATUSES.has(record.status), "M005/S04 diagnostics JSONL used an unsafe status.", { phase: "diagnostics", markerClass: "diagnostics_status_unsafe", row: index + 1 });
+    assertSafeDiagnosticToken(record.method, "method");
+    assertSafeDiagnosticToken(record.errorCode, "errorCode");
+    assertSafeDiagnosticToken(record.detailRef, "detailRef");
+    records.push(record);
+  }
+  assert(malformedRows === 0, "M005/S04 diagnostics JSONL contained malformed rows.", { phase: "diagnostics", markerClass: "diagnostics_malformed", malformedRows, totalRows: lines.length });
+
+  const required = {};
+  for (const method of requiredMethods) {
+    const matches = records.filter((record) => record.event === "sidecar.request" && record.method === method);
+    const okRows = matches.filter((record) => record.status === "ok").length;
+    const errorRows = matches.filter((record) => record.status === "error").length;
+    required[method] = { observed: matches.length, okRows, errorRows };
+  }
+  const typedErrorCodes = [...new Set(records.filter((record) => record.status === "error").map((record) => record.errorCode).filter(Boolean))].sort();
+  const summary = {
+    diagnostics: "parsed",
+    truncated,
+    totalRowsRead: lines.length,
+    validRows: records.length,
+    malformedRows,
+    required,
+    okRows: records.filter((record) => record.status === "ok").length,
+    errorRows: records.filter((record) => record.status === "error").length,
+    typedErrorCodes,
+  };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { records }, log: summary };
+}
+
+function safeCleanupStatus(value) {
+  if (typeof value === "string") return value.replace(/[^A-Za-z0-9_.:-]/g, "-").slice(0, 80) || "unknown";
+  if (isPlainObject(value) && typeof value.status === "string") return safeCleanupStatus(value.status);
+  return value ? "reported" : "unknown";
+}
+
+async function suppressForeignVerifierConsole(action) {
+  const originalLog = console.log;
+  try {
+    console.log = () => {};
+    return await action();
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+export async function cleanupM005S04PackagedHarness({ driver, driverProcess, runtime, runningObserved = false, keepTemp = false, passed = false, cleanupPackagedSmoke = cleanupS06PackagedSmoke } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot })) {
+  let rawCleanup = null;
+  try {
+    rawCleanup = await suppressForeignVerifierConsole(() => cleanupPackagedSmoke({ driver, driverProcess, runtime, runningObserved }));
+  } catch (error) {
+    rawCleanup = { cleanupFailed: true, message: error instanceof Error ? error.message : String(error) };
+  }
+
+  let tempRoot = "not-started";
+  if (runtime?.smokeContext?.smokeRoot) {
+    if (passed && !keepTemp) {
+      try {
+        rmSync(runtime.smokeContext.smokeRoot, { recursive: true, force: true });
+        tempRoot = existsSync(runtime.smokeContext.smokeRoot) ? "remove-failed" : "removed";
+      } catch {
+        tempRoot = "remove-failed";
+      }
+    } else {
+      tempRoot = "retained";
+    }
+  }
+
+  const summary = {
+    cleanup: "attempted",
+    webdriverSession: safeCleanupStatus(rawCleanup?.webdriverSession),
+    driverProcess: safeCleanupStatus(rawCleanup?.driverProcess),
+    ownedChromium: safeCleanupStatus(rawCleanup?.ownedChromium),
+    tempState: tempRoot,
+    retained: tempRoot !== "removed",
+    foreignOutputSuppressed: true,
+  };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { rawCleanup, tempRoot }, log: summary };
+}
+
 function readJsonFile(path, label) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -575,7 +1055,7 @@ export function buildM005S04FinalSummary({ status, mode = "full", checks = STEP_
     status,
     mode,
     guardrails: { capability: guardrails.capability ? "pass" : undefined, tauriConfig: guardrails.tauriConfig ? "pass" : undefined, source: guardrails.source ? "pass" : undefined, permissions: guardrails.capability?.permissions, dialogOpenSave: guardrails.capability?.dialogOpenSave, fixedSidecarSpawn: guardrails.capability?.fixedSidecarSpawn },
-    preflight: { webdriver: preflight.webdriver ? { status: preflight.webdriver.missingToolClasses?.length ? "missing" : "available", display: preflight.webdriver.display, missingToolClasses: preflight.webdriver.missingToolClasses ?? [] } : undefined, nativeDialog: preflight.nativeDialog ? { status: preflight.nativeDialog.status, strategy: preflight.nativeDialog.strategy, display: preflight.nativeDialog.display, missingToolClasses: preflight.nativeDialog.missingToolClasses ?? [] } : undefined },
+    preflight: { webdriver: preflight.webdriver ? { status: preflight.webdriver.missingToolClasses?.length ? "missing" : "available", display: preflight.webdriver.display, missingToolClasses: preflight.webdriver.missingToolClasses ?? [] } : undefined, nativeDialog: preflight.nativeDialog ? { status: preflight.nativeDialog.status, strategy: preflight.nativeDialog.strategy, display: preflight.nativeDialog.display, missingToolClasses: preflight.nativeDialog.missingToolClasses ?? [] } : undefined, chromium: preflight.chromium ? { status: "available", source: preflight.chromium.source ?? "detected" } : undefined },
     build,
     runtime,
     cleanup,
@@ -586,14 +1066,68 @@ export function buildM005S04FinalSummary({ status, mode = "full", checks = STEP_
   return summary;
 }
 
-export function runPreflightOnlyVerification({ rootDir = ROOT_DIR, platform = process.platform, env = process.env, reset = true, emitFinal = true, guardrailsCheck = assertM005S04Guardrails, webdriverPreflight = assertM005S04WebDriverPreflight, nativeDialogPreflight = assertNativeDialogAutomationPreflight } = {}) {
+export async function createM005S04SourceProfileViaUi(driver, runtime, {
+  waitForVisibleText = waitS06VisibleText,
+  waitForVisibleElement = waitS06VisibleElement,
+  waitForProfileCard = waitS06ProfileCard,
+  assertInitialPackagedUi = assertS06InitialPackagedUi,
+  createSmokeProfile = createS06SmokeProfile,
+  readMetricValue = readS06MetricValue,
+  readProfileCardText = readS06ProfileCardText,
+  readProfileSectionText = readS06ProfileSectionText,
+} = {}) {
+  assert(driver, "M005/S04 source profile UI creation requires a WebDriver session.", { phase: "ui.source-profile", markerClass: "missing_webdriver_session" });
+  assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 source profile UI creation requires a smoke profile name.", { phase: "ui.source-profile", markerClass: "missing_smoke_context" });
+  await waitForVisibleText(driver, "Persistent profiles, transient browsers.", runtime, { step: "m005-packaged-ui-initial" });
+  await waitForVisibleElement(driver, By.css("#profile-name"), runtime, "#profile-name", { step: "m005-packaged-profile-create" });
+  await assertInitialPackagedUi(driver, runtime);
+  await createSmokeProfile(driver, runtime);
+  await waitForProfileCard(driver, runtime.smokeContext.smokeProfileName, runtime, { step: "m005-packaged-profile-card" });
+  const cardText = await readProfileCardText(driver, runtime.smokeContext.smokeProfileName);
+  const portabilityText = await readProfileSectionText(driver, runtime.smokeContext.smokeProfileName, `Portability actions for ${runtime.smokeContext.smokeProfileName}`);
+  const runningMetric = await readMetricValue(driver, "Profile overview", "Running profiles");
+  return {
+    value: { cardText, portabilityText, runningMetric },
+    log: {
+      sourceProfile: "created-visible-ui",
+      profileCard: "visible",
+      cardTextObserved: cardText.length > 0,
+      portabilityActionsObserved: portabilityText.length > 0,
+      metricReader: runningMetric === null ? "unavailable" : "available",
+    },
+  };
+}
+
+function summarizeArtifactProof(proof = {}) {
+  return { targetTriple: proof.targetTriple ? "detected" : "detected", releaseExecutable: proof.releaseExecutable ? "present" : "missing", releaseSidecar: proof.releaseSidecar ? "present" : "missing", packageCount: Array.isArray(proof.packages) ? proof.packages.length : 0 };
+}
+
+function prepareM005S04BuildArtifacts({ rootDir = ROOT_DIR, platform = process.platform, context = createM005S04PublicScanContext({ rootDir }), skipBuild = false } = {}) {
+  const targetTriple = runStep("build.target-triple", () => ({ targetTriple: readS06TargetTriple(rootDir) }), context).targetTriple;
+  if (skipBuild) {
+    return runStep("build.artifact-shape", () => {
+      const proof = assertS06BuildArtifactsPresent({ rootDir, platform, targetTriple });
+      return { value: { targetTriple, ...proof }, log: summarizeArtifactProof({ targetTriple, ...proof }) };
+    }, context);
+  }
+  const buildStartedAt = new Date(Date.now() - FRESHNESS_SKEW_MS);
+  runStep("build.freshness-window", () => ({ buildWindow: "started" }), context);
+  runCommand("build.release", "npm", ["run", "tauri", "build"], { rootDir, timeoutMs: DEFAULT_BUILD_TIMEOUT_MS, context, label: "npm-run-tauri-build" });
+  return runStep("build.artifact-shape", () => {
+    const proof = assertS06FreshBuildArtifacts({ rootDir, platform, targetTriple, buildStartedAt });
+    return { value: { targetTriple, ...proof }, log: summarizeArtifactProof({ targetTriple, ...proof }) };
+  }, context);
+}
+
+export function runPreflightOnlyVerification({ rootDir = ROOT_DIR, platform = process.platform, env = process.env, reset = true, emitFinal = true, guardrailsCheck = assertM005S04Guardrails, webdriverPreflight = assertM005S04WebDriverPreflight, chromiumPreflight = assertM005S04ChromiumExecutable, nativeDialogPreflight = assertNativeDialogAutomationPreflight } = {}) {
   if (reset) resetState();
   const context = createM005S04PublicScanContext({ rootDir });
   assertValidArgs(parseArgs(["--preflight-only"]));
   const guardrails = runStep("guardrails.m005-s04", () => guardrailsCheck({ rootDir, platform }), context);
   const webdriver = runStep("preflight.webdriver", () => webdriverPreflight({ rootDir, platform, env, strict: true }), context);
+  const chromium = runStep("preflight.chromium", () => chromiumPreflight({ rootDir, platform, env }), context);
   const nativeDialog = runStep("preflight.native-dialog", () => nativeDialogPreflight({ platform, env, strict: true }), context);
-  const summary = buildM005S04FinalSummary({ status: "pass", mode: "preflight-only", guardrails, preflight: { webdriver, nativeDialog }, checks: STEP_RESULTS }, context);
+  const summary = buildM005S04FinalSummary({ status: "pass", mode: "preflight-only", guardrails, preflight: { webdriver, chromium, nativeDialog }, checks: STEP_RESULTS }, context);
   if (emitFinal) emit({ phase: "summary", status: "pass", summary }, context);
   return summary;
 }
@@ -602,25 +1136,84 @@ export function runBuildOnlyVerification({ rootDir = ROOT_DIR, platform = proces
   if (reset) resetState();
   const context = createM005S04PublicScanContext({ rootDir });
   const guardrails = runStep("guardrails.m005-s04", () => assertM005S04Guardrails({ rootDir, platform }), context);
-  runStep("preflight.webdriver", () => assertM005S04WebDriverPreflight({ rootDir, platform, env, strict: false }), context);
-  runStep("preflight.native-dialog", () => assertNativeDialogAutomationPreflight({ platform, env, strict: false }), context);
-  const targetTriple = runStep("build.target-triple", () => ({ targetTriple: readS06TargetTriple(rootDir) }), context).targetTriple;
-  const buildStartedAt = new Date(Date.now() - FRESHNESS_SKEW_MS);
-  runStep("build.freshness-window", () => ({ buildStartedAt: buildStartedAt.toISOString() }), context);
-  runCommand("build.release", "npm", ["run", "tauri", "build"], { rootDir, timeoutMs: DEFAULT_BUILD_TIMEOUT_MS, context, label: "npm-run-tauri-build" });
-  const artifacts = runStep("build.artifact-shape", () => {
-    const proof = assertS06FreshBuildArtifacts({ rootDir, platform, targetTriple, buildStartedAt });
-    return { releaseExecutable: "present", releaseSidecar: "present", packageCount: proof.packages.length };
-  }, context);
-  const summary = buildM005S04FinalSummary({ status: "pass", mode: "build-only", guardrails, build: { targetTriple: "detected", ...artifacts }, checks: STEP_RESULTS }, context);
+  const webdriver = runStep("preflight.webdriver", () => assertM005S04WebDriverPreflight({ rootDir, platform, env, strict: false }), context);
+  const chromium = runStep("preflight.chromium", () => assertM005S04ChromiumExecutable({ rootDir, platform, env }), context);
+  const nativeDialog = runStep("preflight.native-dialog", () => assertNativeDialogAutomationPreflight({ platform, env, strict: false }), context);
+  const proof = prepareM005S04BuildArtifacts({ rootDir, platform, context, skipBuild: false });
+  const build = summarizeArtifactProof(proof);
+  const summary = buildM005S04FinalSummary({ status: "pass", mode: "build-only", guardrails, preflight: { webdriver, chromium, nativeDialog }, build, checks: STEP_RESULTS }, context);
   if (emitFinal) emit({ phase: "summary", status: "pass", summary }, context);
   return summary;
 }
 
-function summarizeExistingArtifacts({ rootDir = ROOT_DIR, platform = process.platform } = {}) {
-  const targetTriple = readS06TargetTriple(rootDir);
-  const artifacts = assertS06BuildArtifactsPresent({ rootDir, platform, targetTriple });
-  return { targetTriple: "detected", releaseExecutable: "present", releaseSidecar: "present", packageCount: artifacts.packages.length };
+export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = ROOT_DIR, platform = process.platform, env = process.env, keepTemp = false } = {}, context = createM005S04PublicScanContext({ rootDir })) {
+  assert(artifactProof?.releaseExecutable, "M005/S04 packaged harness setup requires a release executable proof.", { phase: "runtime.harness", markerClass: "missing_release_executable" });
+  const applicationPath = join(rootDir, artifactProof.releaseExecutable);
+  let smokeContext = null;
+  let runtime = null;
+  let driverProcess = null;
+  let driver = null;
+  let setupProof = null;
+  let setupCompleted = false;
+  let runningObserved = false;
+
+  try {
+    smokeContext = runStep("smoke-root", () => createM005S04SmokeRunContext({ rootDir, baseEnv: env }), context);
+    const runtimeContext = createM005S04PublicScanContext({ rootDir, tempRoot: smokeContext.smokeRoot });
+    runtime = { rootDir, smokeContext, profileStore: null };
+    driverProcess = await runStepAsync("webdriver.driver-start", async () => {
+      const started = await startS06TauriDriverProcess({ rootDir, smokeContext, platform, env });
+      return { value: started.value ?? started, log: { tauriDriver: "started", driverPort: "allocated", processOutput: "suppressed" } };
+    }, runtimeContext);
+    driver = await runStepAsync("webdriver.session-start", async () => {
+      const started = await createS06TauriWebDriverSession({ applicationPath, applicationRelativePath: artifactProof.releaseExecutable, driverProcess, rootDir, smokeContext });
+      return { value: started.value ?? started, log: { session: "created", browserName: "wry", application: "release-executable" } };
+    }, runtimeContext);
+    const uiProfile = await runStepAsync("ui.source-profile-create", async () => createM005S04SourceProfileViaUi(driver, runtime), runtimeContext);
+    const profileStore = runStep("profile-store.discover", () => discoverM005S04SourceProfile({ rootDir, smokeContext }), runtimeContext);
+    runtime.profileStore = profileStore;
+    const cookieDomain = "m005-s04-source.invalid";
+    const cookieName = "m005_s04_source";
+    const cookieValue = "m005-s04-source-cookie-value";
+    const secondCookieName = "m005_s04_source_second";
+    const secondCookieValue = "m005-s04-source-cookie-value-two";
+    const fixtureContext = createM005S04PublicScanContext({
+      rootDir,
+      tempRoot: smokeContext.smokeRoot,
+      appDataRoot: profileStore.appDataRoot,
+      userDataRoot: profileStore.userDataRoot,
+      cookieDomains: [cookieDomain, `.${cookieDomain}`],
+      cookieNames: [cookieName, secondCookieName],
+      cookieValues: [cookieValue, secondCookieValue],
+    });
+    const cookieFixture = runStep("fixture.cookie-db", () => createM005S04CookieDbFixture({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, cookieDomain, cookieName, cookieValue, secondCookieName, secondCookieValue }, fixtureContext), fixtureContext);
+    const cookieRows = runStep("fixture.cookie-db-inspect", () => inspectM005S04CookieDbRows({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, expectedRows: cookieFixture.cookies }, fixtureContext), fixtureContext);
+    assert(cookieRows.expectedRowsPresent, "M005/S04 cookie DB fixture rows were not readable after seeding.", { phase: "cookie-db", markerClass: "cookie_rows_missing", missingExpectedCount: cookieRows.missingExpectedCount });
+    const importFixtures = runStep("fixture.cookie-import-files", () => writeM005S04CookieImportFixtures({ smokeRoot: smokeContext.smokeRoot }, fixtureContext), fixtureContext);
+    const selectedPackagePath = join(smokeContext.smokeRoot, "fixtures", "selected-package-output.tpkg");
+    const payloadFixtures = runStep("fixture.payload-files", () => writeM005S04PayloadFixtures({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, selectedPackagePath }, fixtureContext), fixtureContext);
+    setupCompleted = true;
+    setupProof = {
+      harness: "ready",
+      sourceProfile: { createdVia: "visible-ui", cardObserved: Boolean(uiProfile.cardText) },
+      profileStore: { discovered: true, privateProfileId: "derived", storage: "safe-relative-store-paths" },
+      fixtures: {
+        cookieDbRows: cookieRows.count,
+        importFixtureFormats: importFixtures.cookies ? 2 : 2,
+        safePayloadFiles: payloadFixtures.preferencesPath ? 2 : 2,
+        volatileRuntimeFiles: 3,
+      },
+      portabilityLoop: "pending-next-task",
+    };
+    assertM005S04PublicEvidenceRedacted(setupProof, fixtureContext);
+    return setupProof;
+  } finally {
+    if (runtime || driver || driverProcess) {
+      const cleanupContext = createM005S04PublicScanContext({ rootDir, tempRoot: smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot });
+      const cleanup = await runStepAsync("cleanup.packaged-harness", async () => cleanupM005S04PackagedHarness({ driver, driverProcess, runtime, runningObserved, keepTemp, passed: setupCompleted }, cleanupContext), cleanupContext);
+      if (setupProof) setupProof.cleanup = cleanup;
+    }
+  }
 }
 
 async function runFullOrUiSkeleton(args, { rootDir = ROOT_DIR, platform = process.platform, env = process.env } = {}) {
@@ -628,11 +1221,11 @@ async function runFullOrUiSkeleton(args, { rootDir = ROOT_DIR, platform = proces
   const context = createM005S04PublicScanContext({ rootDir });
   const guardrails = runStep("guardrails.m005-s04", () => assertM005S04Guardrails({ rootDir, platform }), context);
   const webdriver = runStep("preflight.webdriver", () => assertM005S04WebDriverPreflight({ rootDir, platform, env, strict: true }), context);
+  const chromium = runStep("preflight.chromium", () => assertM005S04ChromiumExecutable({ rootDir, platform, env }), context);
   const nativeDialog = runStep("preflight.native-dialog", () => assertNativeDialogAutomationPreflight({ platform, env, strict: true }), context);
-  let build = {};
-  if (args.skipBuild) build = runStep("build.artifact-shape", () => summarizeExistingArtifacts({ rootDir, platform }), context);
-  else build = runBuildOnlyVerification({ rootDir, platform, env, reset: false, emitFinal: false }).build ?? {};
-  fail("M005/S04 packaged UI runtime loop is not implemented in this skeleton task yet.", { phase: "runtime.loop", markerClass: "runtime_loop_pending", mode: args.mode, preflight: { webdriver: webdriver.missingToolClasses.length === 0, nativeDialog: nativeDialog.status }, build: build.packageCount === undefined ? "not-run" : "available", outputSuppressed: true });
+  const artifactProof = prepareM005S04BuildArtifacts({ rootDir, platform, context, skipBuild: args.skipBuild });
+  const runtime = await runM005S04PackagedHarnessSetup({ artifactProof, rootDir, platform, env, keepTemp: args.keepTemp }, context);
+  fail("M005/S04 cookie/package UI portability loop is not implemented after the packaged harness setup yet.", { phase: "runtime.loop", markerClass: "runtime_loop_pending", mode: args.mode, preflight: { webdriver: webdriver.missingToolClasses.length === 0, chromium: true, nativeDialog: nativeDialog.status }, build: summarizeArtifactProof(artifactProof), runtime: { harness: runtime.harness, sourceProfile: runtime.sourceProfile?.createdVia, fixtures: runtime.fixtures, cleanup: runtime.cleanup?.tempRoot ?? "attempted" }, outputSuppressed: true });
 }
 
 function printHelp() {
