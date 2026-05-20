@@ -328,6 +328,64 @@ function cookieEnvelope(result: unknown, overrides: Record<string, unknown> = {}
   };
 }
 
+function packageWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "PACKAGE_PAYLOAD_RUNTIME_SKIPPED",
+    message: "Runtime-only files were skipped from the portable package.",
+    count: 2,
+    ...overrides,
+  };
+}
+
+function packageExportResult(overrides: Record<string, unknown> = {}) {
+  return {
+    packageVersion: 1,
+    format: "theprivator.profile-package",
+    operation: "export",
+    profileId: "11111111-1111-1111-1111-111111111111",
+    profileName: "Research",
+    cookieCount: 3,
+    skippedCookieCount: 0,
+    payloadFileCount: 12,
+    payloadByteCount: 4096,
+    warningCount: 0,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function packageImportResult(overrides: Record<string, unknown> = {}) {
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "22222222-2222-2222-2222-222222222222";
+  const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research copy";
+  return {
+    packageVersion: 1,
+    format: "theprivator.profile-package",
+    operation: "import",
+    profileId,
+    profileName,
+    nameConflictResolved: true,
+    profile: { id: profileId, name: profileName },
+    cookieCount: 3,
+    importedCookieCount: 3,
+    replacedCookieCount: 3,
+    payloadFileCount: 12,
+    payloadByteCount: 4096,
+    warningCount: 0,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function packageEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-package-1",
+    protocolVersion: "1.0.0",
+    durationMs: 11.25,
+    result,
+    ...overrides,
+  };
+}
+
 function identityPreset(label: string, presetId: string, overrides: Record<string, unknown> = {}) {
   return defaultIdentity({ label, presetId, ...overrides });
 }
@@ -3293,7 +3351,269 @@ describe("ThePrivator profile library UI", () => {
     expect(lookupPanel).not.toHaveTextContent(/example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|profile-store\/profiles\/user-data/i);
   });
 
-  it("does not add direct browser or Tauri filesystem bypasses for legacy import and cookie portability", () => {
+  it("exports a stopped profile package through the fixed wrapper with safe aggregate summary", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const exportPath = "/tmp/theprivator-selected/research.tpkg";
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce(exportPath);
+    mockInvoke.mockResolvedValueOnce(packageEnvelope(packageExportResult({
+      cookieCount: 0,
+      payloadFileCount: 0,
+      payloadByteCount: 0,
+      warningCount: 1,
+      warnings: [packageWarning({ code: "PACKAGE_PAYLOAD_RUNTIME_SKIPPED", count: 3 })],
+    })));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /profile package portability/i });
+
+    fireEvent.click(within(panel).getByRole("button", { name: /export theprivator package/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/ThePrivator package export completed/i));
+    expect(panel).toHaveTextContent(/Operation\s*Export/i);
+    expect(panel).toHaveTextContent(/Profile ID\s*11111111-1111-1111-1111-111111111111/i);
+    expect(panel).toHaveTextContent(/Profile name\s*Research/i);
+    expect(panel).toHaveTextContent(/Portable sessions\s*0/i);
+    expect(panel).toHaveTextContent(/Payload files\s*0/i);
+    expect(panel).toHaveTextContent(/Payload bytes\s*0/i);
+    expect(panel).toHaveTextContent(/Payload skipped\s*3/i);
+    expect(panel).toHaveTextContent(/Warnings\s*1/i);
+    expect(panel).toHaveTextContent(/PACKAGE_PAYLOAD_RUNTIME_SKIPPED/i);
+    expect(panel).toHaveTextContent(/Request\s*bridge-package-1/i);
+    expect(mockSave).toHaveBeenCalledWith({
+      title: "Export ThePrivator package",
+      filters: [{ name: "ThePrivator package", extensions: ["tpkg"] }],
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("profile_package_export", {
+      profileId: profile.id,
+      destinationPath: exportPath,
+    });
+    expect(panel).not.toHaveTextContent(/theprivator-selected|research\.tpkg|manifest\.json|payload\/|theprivator-cookies\.json|sessionid|example\.com|cookie-value-should-not-render|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|--remote-debugging-port|traceback/i);
+  });
+
+  it("imports a package globally, refreshes profiles, and preserves local selected profile UI", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const importedProfile = profileRecord({
+      id: "22222222-2222-2222-2222-222222222222",
+      name: "Research copy",
+      createdAt: "2026-05-04T18:30:00.000Z",
+      updatedAt: "2026-05-04T18:30:00.000Z",
+    });
+    const sourcePath = "/tmp/theprivator-selected/research.tpkg";
+    mockStartup([profile]);
+    mockOpen.mockResolvedValueOnce(sourcePath);
+    mockInvoke
+      .mockResolvedValueOnce(packageEnvelope(packageImportResult({
+        profileId: importedProfile.id,
+        profileName: importedProfile.name,
+        nameConflictResolved: true,
+        profile: { id: importedProfile.id, name: importedProfile.name },
+        cookieCount: 4,
+        payloadFileCount: 9,
+        payloadByteCount: 8192,
+        warningCount: 1,
+        warnings: [packageWarning({ code: "PACKAGE_PAYLOAD_SPECIAL_SKIPPED", count: 1 })],
+      })))
+      .mockResolvedValueOnce(profileEnvelope(profileResult([profile, importedProfile]), { requestId: "bridge-profiles-after-package" }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    fireEvent.click(within(card).getByRole("button", { name: /rename/i }));
+    expect(within(card).getByLabelText(/profile name/i)).toHaveValue("Research");
+
+    const importPanel = screen.getByRole("region", { name: /theprivator package import/i });
+    fireEvent.click(within(importPanel).getByRole("button", { name: /import theprivator package/i }));
+
+    await screen.findByRole("listitem", { name: /research copy/i });
+    expect(importPanel).toHaveTextContent(/ThePrivator package import completed/i);
+    expect(importPanel).toHaveTextContent(/Imported profile ID\s*22222222-2222-2222-2222-222222222222/i);
+    expect(importPanel).toHaveTextContent(/Imported profile name\s*Research copy/i);
+    expect(importPanel).toHaveTextContent(/Name conflict\s*resolved/i);
+    expect(importPanel).toHaveTextContent(/Portable sessions\s*4/i);
+    expect(importPanel).toHaveTextContent(/Payload files\s*9/i);
+    expect(importPanel).toHaveTextContent(/Payload bytes\s*8192/i);
+    expect(importPanel).toHaveTextContent(/Payload skipped\s*1/i);
+    expect(importPanel).toHaveTextContent(/PACKAGE_PAYLOAD_SPECIAL_SKIPPED/i);
+    expect(within(card).getByLabelText(/profile name/i)).toHaveValue("Research");
+    expect(mockOpen).toHaveBeenCalledWith({
+      title: "Import ThePrivator package",
+      multiple: false,
+      filters: [{ name: "ThePrivator package", extensions: ["tpkg"] }],
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("profile_package_import", { sourcePath });
+    expect(commandCalls("profiles_list")).toHaveLength(2);
+    expect(importPanel).not.toHaveTextContent(/theprivator-selected|research\.tpkg|manifest\.json|payload\/|theprivator-cookies\.json|sessionid|example\.com|cookie-value-should-not-render|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|--remote-debugging-port|traceback/i);
+  });
+
+  it("treats package dialog cancel as a no-op and rejects malformed dialog selections before invoke", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce(null);
+    mockSave.mockResolvedValueOnce([] as unknown as string);
+    mockOpen.mockResolvedValueOnce(null);
+    mockOpen.mockResolvedValueOnce("");
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const exportPanel = within(card).getByRole("region", { name: /profile package portability/i });
+    const importPanel = screen.getByRole("region", { name: /theprivator package import/i });
+
+    fireEvent.click(within(exportPanel).getByRole("button", { name: /export theprivator package/i }));
+    await waitFor(() => expect(exportPanel).toHaveTextContent(/No package portability operation has run/i));
+    expect(commandCalls("profile_package_export")).toHaveLength(0);
+
+    fireEvent.click(within(importPanel).getByRole("button", { name: /import theprivator package/i }));
+    await waitFor(() => expect(importPanel).toHaveTextContent(/No package portability operation has run/i));
+    expect(commandCalls("profile_package_import")).toHaveLength(0);
+
+    fireEvent.click(within(exportPanel).getByRole("button", { name: /export theprivator package/i }));
+    await waitFor(() => expect(exportPanel).toHaveTextContent(/PORTABILITY_DIALOG_SELECTION_INVALID/i));
+    expect(exportPanel).toHaveTextContent(/multiple file selections/i);
+    expect(commandCalls("profile_package_export")).toHaveLength(0);
+
+    fireEvent.click(within(importPanel).getByRole("button", { name: /import theprivator package/i }));
+    await waitFor(() => expect(importPanel).toHaveTextContent(/PORTABILITY_DIALOG_SELECTION_INVALID/i));
+    expect(importPanel).toHaveTextContent(/invalid file selection/i);
+    expect(commandCalls("profile_package_import")).toHaveLength(0);
+  });
+
+  it("disables package export while running, busy, unknown, or cookie portability action is active", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 9191 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /profile package portability/i });
+    expect(within(panel).getByRole("button", { name: /export theprivator package/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/stopped-profile only/i);
+    expect(commandCalls("profile_package_export")).toHaveLength(0);
+  });
+
+  it("fails package export closed if profile state changes after the save dialog returns", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const saveDialog = deferred<unknown>();
+    const pendingLaunch = deferred<unknown>();
+    mockInvoke.mockImplementation(((command: string, args?: { profileId?: string }) => {
+      if (command === "sidecar_health") {
+        return Promise.resolve(healthEnvelope());
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([profile])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      if (command === "chromium_launch" && args?.profileId === profile.id) {
+        return pendingLaunch.promise;
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+    mockSave.mockReturnValueOnce(saveDialog.promise as Promise<string | null>);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /profile package portability/i });
+    fireEvent.click(within(panel).getByRole("button", { name: /export theprivator package/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/Waiting for the native save dialog/i));
+    fireEvent.click(within(card).getByRole("button", { name: /launch chromium/i }));
+    await waitFor(() => expect(card).toHaveTextContent(/Launching/i));
+
+    await act(async () => {
+      saveDialog.resolve("/tmp/theprivator-selected/research.tpkg");
+      await saveDialog.promise;
+    });
+
+    await waitFor(() => expect(panel).toHaveTextContent(/PACKAGE_PORTABILITY_UI_BUSY/i));
+    expect(panel).toHaveTextContent(/Chromium is launching/i);
+    expect(commandCalls("profile_package_export")).toHaveLength(0);
+
+    await act(async () => {
+      pendingLaunch.resolve(chromiumEnvelope({ ...chromiumRunningProfile({ profileId: profile.id }), runningCount: 1 }));
+      await pendingLaunch.promise;
+    });
+  });
+
+  it("renders typed package errors and diagnostic lookup without unsafe context", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const detailRef = "sidecar-package-invalid-detail";
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce("/tmp/theprivator-selected/research.tpkg");
+    mockInvoke
+      .mockRejectedValueOnce({
+        ...profileError("PACKAGE_CHECKSUM_INVALID", "Package checksum validation failed.", detailRef),
+        unsafeContext: "manifest.json payload/Default/Cookies example.com sessionid cookie-value-should-not-render /tmp/theprivator-selected/research.tpkg proxy-user-should-not-leak proxy-pass-should-not-leak DevToolsActivePort traceback stack trace",
+      })
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: "PACKAGE_CHECKSUM_INVALID", method: "portability.profile_package.export" })],
+      }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /profile package portability/i });
+    fireEvent.click(within(panel).getByRole("button", { name: /export theprivator package/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/PACKAGE_CHECKSUM_INVALID/i));
+    expect(panel).toHaveTextContent(/Package checksum validation failed/i);
+    expect(panel).toHaveTextContent(/Sourcesidecar/i);
+    expect(panel).toHaveTextContent(/Recoverableyes/i);
+    expect(panel).toHaveTextContent(detailRef);
+    expect(panel).not.toHaveTextContent(/manifest\.json|payload\/Default\/Cookies|example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|traceback|stack trace/i);
+
+    fireEvent.click(within(panel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/PACKAGE_CHECKSUM_INVALID/i);
+    expect(lookupPanel).toHaveTextContent(/portability\.profile_package\.export/i);
+    expect(lookupPanel).toHaveTextContent(detailRef);
+    expect(lookupPanel).not.toHaveTextContent(/manifest\.json|payload\/Default\/Cookies|example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|traceback|stack trace/i);
+  });
+
+  it("surfaces package import refresh failures after success without dropping the safe import summary", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const detailRef = "sidecar-package-refresh-detail";
+    mockStartup([profile]);
+    mockOpen.mockResolvedValueOnce("/tmp/theprivator-selected/research.tpkg");
+    mockInvoke
+      .mockResolvedValueOnce(packageEnvelope(packageImportResult({
+        profileId: "22222222-2222-2222-2222-222222222222",
+        profileName: "Research copy",
+        profile: { id: "22222222-2222-2222-2222-222222222222", name: "Research copy" },
+        nameConflictResolved: true,
+      })))
+      .mockRejectedValueOnce(profileError("PROFILE_REFRESH_FAILED", "Profile refresh failed after package import.", detailRef))
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: "PROFILE_REFRESH_FAILED", method: "profiles.list" })],
+      }));
+
+    render(<App />);
+
+    await screen.findByRole("listitem", { name: /research/i });
+    const importPanel = screen.getByRole("region", { name: /theprivator package import/i });
+    fireEvent.click(within(importPanel).getByRole("button", { name: /import theprivator package/i }));
+
+    await waitFor(() => expect(importPanel).toHaveTextContent(/ThePrivator package import completed/i));
+    expect(importPanel).toHaveTextContent(/Imported profile name\s*Research copy/i);
+    expect(importPanel).toHaveTextContent(/Package imported, but profile refresh failed safely/i);
+    expect(importPanel).toHaveTextContent(/PROFILE_REFRESH_FAILED/i);
+    expect(importPanel).toHaveTextContent(detailRef);
+    expect(screen.queryByRole("listitem", { name: /research copy/i })).not.toBeInTheDocument();
+
+    fireEvent.click(within(importPanel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/PROFILE_REFRESH_FAILED/i);
+    expect(lookupPanel).toHaveTextContent(/profiles\.list/i);
+  });
+
+  it("does not add direct browser or Tauri filesystem bypasses for legacy import, cookie portability, and package portability", () => {
     const source = appSource();
 
     expect(source).toContain("scanLegacyProfiles");
@@ -3312,6 +3632,8 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("stopAutomationApi");
     expect(source).toContain("exportProfileCookies");
     expect(source).toContain("replaceProfileCookies");
+    expect(source).toContain("exportProfilePackage");
+    expect(source).toContain("importProfilePackage");
     expect(source).toContain("@tauri-apps/plugin-dialog");
     expect(source).not.toMatch(/value=\"pac\"|value='pac'|value=\"system\"|value='system'|value=\"directFallback\"|value='directFallback'/);
     expect(source).not.toMatch(/PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/);
@@ -3319,6 +3641,7 @@ describe("ThePrivator profile library UI", () => {
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
     expect(source).not.toMatch(/type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/);
+    expect(source).not.toMatch(/manifest\.json|package member|raw manifest|debug endpoint|launch args|raw diagnostics|stack trace/i);
     expect(source).not.toMatch(/Authorization|Bearer|guaranteed undetectability|universal green|universal pass/i);
   });
 

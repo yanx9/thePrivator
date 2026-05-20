@@ -34,11 +34,13 @@ import {
   createProfile,
   deleteProfile,
   exportProfileCookies,
+  exportProfilePackage,
   getAutomationApiStatus,
   getChromiumStatus,
   getIdentityAuditPlan,
   getSidecarHealth,
   importLegacyProfiles,
+  importProfilePackage,
   launchChromiumProfile,
   listIdentityPresets,
   listProfiles,
@@ -68,6 +70,9 @@ import type {
   CookieReplaceSnapshot,
   DiagnosticEntry,
   DiagnosticLookupResult,
+  ProfilePackageExportSnapshot,
+  ProfilePackageImportSnapshot,
+  ProfilePackageWarning,
   LegacyImportOutcome,
   LegacyImportSelection,
   LegacyImportSnapshot,
@@ -326,6 +331,52 @@ type CookiePortabilityRuntimeGuard = {
   disabledReason: string | null;
 };
 
+type PackagePortabilityPhase =
+  | "idle"
+  | "choosing-file"
+  | "exporting"
+  | "importing"
+  | "refreshing-profiles"
+  | "success"
+  | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+type PackagePortabilityAction = "export" | "import";
+
+type PackagePortabilityError = {
+  profileId: string | null;
+  action: PackagePortabilityAction;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+
+type PackagePortabilitySuccess = {
+  profileId: string | null;
+  action: PackagePortabilityAction;
+  snapshot: ProfilePackageExportSnapshot | ProfilePackageImportSnapshot;
+  occurredAt: string;
+};
+
+type PackageImportRefreshState = {
+  error: SidecarClientError;
+  occurredAt: string;
+} | null;
+
+type PackagePortabilityPanelState = {
+  phase: PackagePortabilityPhase;
+  currentAction: PackagePortabilityAction | null;
+  lastSuccess: PackagePortabilitySuccess | null;
+  warnings: ProfilePackageWarning[];
+  error: PackagePortabilityError | null;
+  refreshError?: PackageImportRefreshState;
+};
+
+type PackagePortabilityStateByProfile = Record<string, PackagePortabilityPanelState>;
+
+type PackagePortabilityRuntimeGuard = {
+  isKnown: boolean;
+  disabledReason: string | null;
+};
+
 const INITIAL_PROXY_CHECK_PANEL_STATE: ProxyCheckPanelState = {
   phase: "idle",
   currentAction: null,
@@ -340,6 +391,15 @@ const INITIAL_COOKIE_PORTABILITY_PANEL_STATE: CookiePortabilityPanelState = {
   lastSuccess: null,
   warnings: [],
   error: null,
+};
+
+const INITIAL_PACKAGE_PORTABILITY_PANEL_STATE: PackagePortabilityPanelState = {
+  phase: "idle",
+  currentAction: null,
+  lastSuccess: null,
+  warnings: [],
+  error: null,
+  refreshError: null,
 };
 
 type LegacySelectionState = Record<string, boolean>;
@@ -557,6 +617,22 @@ const COOKIE_EXPORT_FORMAT_LABELS: Record<CookieExportFormat, string> = {
   "theprivator-json": "ThePrivator JSON",
 };
 
+const PACKAGE_PORTABILITY_PHASE_LABELS: Record<PackagePortabilityPhase, string> = {
+  idle: "No package portability operation has run",
+  "choosing-file": "Waiting for native package dialog selection",
+  exporting: "Exporting ThePrivator package through the sidecar",
+  importing: "Importing ThePrivator package through the sidecar",
+  "refreshing-profiles": "Refreshing profile list after package import",
+  success: "Package portability operation completed",
+  "recoverable-error": "Recoverable package portability error",
+  "bridge-error": "Package portability bridge error",
+};
+
+const PACKAGE_PORTABILITY_ACTION_LABELS: Record<PackagePortabilityAction, string> = {
+  export: "Export ThePrivator package",
+  import: "Import ThePrivator package",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -620,6 +696,8 @@ export function App() {
   const [proxyConfigSuccess, setProxyConfigSuccess] = useState<ProxyConfigSuccess | null>(null);
   const [proxyCheckByProfile, setProxyCheckByProfile] = useState<ProxyCheckStateByProfile>({});
   const [cookiePortabilityByProfile, setCookiePortabilityByProfile] = useState<CookiePortabilityStateByProfile>({});
+  const [packagePortabilityByProfile, setPackagePortabilityByProfile] = useState<PackagePortabilityStateByProfile>({});
+  const [packageImportState, setPackageImportState] = useState<PackagePortabilityPanelState>(INITIAL_PACKAGE_PORTABILITY_PANEL_STATE);
 
   const healthInFlightRef = useRef(false);
   const automationApiActionInFlightRef = useRef(false);
@@ -634,6 +712,9 @@ export function App() {
   const proxyCheckRequestByProfileRef = useRef<Record<string, number>>({});
   const cookiePortabilityRequestIdRef = useRef(0);
   const cookiePortabilityRequestByProfileRef = useRef<Record<string, number>>({});
+  const packagePortabilityRequestIdRef = useRef(0);
+  const packageExportRequestByProfileRef = useRef<Record<string, number>>({});
+  const packageImportRequestIdRef = useRef(0);
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
   const profileIdsRef = useRef<Set<string>>(new Set());
@@ -651,6 +732,11 @@ export function App() {
         delete cookiePortabilityRequestByProfileRef.current[profileId];
       }
     });
+    Object.keys(packageExportRequestByProfileRef.current).forEach((profileId) => {
+      if (!nextProfileIds.has(profileId)) {
+        delete packageExportRequestByProfileRef.current[profileId];
+      }
+    });
     setProxyCheckByProfile((current) => {
       let changed = false;
       const next: ProxyCheckStateByProfile = {};
@@ -666,6 +752,18 @@ export function App() {
     setCookiePortabilityByProfile((current) => {
       let changed = false;
       const next: CookiePortabilityStateByProfile = {};
+      Object.entries(current).forEach(([profileId, state]) => {
+        if (nextProfileIds.has(profileId)) {
+          next[profileId] = state;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+    setPackagePortabilityByProfile((current) => {
+      let changed = false;
+      const next: PackagePortabilityStateByProfile = {};
       Object.entries(current).forEach(([profileId, state]) => {
         if (nextProfileIds.has(profileId)) {
           next[profileId] = state;
@@ -1726,6 +1824,336 @@ export function App() {
     [finishCookiePortabilityCancel, getCookiePortabilityDisabledReason, recordCookiePortabilityError, startCookiePortabilityAction],
   );
 
+  const isPackageImportRunning = isPackagePortabilityOperationRunning(packageImportState);
+
+  const getPackageExportDisabledReason = useCallback(
+    (profile: ProfileRecord, options: { ignoreActiveOperation?: boolean } = {}): string | null => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      const currentPackageState = packagePortabilityByProfile[profile.id];
+      const currentCookieState = cookiePortabilityByProfile[profile.id];
+
+      if (chromiumPhase !== "ready") {
+        return `Chromium lifecycle status is ${chromiumPhase}; package export fails closed until status refresh confirms the profile is stopped.`;
+      }
+      if (isProfileLoading || mutationPhase !== "idle") {
+        return "Profile loading or mutation is in progress; wait before exporting a package.";
+      }
+      if (chromiumRuntimeByProfileRef.current[profile.id]) {
+        return "Profile package export is stopped-profile only. Stop Chromium before exporting a .tpkg package.";
+      }
+      if (lifecycleMutation !== null) {
+        return `Chromium is ${lifecycleMutation.phase}; package export fails closed until the lifecycle action settles.`;
+      }
+      if (isCookiePortabilityOperationRunning(currentCookieState)) {
+        return "A cookie portability operation is already running for this profile.";
+      }
+      if (!options.ignoreActiveOperation && isPackagePortabilityOperationRunning(currentPackageState)) {
+        return "A package portability operation is already running for this profile.";
+      }
+
+      return null;
+    },
+    [chromiumPhase, cookiePortabilityByProfile, isProfileLoading, mutationPhase, packagePortabilityByProfile],
+  );
+
+  const getPackageImportDisabledReason = useCallback((): string | null => {
+    if (isProfileLoading || mutationPhase !== "idle") {
+      return "Profile loading or mutation is in progress; wait before importing a package.";
+    }
+    if (chromiumPhase !== "ready") {
+      return `Chromium lifecycle status is ${chromiumPhase}; package import waits for known runtime state before refreshing profiles.`;
+    }
+    if (chromiumMutationRef.current !== null) {
+      return `Chromium is ${chromiumMutationRef.current.phase}; package import waits until the lifecycle action settles.`;
+    }
+    if (isPackageImportRunning) {
+      return "A package import operation is already running.";
+    }
+
+    return null;
+  }, [chromiumPhase, isPackageImportRunning, isProfileLoading, mutationPhase]);
+
+  const recordPackagePortabilityError = useCallback((profileId: string | null, action: PackagePortabilityAction, error: SidecarClientError) => {
+    const nextError: PackagePortabilityError = {
+      profileId,
+      action,
+      error,
+      occurredAt: new Date().toISOString(),
+    };
+
+    if (profileId) {
+      setPackagePortabilityByProfile((current) => {
+        const previous = current[profileId] ?? INITIAL_PACKAGE_PORTABILITY_PANEL_STATE;
+        return {
+          ...current,
+          [profileId]: {
+            ...previous,
+            phase: error.phase,
+            currentAction: null,
+            error: nextError,
+          },
+        };
+      });
+      return;
+    }
+
+    setPackageImportState((current) => ({
+      ...current,
+      phase: error.phase,
+      currentAction: null,
+      error: nextError,
+    }));
+  }, []);
+
+  const finishPackageExportCancel = useCallback((profileId: string) => {
+    setPackagePortabilityByProfile((current) => {
+      const previous = current[profileId] ?? INITIAL_PACKAGE_PORTABILITY_PANEL_STATE;
+      return {
+        ...current,
+        [profileId]: {
+          ...previous,
+          phase: previous.lastSuccess ? "success" : "idle",
+          currentAction: null,
+          error: null,
+        },
+      };
+    });
+  }, []);
+
+  const finishPackageImportCancel = useCallback(() => {
+    setPackageImportState((current) => ({
+      ...current,
+      phase: current.lastSuccess ? "success" : "idle",
+      currentAction: null,
+      error: null,
+    }));
+  }, []);
+
+  const startPackageExportAction = useCallback((profileId: string) => {
+    setPackagePortabilityByProfile((current) => {
+      const previous = current[profileId] ?? INITIAL_PACKAGE_PORTABILITY_PANEL_STATE;
+      return {
+        ...current,
+        [profileId]: {
+          ...previous,
+          phase: "choosing-file",
+          currentAction: "export",
+          error: null,
+          refreshError: null,
+        },
+      };
+    });
+  }, []);
+
+  const handleExportProfilePackage = useCallback(
+    async (profile: ProfileRecord) => {
+      const action: PackagePortabilityAction = "export";
+      const disabledReason = getPackageExportDisabledReason(profile);
+      if (disabledReason) {
+        recordPackagePortabilityError(profile.id, action, makePackagePortabilityUiError("PACKAGE_PORTABILITY_UI_BUSY", disabledReason));
+        return;
+      }
+
+      const requestId = packagePortabilityRequestIdRef.current + 1;
+      packagePortabilityRequestIdRef.current = requestId;
+      packageExportRequestByProfileRef.current[profile.id] = requestId;
+      startPackageExportAction(profile.id);
+
+      try {
+        const destinationPath = await save({
+          title: "Export ThePrivator package",
+          filters: [{ name: "ThePrivator package", extensions: ["tpkg"] }],
+        });
+
+        if (packageExportRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        const safeDestinationPath = parseDialogPathSelection(destinationPath, "save");
+        if (safeDestinationPath === null) {
+          finishPackageExportCancel(profile.id);
+          return;
+        }
+
+        const secondDisabledReason = getPackageExportDisabledReason(profile, { ignoreActiveOperation: true });
+        if (secondDisabledReason) {
+          recordPackagePortabilityError(profile.id, action, makePackagePortabilityUiError("PACKAGE_PORTABILITY_UI_BUSY", secondDisabledReason));
+          return;
+        }
+
+        setPackagePortabilityByProfile((current) => {
+          const previous = current[profile.id] ?? INITIAL_PACKAGE_PORTABILITY_PANEL_STATE;
+          return {
+            ...current,
+            [profile.id]: {
+              ...previous,
+              phase: "exporting",
+              currentAction: action,
+              error: null,
+              refreshError: null,
+            },
+          };
+        });
+
+        const snapshot = await exportProfilePackage(profile.id, safeDestinationPath);
+        if (packageExportRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        setPackagePortabilityByProfile((current) => ({
+          ...current,
+          [profile.id]: {
+            phase: "success",
+            currentAction: null,
+            lastSuccess: {
+              profileId: profile.id,
+              action,
+              snapshot,
+              occurredAt: new Date().toISOString(),
+            },
+            warnings: snapshot.warnings,
+            error: null,
+            refreshError: null,
+          },
+        }));
+      } catch (error) {
+        if (packageExportRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+        const clientError = error instanceof DialogSelectionError
+          ? error.toClientError()
+          : isSafeUiError(error)
+            ? error
+            : makePackagePortabilityDialogError();
+        recordPackagePortabilityError(profile.id, action, clientError);
+      }
+    },
+    [finishPackageExportCancel, getPackageExportDisabledReason, recordPackagePortabilityError, startPackageExportAction],
+  );
+
+  const handleImportProfilePackage = useCallback(async () => {
+    const action: PackagePortabilityAction = "import";
+    const disabledReason = getPackageImportDisabledReason();
+    if (disabledReason) {
+      recordPackagePortabilityError(null, action, makePackagePortabilityUiError("PACKAGE_PORTABILITY_UI_BUSY", disabledReason));
+      return;
+    }
+
+    const requestId = packageImportRequestIdRef.current + 1;
+    packageImportRequestIdRef.current = requestId;
+    setPackageImportState((current) => ({
+      ...current,
+      phase: "choosing-file",
+      currentAction: action,
+      error: null,
+      refreshError: null,
+    }));
+
+    try {
+      const sourcePath = await open({
+        title: "Import ThePrivator package",
+        multiple: false,
+        filters: [{ name: "ThePrivator package", extensions: ["tpkg"] }],
+      });
+
+      if (packageImportRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const safeSourcePath = parseDialogPathSelection(sourcePath, "open");
+      if (safeSourcePath === null) {
+        finishPackageImportCancel();
+        return;
+      }
+
+      const secondDisabledReason = getPackageImportDisabledReason();
+      if (secondDisabledReason) {
+        recordPackagePortabilityError(null, action, makePackagePortabilityUiError("PACKAGE_PORTABILITY_UI_BUSY", secondDisabledReason));
+        return;
+      }
+
+      setPackageImportState((current) => ({
+        ...current,
+        phase: "importing",
+        currentAction: action,
+        error: null,
+        refreshError: null,
+      }));
+
+      const snapshot = await importProfilePackage(safeSourcePath);
+      if (packageImportRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const success: PackagePortabilitySuccess = {
+        profileId: snapshot.importedProfileId,
+        action,
+        snapshot,
+        occurredAt: new Date().toISOString(),
+      };
+
+      setPackageImportState({
+        phase: "refreshing-profiles",
+        currentAction: action,
+        lastSuccess: success,
+        warnings: snapshot.warnings,
+        error: null,
+        refreshError: null,
+      });
+
+      profileLoadInFlightRef.current = true;
+      setIsProfileLoading(true);
+      setProfileError(null);
+      setProfilePhase((current) => (current === "ready" ? "ready" : "loading"));
+
+      try {
+        const refreshedProfiles = await listProfiles();
+        if (packageImportRequestIdRef.current !== requestId) {
+          return;
+        }
+        applyProfileSnapshot(refreshedProfiles);
+        setPackageImportState({
+          phase: "success",
+          currentAction: null,
+          lastSuccess: success,
+          warnings: snapshot.warnings,
+          error: null,
+          refreshError: null,
+        });
+      } catch (refreshError) {
+        if (packageImportRequestIdRef.current !== requestId) {
+          return;
+        }
+        const clientError = refreshError as SidecarClientError;
+        setProfilePhase(clientError.phase);
+        setProfileError({ context: "refresh", error: clientError });
+        setPackageImportState({
+          phase: "success",
+          currentAction: null,
+          lastSuccess: success,
+          warnings: snapshot.warnings,
+          error: null,
+          refreshError: { error: clientError, occurredAt: new Date().toISOString() },
+        });
+      } finally {
+        if (packageImportRequestIdRef.current === requestId) {
+          profileLoadInFlightRef.current = false;
+          setIsProfileLoading(false);
+        }
+      }
+    } catch (error) {
+      if (packageImportRequestIdRef.current !== requestId) {
+        return;
+      }
+      const clientError = error instanceof DialogSelectionError
+        ? error.toClientError()
+        : isSafeUiError(error)
+          ? error
+          : makePackagePortabilityDialogError();
+      recordPackagePortabilityError(null, action, clientError);
+    }
+  }, [applyProfileSnapshot, finishPackageImportCancel, getPackageImportDisabledReason, recordPackagePortabilityError]);
+
   const closeProxyConfig = useCallback(() => {
     proxyConfigRequestIdRef.current += 1;
     setProxyPanelProfileId(null);
@@ -2417,6 +2845,7 @@ export function App() {
     [legacyImportSnapshot],
   );
   const latestReconciliation = useMemo(() => getLatestStoppedState(Object.values(chromiumReconciledByProfile)), [chromiumReconciledByProfile]);
+  const packageImportDisabledReason = getPackageImportDisabledReason();
 
   return (
     <main className="shell profile-shell" aria-labelledby="shell-heading">
@@ -2473,6 +2902,14 @@ export function App() {
             mutationPhase={mutationPhase}
             profileCount={profileCount}
             onDiagnosticLookup={runDiagnosticLookup}
+          />
+
+          <ProfilePackageImportPanel
+            diagnosticLookupState={diagnosticLookupState}
+            disabledReason={packageImportDisabledReason}
+            state={packageImportState}
+            onDiagnosticLookup={runDiagnosticLookup}
+            onImport={handleImportProfilePackage}
           />
 
           <LegacyImportPanel
@@ -2546,9 +2983,14 @@ export function App() {
                   }}
                   proxyCheckState={proxyCheckByProfile[profile.id] ?? null}
                   cookiePortabilityState={cookiePortabilityByProfile[profile.id] ?? null}
+                  packagePortabilityState={packagePortabilityByProfile[profile.id] ?? null}
                   cookiePortabilityRuntimeGuard={{
                     isKnown: chromiumPhase === "ready",
                     disabledReason: chromiumPhase === "ready" ? null : `Chromium lifecycle status is ${chromiumPhase}; cookie portability fails closed until status refresh confirms the profile is stopped.`,
+                  }}
+                  packagePortabilityRuntimeGuard={{
+                    isKnown: chromiumPhase === "ready",
+                    disabledReason: chromiumPhase === "ready" ? null : `Chromium lifecycle status is ${chromiumPhase}; package export fails closed until status refresh confirms the profile is stopped.`,
                   }}
                   proxyCheckRuntimeGuard={{
                     isKnown: chromiumPhase === "ready",
@@ -2568,6 +3010,7 @@ export function App() {
                   onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
                   onExportNetscapeCookies={handleExportNetscapeCookies}
+                  onExportProfilePackage={handleExportProfilePackage}
                   onExportThePrivatorCookies={handleExportThePrivatorCookies}
                   onIdentityApplyPreset={handleApplyIdentityPreset}
                   onIdentityAuditClose={closeIdentityAuditPanel}
@@ -2646,6 +3089,75 @@ export function App() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function ProfilePackageImportPanel({
+  diagnosticLookupState,
+  disabledReason,
+  state,
+  onDiagnosticLookup,
+  onImport,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  disabledReason: string | null;
+  state: PackagePortabilityPanelState;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onImport: () => void;
+}) {
+  const isRunningOperation = isPackagePortabilityOperationRunning(state);
+  const currentActionLabel = state.currentAction ? PACKAGE_PORTABILITY_ACTION_LABELS[state.currentAction] : "No active package import action";
+  const hint = disabledReason ?? "Available because profile and lifecycle state are idle. Native open dialog cancel is a no-op.";
+
+  return (
+    <section className="package-import-panel" aria-label="ThePrivator package import">
+      <div className="package-import-panel__header">
+        <div>
+          <p className="signal-label">Profile package import</p>
+          <h4>Import a ThePrivator .tpkg package</h4>
+          <p>
+            Choose a package with the native dialog. The UI forwards the opaque selection only to the fixed package wrapper,
+            then refreshes profiles so the imported stopped copy appears in the durable list.
+          </p>
+        </div>
+        <span className="mini-phase" aria-label={`Package import phase: ${state.phase}`}>
+          {state.phase}
+        </span>
+      </div>
+
+      <dl className="metric-list metric-list--inline package-portability-observability" aria-label="ThePrivator package import observability">
+        <Metric label="Package phase" value={`${state.phase} · ${PACKAGE_PORTABILITY_PHASE_LABELS[state.phase]}`} />
+        <Metric label="Current action" value={currentActionLabel} />
+        <Metric label="Last imported profile" value={getPackageProfileSummary(state.lastSuccess)} />
+        <Metric label="Warnings" value={state.warnings.length} />
+        <Metric label="Request" value={state.lastSuccess?.snapshot.requestId} />
+        <Metric label="Bridge duration" value={state.lastSuccess ? formatDuration(state.lastSuccess.snapshot.bridgeDurationMs) : undefined} />
+        <Metric label="detailRef" value={state.error?.error.detailRef ?? state.refreshError?.error.detailRef} />
+      </dl>
+
+      {isRunningOperation ? (
+        <div className="package-portability-status" role="status" aria-live="polite" aria-atomic="true">
+          {state.phase === "choosing-file"
+            ? "Waiting for the native open dialog to return one package selection before any sidecar mutation starts."
+            : state.phase === "refreshing-profiles"
+              ? "Package imported; refreshing the durable profile list."
+              : "Importing the package through the fixed sidecar command…"}
+        </div>
+      ) : null}
+
+      <div className="package-portability-actions">
+        <button type="button" disabled={disabledReason !== null || isRunningOperation} aria-describedby="package-import-action-hint" onClick={onImport}>
+          {state.currentAction === "import" ? "Importing package…" : "Import ThePrivator package"}
+        </button>
+      </div>
+      <p id="package-import-action-hint" className="package-portability-hint" role="status" aria-live="polite">
+        {hint}
+      </p>
+
+      {state.lastSuccess ? <ProfilePackageSuccessFeedback state={state.lastSuccess} /> : null}
+      {state.refreshError ? <ProfilePackageRefreshErrorFeedback state={state.refreshError} diagnosticLookupState={diagnosticLookupState} onDiagnosticLookup={onDiagnosticLookup} /> : null}
+      {state.error ? <ProfilePackageErrorFeedback diagnosticLookupState={diagnosticLookupState} state={state.error} onDiagnosticLookup={onDiagnosticLookup} /> : null}
+    </section>
   );
 }
 
@@ -3229,6 +3741,8 @@ function ProfileCard({
   proxyCheckState,
   cookiePortabilityRuntimeGuard,
   cookiePortabilityState,
+  packagePortabilityRuntimeGuard,
+  packagePortabilityState,
   isLifecycleActionBusy,
   isProfileBusy,
   lifecycleError,
@@ -3240,6 +3754,7 @@ function ProfileCard({
   onDiagnosticLookup,
   onEditNameChange,
   onExportNetscapeCookies,
+  onExportProfilePackage,
   onExportThePrivatorCookies,
   onIdentityApplyPreset,
   onIdentityAuditClose,
@@ -3284,6 +3799,8 @@ function ProfileCard({
   proxyCheckState: ProxyCheckPanelState | null;
   cookiePortabilityRuntimeGuard: CookiePortabilityRuntimeGuard;
   cookiePortabilityState: CookiePortabilityPanelState | null;
+  packagePortabilityRuntimeGuard: PackagePortabilityRuntimeGuard;
+  packagePortabilityState: PackagePortabilityPanelState | null;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
   lifecycleError: ChromiumLifecycleError | null;
@@ -3295,6 +3812,7 @@ function ProfileCard({
   onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
   onExportNetscapeCookies: (profile: ProfileRecord) => void;
+  onExportProfilePackage: (profile: ProfileRecord) => void;
   onExportThePrivatorCookies: (profile: ProfileRecord) => void;
   onIdentityApplyPreset: (profile: ProfileRecord, presetId: string) => void;
   onIdentityAuditClose: () => void;
@@ -3353,6 +3871,9 @@ function ProfileCard({
     : null;
   const cookieRuntimeProtectionReason = isRuntimeProtected
     ? `Cookie portability is stopped-profile only while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium and wait for lifecycle state to settle before exporting or replacing cookies.`
+    : null;
+  const packageRuntimeProtectionReason = isRuntimeProtected
+    ? `Profile package export is stopped-profile only while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium and wait for lifecycle state to settle before exporting a .tpkg package.`
     : null;
 
   const retryLifecycle = () => {
@@ -3446,6 +3967,19 @@ function ProfileCard({
         state={proxyCheckState}
         onDiagnosticLookup={onDiagnosticLookup}
         onRunProof={onProxyProofCheck}
+      />
+
+      <ProfilePackageExportPanel
+        cookiePortabilityState={cookiePortabilityState}
+        diagnosticLookupState={diagnosticLookupState}
+        isLifecycleActionBusy={isLifecycleActionBusy}
+        isProfileBusy={isProfileBusy}
+        profile={profile}
+        runtimeGuard={packagePortabilityRuntimeGuard}
+        runtimeProtectionReason={packageRuntimeProtectionReason}
+        state={packagePortabilityState}
+        onDiagnosticLookup={onDiagnosticLookup}
+        onExport={onExportProfilePackage}
       />
 
       <CookiePortabilityPanel
@@ -4202,6 +4736,196 @@ function SavedProxyProofPanel({
   );
 }
 
+function ProfilePackageExportPanel({
+  cookiePortabilityState,
+  diagnosticLookupState,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runtimeGuard,
+  runtimeProtectionReason,
+  state,
+  onDiagnosticLookup,
+  onExport,
+}: {
+  cookiePortabilityState: CookiePortabilityPanelState | null;
+  diagnosticLookupState: DiagnosticLookupState;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runtimeGuard: PackagePortabilityRuntimeGuard;
+  runtimeProtectionReason: string | null;
+  state: PackagePortabilityPanelState | null;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onExport: (profile: ProfileRecord) => void;
+}) {
+  const currentState = state ?? INITIAL_PACKAGE_PORTABILITY_PANEL_STATE;
+  const isRunningOperation = isPackagePortabilityOperationRunning(currentState);
+  const isCookieRunning = isCookiePortabilityOperationRunning(cookiePortabilityState);
+  const headingId = `package-portability-heading-${profile.id}`;
+  const actionHintId = `package-portability-action-hint-${profile.id}`;
+  const disabledReason = runtimeProtectionReason
+    ?? (!runtimeGuard.isKnown
+      ? runtimeGuard.disabledReason ?? "Chromium runtime status is unknown; package export fails closed until status refresh confirms the profile is stopped."
+      : isProfileBusy
+        ? "Profile loading or mutation is in progress; wait before exporting a package."
+        : isLifecycleActionBusy
+          ? "A Chromium lifecycle action is in progress; package export fails closed until runtime state settles."
+          : isCookieRunning
+            ? "A cookie portability operation is already running for this profile."
+            : isRunningOperation
+              ? "A package portability operation is already running for this profile."
+              : null);
+  const currentActionLabel = currentState.currentAction ? PACKAGE_PORTABILITY_ACTION_LABELS[currentState.currentAction] : "No active package portability action";
+
+  return (
+    <section className="package-portability-panel" aria-labelledby={headingId}>
+      <div className="package-portability-panel__header">
+        <div>
+          <p className="signal-label">Profile package portability</p>
+          <h4 id={headingId}>Profile package portability for stopped profiles</h4>
+          <p>
+            Use the native save dialog to export a portable ThePrivator package. The UI never reads files and never renders
+            selected locations, archive internals, cookie material, credentials, browser control metadata, process launch metadata, or unbounded failure details.
+          </p>
+        </div>
+        <span className="mini-phase" aria-label={`Package portability phase: ${currentState.phase}`}>
+          {currentState.phase}
+        </span>
+      </div>
+
+      <dl className="metric-list metric-list--inline package-portability-observability" aria-label={`${profile.name} package portability observability`}>
+        <Metric label="Package phase" value={`${currentState.phase} · ${PACKAGE_PORTABILITY_PHASE_LABELS[currentState.phase]}`} />
+        <Metric label="Current action" value={currentActionLabel} />
+        <Metric label="Last operation" value={currentState.lastSuccess ? PACKAGE_PORTABILITY_ACTION_LABELS[currentState.lastSuccess.action] : null} />
+        <Metric label="Warnings" value={currentState.warnings.length} />
+        <Metric label="Request" value={currentState.lastSuccess?.snapshot.requestId} />
+        <Metric label="Bridge duration" value={currentState.lastSuccess ? formatDuration(currentState.lastSuccess.snapshot.bridgeDurationMs) : undefined} />
+        <Metric label="detailRef" value={currentState.error?.error.detailRef} />
+      </dl>
+
+      {isRunningOperation ? (
+        <div className="package-portability-status" role="status" aria-live="polite" aria-atomic="true">
+          {currentState.phase === "choosing-file"
+            ? "Waiting for the native save dialog to return one destination before any sidecar mutation starts."
+            : "Exporting the package through the fixed sidecar command…"}
+        </div>
+      ) : null}
+
+      <div className="package-portability-actions">
+        <button type="button" className="button--secondary" disabled={disabledReason !== null} aria-describedby={actionHintId} onClick={() => onExport(profile)}>
+          {currentState.currentAction === "export" ? "Exporting package…" : "Export ThePrivator package"}
+        </button>
+      </div>
+      <p id={actionHintId} className="package-portability-hint" role="status" aria-live="polite">
+        {disabledReason ?? "Available because this profile is stopped and no profile, lifecycle, cookie, or package operation is active. Dialog cancel is a no-op."}
+      </p>
+
+      {currentState.lastSuccess ? <ProfilePackageSuccessFeedback state={currentState.lastSuccess} /> : null}
+      {currentState.error ? <ProfilePackageErrorFeedback diagnosticLookupState={diagnosticLookupState} state={currentState.error} onDiagnosticLookup={onDiagnosticLookup} /> : null}
+    </section>
+  );
+}
+
+function ProfilePackageSuccessFeedback({ state }: { state: PackagePortabilitySuccess }) {
+  const snapshot = state.snapshot;
+  const isExport = snapshot.operation === "export";
+  const heading = isExport ? "ThePrivator package export completed." : "ThePrivator package import completed.";
+  const copy = isExport
+    ? "The sidecar wrote the selected destination without returning the location or archive internals to the UI."
+    : "The sidecar imported a stopped copied profile and returned only safe aggregate metadata to the UI.";
+
+  return (
+    <section className="package-portability-success" role="status" aria-live="polite" aria-atomic="true">
+      <strong>{heading}</strong>
+      <p>{copy}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Operation" value={formatLiteral(snapshot.operation)} />
+        <Metric label={isExport ? "Profile ID" : "Imported profile ID"} value={isExport ? snapshot.profileId : snapshot.importedProfileId} />
+        <Metric label={isExport ? "Profile name" : "Imported profile name"} value={isExport ? snapshot.profileName : snapshot.importedProfileName} />
+        <Metric label="Name conflict" value={isExport ? undefined : snapshot.nameConflictResolved ? "resolved" : "no conflict"} />
+        <Metric label="Portable sessions" value={snapshot.portableSessionCount} />
+        <Metric label="Payload files" value={snapshot.payloadFileCount} />
+        <Metric label="Payload bytes" value={snapshot.payloadBytes} />
+        <Metric label="Payload skipped" value={snapshot.payloadSkippedCount} />
+        <Metric label="Warnings" value={snapshot.warningCount} />
+        <Metric label="Request" value={snapshot.requestId} />
+        <Metric label="Bridge duration" value={formatDuration(snapshot.bridgeDurationMs)} />
+        <Metric label="Received" value={formatProfileTimestamp(snapshot.receivedAt)} />
+        <Metric label="Recorded" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      {snapshot.warnings.length ? <ProfilePackageWarningList warnings={snapshot.warnings} /> : null}
+    </section>
+  );
+}
+
+function ProfilePackageWarningList({ warnings }: { warnings: ProfilePackageWarning[] }) {
+  return (
+    <div className="package-portability-warning-list" role="list" aria-label="Package portability warnings">
+      {warnings.map((warning) => (
+        <article key={warning.code} className="package-portability-warning" role="listitem">
+          <strong>{warning.code}</strong>
+          <p>{warning.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Count" value={warning.count} />
+          </dl>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ProfilePackageErrorFeedback({
+  diagnosticLookupState,
+  state,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: PackagePortabilityError;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
+  return (
+    <section className="package-portability-error" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>{PACKAGE_PORTABILITY_ACTION_LABELS[state.action]} failed safely.</strong>
+      <p>{state.error.message}</p>
+      <p className="package-portability-hint">Previous successful metadata remains visible, and no selected location, archive internals, cookie material, credential, browser control metadata, process launch metadata, or unbounded failure details are rendered.</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={state.error.code} />
+        <Metric label="Source" value={state.error.source} />
+        <Metric label="Recoverable" value={state.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={state.error.detailRef} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      <DiagnosticReference detailRef={state.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+    </section>
+  );
+}
+
+function ProfilePackageRefreshErrorFeedback({
+  diagnosticLookupState,
+  state,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: NonNullable<PackageImportRefreshState>;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
+  return (
+    <section className="package-portability-error" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>Package imported, but profile refresh failed safely.</strong>
+      <p>{state.error.message}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={state.error.code} />
+        <Metric label="Source" value={state.error.source} />
+        <Metric label="Recoverable" value={state.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={state.error.detailRef} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      <DiagnosticReference detailRef={state.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
+    </section>
+  );
+}
+
 function CookiePortabilityPanel({
   diagnosticLookupState,
   isLifecycleActionBusy,
@@ -4254,7 +4978,7 @@ function CookiePortabilityPanel({
           <p className="signal-label">Cookie portability</p>
           <h4 id={headingId}>Cookie portability for stopped profiles</h4>
           <p>
-            Use native dialogs to choose a destination or source file. The UI never reads files and never renders selected paths,
+            Use native dialogs to choose a destination or source file. The UI never reads files and never renders selected locations,
             cookie domains, names, or values.
           </p>
         </div>
@@ -4372,7 +5096,7 @@ function CookiePortabilityErrorFeedback({
     <section className="cookie-portability-error" role="alert" aria-live="assertive" aria-atomic="true">
       <strong>{COOKIE_PORTABILITY_ACTION_LABELS[state.action]} failed safely.</strong>
       <p>{state.error.message}</p>
-      <p className="cookie-portability-hint">Previous successful metadata remains visible, and no selected path or cookie content is rendered.</p>
+      <p className="cookie-portability-hint">Previous successful metadata remains visible, and no selected location or cookie content is rendered.</p>
       <dl className="metric-list metric-list--inline">
         <Metric label="Code" value={state.error.code} />
         <Metric label="Source" value={state.error.source} />
@@ -5782,6 +6506,19 @@ function formatDuration(value: number | undefined): string {
   return typeof value === "number" ? `${value.toFixed(2)} ms` : "Awaiting health";
 }
 
+function getPackageProfileSummary(state: PackagePortabilitySuccess | null): string | null {
+  if (!state) {
+    return null;
+  }
+
+  const snapshot = state.snapshot;
+  if (snapshot.operation === "export") {
+    return `${snapshot.profileName} (${snapshot.profileId})`;
+  }
+
+  return `${snapshot.importedProfileName} (${snapshot.importedProfileId})`;
+}
+
 function formatAutomationDuration(value: number | undefined): string {
   return typeof value === "number" ? `${value.toFixed(2)} ms` : "Unavailable";
 }
@@ -5984,6 +6721,14 @@ function formatReconciliation(value: ChromiumStoppedProfileState | null): string
   return `${value.profileId} ${value.termination} at ${formatProfileTimestamp(value.stoppedAt)}`;
 }
 
+function isCookiePortabilityOperationRunning(state: CookiePortabilityPanelState | null | undefined): boolean {
+  return state?.phase === "choosing-file" || state?.phase === "exporting" || state?.phase === "replacing";
+}
+
+function isPackagePortabilityOperationRunning(state: PackagePortabilityPanelState | null | undefined): boolean {
+  return state?.phase === "choosing-file" || state?.phase === "exporting" || state?.phase === "importing" || state?.phase === "refreshing-profiles";
+}
+
 class DialogSelectionError extends Error {
   readonly code: string;
   readonly source: SidecarErrorSource;
@@ -6021,13 +6766,13 @@ function parseDialogPathSelection(value: unknown, dialogKind: "open" | "save"): 
   if (Array.isArray(value)) {
     throw new DialogSelectionError(
       "PORTABILITY_DIALOG_SELECTION_INVALID",
-      `Native ${dialogKind} dialog returned multiple file selections; no cookie command was started.`,
+      `Native ${dialogKind} dialog returned multiple file selections; no portability command was started.`,
     );
   }
 
   throw new DialogSelectionError(
     "PORTABILITY_DIALOG_SELECTION_INVALID",
-    `Native ${dialogKind} dialog returned an invalid file selection; no cookie command was started.`,
+    `Native ${dialogKind} dialog returned an invalid file selection; no portability command was started.`,
   );
 }
 
@@ -6048,6 +6793,28 @@ function makeCookiePortabilityDialogError(): SidecarClientError {
     message: "Native file dialog failed before any cookie command started.",
     recoverable: true,
     detailRef: "ui-portability-dialog-failed",
+    source: "bridge",
+    phase: "bridge-error",
+  };
+}
+
+function makePackagePortabilityUiError(code: string, message: string): SidecarClientError {
+  return {
+    code,
+    message,
+    recoverable: true,
+    detailRef: `ui-package-portability-${code.toLowerCase().replace(/_/g, "-")}`,
+    source: "ui",
+    phase: "recoverable-error",
+  };
+}
+
+function makePackagePortabilityDialogError(): SidecarClientError {
+  return {
+    code: "PACKAGE_PORTABILITY_DIALOG_FAILED",
+    message: "Native file dialog failed before any package command started.",
+    recoverable: true,
+    detailRef: "ui-package-portability-dialog-failed",
     source: "bridge",
     phase: "bridge-error",
   };
