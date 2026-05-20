@@ -175,6 +175,16 @@ class ImportPayload:
     warnings: WarningAccumulator
 
 
+@dataclass(frozen=True)
+class CookiePackagePayload:
+    """Portable ThePrivator cookie JSON prepared for embedding in a package."""
+
+    content: bytes
+    cookie_count: int
+    skipped_count: int
+    warnings: list[JsonObject]
+
+
 def export_cookies(
     store_root: Union[str, Path],
     profile_id: str,
@@ -209,6 +219,59 @@ def replace_cookies(
     """Replace a stopped profile's cookies after validating the entire import."""
     profile = _load_stopped_profile(store_root, profile_id)
     payload = _read_import_payload(source_path)
+    return _restore_cookie_payload(store_root, profile, payload, operation="replace")
+
+
+def export_theprivator_cookie_payload(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+) -> CookiePackagePayload:
+    """Return ThePrivator JSON cookie bytes for embedding in a profile package."""
+    cookies, skipped_count, warnings = _read_profile_cookies(store_root, profile)
+    serialized, serialization_warnings = _serialize_cookies(cookies, FORMAT_THEPRIVATOR_JSON)
+    warnings.extend(serialization_warnings)
+    return CookiePackagePayload(
+        content=serialized.encode("utf-8"),
+        cookie_count=len(cookies),
+        skipped_count=skipped_count,
+        warnings=warnings.to_public(),
+    )
+
+
+def parse_theprivator_cookie_payload_bytes(raw: bytes) -> ImportPayload:
+    """Validate package-embedded ThePrivator cookie JSON without touching a profile."""
+    if not isinstance(raw, bytes) or len(raw) > MAX_IMPORT_BYTES:
+        raise SidecarError(
+            code=PORTABILITY_COOKIE_FILE_TOO_LARGE,
+            message="Cookie import file is too large.",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SidecarError(
+            code=PORTABILITY_COOKIE_FILE_INVALID,
+            message="Cookie import file is invalid.",
+        ) from exc
+    return ImportPayload(FORMAT_THEPRIVATOR_JSON, *_parse_theprivator_json(text))
+
+
+def restore_theprivator_cookie_payload(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    raw: bytes,
+) -> JsonObject:
+    """Restore package-embedded ThePrivator cookie JSON into a prepared profile."""
+    payload = parse_theprivator_cookie_payload_bytes(raw)
+    return _restore_cookie_payload(store_root, profile, payload, operation="restore")
+
+
+def _restore_cookie_payload(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    payload: ImportPayload,
+    *,
+    operation: str,
+) -> JsonObject:
     imported_cookies, duplicate_count = _dedupe_imported_cookies(payload.cookies)
     warnings = WarningAccumulator()
     warnings.extend(payload.warnings)
@@ -220,7 +283,7 @@ def replace_cookies(
     return {
         "portabilityVersion": PORTABILITY_VERSION,
         "profileId": profile.id,
-        "operation": "replace",
+        "operation": operation,
         "format": payload.format,
         "importedCount": len(imported_cookies),
         "replacedCount": replaced_count,
@@ -896,6 +959,7 @@ def unix_time_to_chrome(value: Optional[int]) -> int:
 
 
 __all__ = [
+    "CookiePackagePayload",
     "FORMAT_NETSCAPE",
     "FORMAT_THEPRIVATOR_JSON",
     "MAX_IMPORT_BYTES",
@@ -903,6 +967,9 @@ __all__ = [
     "THEPRIVATOR_COOKIE_FORMAT",
     "THEPRIVATOR_COOKIE_SCHEMA_VERSION",
     "export_cookies",
+    "export_theprivator_cookie_payload",
     "normalize_export_format",
+    "parse_theprivator_cookie_payload_bytes",
     "replace_cookies",
+    "restore_theprivator_cookie_payload",
 ]

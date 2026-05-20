@@ -115,6 +115,31 @@ class ProfileRecord:
         )
 
     @classmethod
+    def create_from_package(
+        cls,
+        name: str,
+        *,
+        identity: Mapping[str, Any],
+        proxy: Mapping[str, Any],
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> "ProfileRecord":
+        """Create an imported package record with sidecar-normalized safe fields."""
+        profile_id = str(uuid.uuid4())
+        now = utc_now_iso()
+        normalized_proxy = normalize_proxy_config(proxy)
+        return cls(
+            id=profile_id,
+            name=name,
+            createdAt=now,
+            updatedAt=now,
+            defaults=defaults_for_proxy(normalized_proxy),
+            storage=storage_for_profile(profile_id),
+            identity=normalize_profile_identity(identity),
+            proxy=normalized_proxy,
+            metadata=normalize_profile_metadata(metadata),
+        )
+
+    @classmethod
     def from_dict(cls, data: Mapping[str, Any], *, store_version: int = STORE_VERSION) -> "ProfileRecord":
         if not isinstance(data, Mapping):
             raise_corrupt_store()
@@ -302,6 +327,30 @@ class ProfileStore:
     def create_imported(self, name: str, metadata: Mapping[str, Any]) -> JsonObject:
         """Create an imported profile through the canonical profile-store path."""
         return self._create_profile(name, metadata=metadata)
+
+    def create_profile_package_import(
+        self,
+        name: str,
+        *,
+        identity: Mapping[str, Any],
+        proxy: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+    ) -> JsonObject:
+        """Commit a validated .tpkg import as a new stopped profile record."""
+        valid_name = normalize_profile_name(name)
+        profiles = self._read_profiles()
+        self._ensure_unique_name(profiles, valid_name)
+
+        profile = ProfileRecord.create_from_package(
+            valid_name,
+            identity=identity,
+            proxy=proxy,
+            metadata=metadata,
+        )
+        self._ensure_profile_directories(profile)
+        updated_profiles = sort_profiles([*profiles, profile])
+        self._write_profiles(updated_profiles)
+        return self._collection_response(updated_profiles, profile=profile)
 
     def _create_profile(
         self,
@@ -815,6 +864,7 @@ __all__ = [
     "ProfileRecord",
     "ProfileStorage",
     "ProfileStore",
+    "MAX_PROFILE_NAME_LENGTH",
     "PROFILE_DELETE_FAILED",
     "PROFILE_DUPLICATE_NAME",
     "PROFILE_INVALID_NAME",
