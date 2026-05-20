@@ -8,7 +8,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, TextIO, Tuple
 
-from . import chromium, identity_audit, legacy_import, proxy_check
+from . import chromium, cookies, identity_audit, legacy_import, proxy_check
 from .diagnostics import append_events
 from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
 from .profiles import ProfileStore, require_string_param
@@ -183,6 +183,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
 
     if request.method.startswith("chromium."):
         return dispatch_chromium_request(request)
+
+    if request.method.startswith("portability."):
+        return dispatch_portability_request(request)
 
     raise SidecarError(
         code=UNKNOWN_COMMAND,
@@ -467,6 +470,56 @@ def dispatch_chromium_request(request: SidecarRequest) -> JsonObject:
                 "Chromium profileId is required.",
             )
             return chromium.stop(store_root, profile_id)
+
+        raise SidecarError(
+            code=UNKNOWN_COMMAND,
+            message="Unknown sidecar command.",
+        )
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
+
+
+def dispatch_portability_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch sidecar-owned cookie portability commands."""
+    try:
+        store_root = require_string_param(
+            request.params,
+            "storeRoot",
+            "Cookie portability storeRoot is required.",
+        )
+        profile_id = require_string_param(
+            request.params,
+            "profileId",
+            "Cookie portability profileId is required.",
+        )
+
+        if request.method == "portability.cookies.export":
+            destination_path = require_string_param(
+                request.params,
+                "destinationPath",
+                "Cookie export destinationPath is required.",
+            )
+            export_format = require_string_param(
+                request.params,
+                "format",
+                "Cookie export format is required.",
+            )
+            return cookies.export_cookies(store_root, profile_id, destination_path, export_format)
+
+        if request.method == "portability.cookies.replace":
+            source_path = require_string_param(
+                request.params,
+                "sourcePath",
+                "Cookie replace sourcePath is required.",
+            )
+            return cookies.replace_cookies(store_root, profile_id, source_path)
 
         raise SidecarError(
             code=UNKNOWN_COMMAND,

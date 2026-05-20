@@ -44,6 +44,7 @@ from .protocol import (
     CHROMIUM_LAUNCH_FAILED,
     CHROMIUM_STOP_FAILED,
     IDENTITY_AUDIT_FAILED,
+    PORTABILITY_PROFILE_BUSY,
     IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
@@ -233,6 +234,28 @@ def status(store_root: Union[str, Path]) -> JsonObject:
     if changed:
         registry.write(active)
     return _status_payload(active, reconciled)
+
+
+def ensure_profile_stopped_for_portability(store_root: Union[str, Path], profile: ProfileRecord) -> None:
+    """Reject cookie portability while a profile has a live Chromium runtime record.
+
+    Automation leases and UI launches share ``RuntimeRegistry`` records, so any
+    live record means the cookie DB may be locked or mutated by Chromium. Stale
+    records are reconciled using the same process-liveness semantics as
+    ``chromium.status`` before the busy decision is made.
+    """
+    registry = RuntimeRegistry(store_root)
+    records = registry.read()
+    active, _reconciled, changed = _reconcile_records(records)
+    if changed:
+        registry.write(active)
+
+    record = active.get(profile.id)
+    if record is not None and is_process_alive(record.pid):
+        raise SidecarError(
+            code=PORTABILITY_PROFILE_BUSY,
+            message="Stop this profile before importing or exporting cookies.",
+        )
 
 
 
@@ -1317,6 +1340,7 @@ __all__ = [
     "RuntimeRecord",
     "build_launch_args",
     "discover_executable",
+    "ensure_profile_stopped_for_portability",
     "is_process_alive",
     "launch",
     "launch_for_automation",
