@@ -19,6 +19,7 @@
     "verify:m004:s05": "node scripts/verify-m004-s05.mjs",
     "verify:m005:s01": "node scripts/verify-m005-s01.mjs",
     "verify:m005:s02": "node scripts/verify-m005-s02.mjs",
+    "verify:m005:s03": "node scripts/verify-m005-s03.mjs",
     "verify:s01": "node scripts/verify-s01.mjs",
     "verify:s01:packaged": "node scripts/verify-s01.mjs --package-artifacts-only",
     "verify:s02": "node scripts/verify-s02.mjs",
