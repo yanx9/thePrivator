@@ -22,6 +22,7 @@ export const FORMAT_NETSCAPE = "netscape";
 export const FORMAT_THEPRIVATOR_JSON = "theprivator-json";
 export const MAX_IMPORT_BYTES = 1_048_576;
 export const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
+export const SIDECAR_EXTERNAL_BIN = "binaries/theprivator-sidecar";
 
 const STEP_RESULTS = [];
 const VERIFIER_EVENTS = [];
@@ -219,6 +220,11 @@ function emit(event, context = createM005RedactionContext()) {
   console.log(JSON.stringify(safeEvent));
 }
 
+function resetM005VerificationState() {
+  STEP_RESULTS.length = 0;
+  VERIFIER_EVENTS.length = 0;
+}
+
 function runStep(name, action, context) {
   const started = performance.now();
   try {
@@ -368,6 +374,141 @@ function assertPortabilityError(response, { requestId, code }) {
 function assertNoPublicLeak(value, context, label) {
   const marker = findM005ForbiddenPublicMarker(value, context);
   assert(!marker, `${label} leaked forbidden public evidence.`, marker ?? {});
+}
+
+function readJsonFile(path, label, { rootDir = ROOT_DIR } = {}) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    fail(`${label} must be valid JSON.`, {
+      phase: "capability",
+      file: relative(rootDir, path),
+      parserMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function permissionIdentifier(permission) {
+  return typeof permission === "string" ? permission : permission?.identifier;
+}
+
+function assertNoForbiddenCapability(permission) {
+  const identifier = permissionIdentifier(permission);
+  assert(typeof identifier === "string" && identifier.length > 0, "Default capability contained an invalid permission entry.", {
+    phase: "capability",
+    identifier: identifier ?? "unknown",
+  });
+  assert(!identifier.startsWith("fs:"), "Default capability must not grant frontend filesystem authority.", {
+    phase: "capability",
+    identifier,
+  });
+  assert(identifier !== "shell:allow-open" && identifier !== "opener:allow-open" && identifier !== "opener:default", "Default capability must not grant shell/open authority.", {
+    phase: "capability",
+    identifier,
+  });
+  assert(identifier !== "dialog:default", "Default capability must not grant broad dialog defaults.", {
+    phase: "capability",
+    identifier,
+  });
+}
+
+export function assertM005CapabilityConfig({ rootDir = ROOT_DIR } = {}) {
+  const capabilityPath = join(rootDir, "src-tauri", "capabilities", "default.json");
+  const packagePath = join(rootDir, "package.json");
+  const packageLockPath = join(rootDir, "package-lock.json");
+  const cargoTomlPath = join(rootDir, "src-tauri", "Cargo.toml");
+  const cargoLockPath = join(rootDir, "src-tauri", "Cargo.lock");
+  const libPath = join(rootDir, "src-tauri", "src", "lib.rs");
+  const sidecarPath = join(rootDir, "src-tauri", "src", "sidecar.rs");
+
+  const capability = readJsonFile(capabilityPath, "src-tauri/capabilities/default.json", { rootDir });
+  const permissions = capability.permissions;
+  assert(Array.isArray(permissions), "Default capability permissions must be an array.", { phase: "capability" });
+
+  const permissionIds = [];
+  for (const permission of permissions) {
+    assertNoForbiddenCapability(permission);
+    const identifier = permissionIdentifier(permission);
+    if (identifier === "shell:allow-spawn") {
+      assert(permission && typeof permission === "object" && !Array.isArray(permission), "shell:allow-spawn must stay scoped by an allowlist object.", {
+        phase: "capability",
+      });
+      const allow = permission.allow;
+      const allowedSidecars = Array.isArray(allow)
+        ? allow.filter((entry) => entry?.name === SIDECAR_EXTERNAL_BIN && entry?.sidecar === true)
+        : [];
+      assert(Array.isArray(allow) && allow.length === 1 && allowedSidecars.length === 1, "shell:allow-spawn must allow only the packaged sidecar.", {
+        phase: "capability",
+        identifier,
+      });
+    }
+    permissionIds.push(identifier);
+  }
+
+  const sortedIds = [...permissionIds].sort();
+  const expectedIds = ["core:default", "dialog:allow-open", "dialog:allow-save", "shell:allow-spawn"].sort();
+  assert(JSON.stringify(sortedIds) === JSON.stringify(expectedIds), "Default capability must contain only core, dialog open/save, and fixed sidecar spawn permissions.", {
+    phase: "capability",
+    permissions: sortedIds,
+  });
+
+  const packageJson = readJsonFile(packagePath, "package.json", { rootDir });
+  assert(typeof packageJson.dependencies?.["@tauri-apps/plugin-dialog"] === "string", "package.json must depend on @tauri-apps/plugin-dialog for native file dialogs.", {
+    phase: "capability",
+  });
+  assert(!packageJson.dependencies?.["@tauri-apps/plugin-fs"] && !packageJson.devDependencies?.["@tauri-apps/plugin-fs"], "package.json must not add the Tauri filesystem plugin.", {
+    phase: "capability",
+  });
+
+  const packageLock = readJsonFile(packageLockPath, "package-lock.json", { rootDir });
+  assert(typeof packageLock.packages?.[""]?.dependencies?.["@tauri-apps/plugin-dialog"] === "string", "package-lock root package must include @tauri-apps/plugin-dialog.", {
+    phase: "capability",
+  });
+  assert(packageLock.packages?.["node_modules/@tauri-apps/plugin-dialog"], "package-lock must pin @tauri-apps/plugin-dialog.", {
+    phase: "capability",
+  });
+  assert(!packageLock.packages?.[""]?.dependencies?.["@tauri-apps/plugin-fs"] && !packageLock.packages?.["node_modules/@tauri-apps/plugin-fs"], "package-lock must not include @tauri-apps/plugin-fs.", {
+    phase: "capability",
+  });
+
+  const cargoToml = readFileSync(cargoTomlPath, "utf8");
+  const cargoLock = readFileSync(cargoLockPath, "utf8");
+  assert(/^tauri-plugin-dialog\s*=\s*/m.test(cargoToml), "Cargo.toml must depend on tauri-plugin-dialog.", { phase: "capability" });
+  assert(!/^tauri-plugin-fs\s*=\s*/m.test(cargoToml), "Cargo.toml must not depend on tauri-plugin-fs.", { phase: "capability" });
+  assert(/\nname = "tauri-plugin-dialog"\n/.test(cargoLock), "Cargo.lock must pin tauri-plugin-dialog.", { phase: "capability" });
+
+  const libRs = readFileSync(libPath, "utf8");
+  assert(libRs.includes(".plugin(tauri_plugin_dialog::init())"), "Tauri builder must register the dialog plugin.", { phase: "capability" });
+  assert(libRs.includes("sidecar::profile_cookies_export") && libRs.includes("sidecar::profile_cookies_replace"), "Tauri invoke handler must register fixed cookie commands.", {
+    phase: "capability",
+  });
+
+  const sidecarRs = readFileSync(sidecarPath, "utf8");
+  assert(sidecarRs.includes('"portability.cookies.export"') && sidecarRs.includes('"portability.cookies.replace"'), "Rust bridge must expose fixed portability cookie method wrappers.", {
+    phase: "capability",
+  });
+
+  return {
+    permissions: sortedIds,
+    dialogPlugin: "registered",
+    filesystemAuthority: "absent",
+    shellOpenAuthority: "absent",
+  };
+}
+
+export function runCapabilityOnlyVerification({ rootDir = ROOT_DIR } = {}) {
+  resetM005VerificationState();
+  const result = runStep("capability.dialog-boundary", () => assertM005CapabilityConfig({ rootDir }), createM005RedactionContext({ rootDir }));
+  const summary = {
+    event: VERIFY_EVENT,
+    status: "pass",
+    mode: "capability-only",
+    capability: result,
+    checks: STEP_RESULTS.map((check) => ({ name: check.name, status: check.status, durationMs: check.durationMs })),
+  };
+  assertM005PublicEvidenceRedacted(summary, createM005RedactionContext({ rootDir }));
+  emit({ status: "pass", summary }, createM005RedactionContext({ rootDir }));
+  return summary;
 }
 
 function createStoreProfile(context) {
@@ -546,6 +687,7 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
 }
 
 export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepTemp = false } = {}) {
+  resetM005VerificationState();
   void rootDir;
   void python;
   const storeRoot = mkdtempSync(join(tmpdir(), "theprivator-m005-s01-"));
@@ -754,7 +896,7 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
 }
 
 function printHelp() {
-  console.log(`Usage: npm run verify:m005:s01 -- [--sidecar-only]\n\n--sidecar-only   Run the source-sidecar cookie portability smoke fixture.\n`);
+  console.log(`Usage: npm run verify:m005:s01 -- [--sidecar-only] [--capability-only]\n\n--sidecar-only      Run the source-sidecar cookie portability smoke fixture.\n--capability-only   Verify the Tauri dialog/fixed-command permission boundary.\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -764,7 +906,8 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (args.capabilityOnly) {
-    throw new VerifyFailure("M005/S01 capability-only verification is introduced in T02.", { phase: "args", mode: "capability-only" });
+    runCapabilityOnlyVerification();
+    return 0;
   }
   runSidecarOnlySmoke();
   return 0;

@@ -27,6 +27,7 @@ mod commands {
 pub fn run() {
     tauri::Builder::default()
         .manage(automation_api::AutomationApiSupervisor::new())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::shell_status,
@@ -46,6 +47,8 @@ pub fn run() {
             sidecar::profiles_identity_update,
             sidecar::profiles_proxy_update,
             sidecar::profiles_proxy_check,
+            sidecar::profile_cookies_export,
+            sidecar::profile_cookies_replace,
             sidecar::profiles_list,
             sidecar::profiles_create,
             sidecar::profiles_update,

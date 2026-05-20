@@ -1,15 +1,20 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VerifyFailure } from "./verify-m004-s01.mjs";
 import {
   FORMAT_NETSCAPE,
   FORMAT_THEPRIVATOR_JSON,
   VERIFY_EVENT,
+  assertM005CapabilityConfig,
   assertM005PublicEvidenceRedacted,
   buildM005FinalSummary,
   createM005RedactionContext,
   findM005ForbiddenPublicMarker,
   parseArgs,
   redactM005,
+  runCapabilityOnlyVerification,
   runSidecarOnlySmoke,
 } from "./verify-m005-s01.mjs";
 
@@ -28,11 +33,112 @@ function captureConsole() {
   return lines;
 }
 
+function writeJson(path, value) {
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function seedCapabilityRoot({ permissions } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "theprivator-m005-capability-"));
+  mkdirSync(join(root, "src-tauri", "capabilities"), { recursive: true });
+  mkdirSync(join(root, "src-tauri", "src"), { recursive: true });
+
+  const defaultPermissions = [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    {
+      identifier: "shell:allow-spawn",
+      allow: [{ name: "binaries/theprivator-sidecar", sidecar: true }],
+    },
+  ];
+
+  writeJson(join(root, "src-tauri", "capabilities", "default.json"), {
+    identifier: "default",
+    windows: ["main"],
+    permissions: permissions ?? defaultPermissions,
+  });
+  writeJson(join(root, "package.json"), {
+    dependencies: {
+      "@tauri-apps/api": "^2.0.0",
+      "@tauri-apps/plugin-dialog": "^2.0.0",
+    },
+  });
+  writeJson(join(root, "package-lock.json"), {
+    packages: {
+      "": {
+        dependencies: {
+          "@tauri-apps/api": "^2.0.0",
+          "@tauri-apps/plugin-dialog": "^2.0.0",
+        },
+      },
+      "node_modules/@tauri-apps/plugin-dialog": { version: "2.4.0" },
+    },
+  });
+  writeFileSync(join(root, "src-tauri", "Cargo.toml"), '[dependencies]\ntauri = "2"\ntauri-plugin-dialog = "2"\ntauri-plugin-shell = "2"\n', "utf8");
+  writeFileSync(join(root, "src-tauri", "Cargo.lock"), '[[package]]\nname = "tauri-plugin-dialog"\nversion = "2.4.0"\n', "utf8");
+  writeFileSync(join(root, "src-tauri", "src", "lib.rs"), '.plugin(tauri_plugin_dialog::init())\nsidecar::profile_cookies_export\nsidecar::profile_cookies_replace\n', "utf8");
+  writeFileSync(join(root, "src-tauri", "src", "sidecar.rs"), '"portability.cookies.export"\n"portability.cookies.replace"\n', "utf8");
+  return root;
+}
+
 describe("verify-m005-s01 argument contract", () => {
   it("recognizes sidecar-only and help flags without enabling future modes", () => {
     expect(parseArgs(["--sidecar-only"])).toMatchObject({ sidecarOnly: true, capabilityOnly: false, help: false });
     expect(parseArgs(["--capability-only"])).toMatchObject({ sidecarOnly: false, capabilityOnly: true, help: false });
     expect(parseArgs(["--help"])).toMatchObject({ help: true });
+  });
+});
+
+describe("verify-m005-s01 capability boundary", () => {
+  it("accepts only dialog open/save plus fixed sidecar spawn permissions", () => {
+    const root = seedCapabilityRoot();
+    try {
+      expect(assertM005CapabilityConfig({ rootDir: root })).toMatchObject({
+        dialogPlugin: "registered",
+        filesystemAuthority: "absent",
+        shellOpenAuthority: "absent",
+        permissions: ["core:default", "dialog:allow-open", "dialog:allow-save", "shell:allow-spawn"].sort(),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects filesystem and shell-open capability drift", () => {
+    const root = seedCapabilityRoot({
+      permissions: [
+        "core:default",
+        "dialog:allow-open",
+        "dialog:allow-save",
+        "fs:allow-read-text-file",
+        "shell:allow-open",
+        {
+          identifier: "shell:allow-spawn",
+          allow: [{ name: "binaries/theprivator-sidecar", sidecar: true }],
+        },
+      ],
+    });
+    try {
+      expect(() => assertM005CapabilityConfig({ rootDir: root })).toThrow(VerifyFailure);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits redacted capability-only verifier events", () => {
+    const root = seedCapabilityRoot();
+    const lines = captureConsole();
+    try {
+      const summary = runCapabilityOnlyVerification({ rootDir: root });
+      expect(summary.status).toBe("pass");
+      expect(summary.mode).toBe("capability-only");
+      expect(summary.capability.filesystemAuthority).toBe("absent");
+      const parsedEvents = lines.map((line) => JSON.parse(line));
+      expect(parsedEvents.some((event) => event.phase === "capability.dialog-boundary" && event.status === "pass")).toBe(true);
+      expect(findM005ForbiddenPublicMarker(parsedEvents)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

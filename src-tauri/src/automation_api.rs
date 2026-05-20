@@ -5,6 +5,8 @@ use chrono::{SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     io::{BufRead, BufReader},
     net::IpAddr,
@@ -14,8 +16,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 

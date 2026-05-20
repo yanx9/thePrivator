@@ -28,6 +28,12 @@ const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 // machinery, so they need the same bounded long-command budget without allowing
 // unbounded queued UI clicks.
 const PROXY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+// Cookie portability touches SQLite and selected files, so it gets a bounded
+// budget longer than the generic bridge timeout but shorter than legacy copy.
+const COOKIE_PORTABILITY_TIMEOUT: Duration = Duration::from_secs(30);
+
+const COOKIE_FORMAT_NETSCAPE: &str = "netscape";
+const COOKIE_FORMAT_THEPRIVATOR_JSON: &str = "theprivator-json";
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
 const SIDECAR_PROCESS_ERROR: &str = "SIDECAR_PROCESS_ERROR";
@@ -234,6 +240,30 @@ pub async fn profiles_proxy_check(
     let store_root = resolve_profile_store_root(&app)?;
     let runner = TauriSidecarRunner::new(app);
     profiles_proxy_check_with_runner(&runner, store_root, profile_id).await
+}
+
+#[tauri::command]
+pub async fn profile_cookies_export(
+    app: tauri::AppHandle,
+    profile_id: String,
+    destination_path: String,
+    format: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profile_cookies_export_with_runner(&runner, store_root, profile_id, destination_path, format)
+        .await
+}
+
+#[tauri::command]
+pub async fn profile_cookies_replace(
+    app: tauri::AppHandle,
+    profile_id: String,
+    source_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profile_cookies_replace_with_runner(&runner, store_root, profile_id, source_path).await
 }
 
 #[tauri::command]
@@ -478,6 +508,51 @@ async fn profiles_proxy_check_with_runner<R: SidecarRunner>(
     .await
 }
 
+async fn profile_cookies_export_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    destination_path: String,
+    format: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    validate_non_empty_arg("profile id", &profile_id)?;
+    validate_non_empty_arg("cookie export destination path", &destination_path)?;
+    validate_cookie_export_format(&format)?;
+    invoke_method_with_params_timeout(
+        runner,
+        "portability.cookies.export",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "destinationPath": destination_path,
+            "format": format,
+        }),
+        COOKIE_PORTABILITY_TIMEOUT,
+    )
+    .await
+}
+
+async fn profile_cookies_replace_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    source_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    validate_non_empty_arg("profile id", &profile_id)?;
+    validate_non_empty_arg("cookie import source path", &source_path)?;
+    invoke_method_with_params_timeout(
+        runner,
+        "portability.cookies.replace",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "sourcePath": source_path,
+        }),
+        COOKIE_PORTABILITY_TIMEOUT,
+    )
+    .await
+}
+
 async fn profiles_list_with_runner<R: SidecarRunner>(
     runner: &R,
     store_root: String,
@@ -646,6 +721,27 @@ fn profile_store_root_from_app_data_dir<E>(
             "The Tauri app data directory for the profile store is not valid Unicode.",
         )
     })
+}
+
+fn validate_non_empty_arg(label: &str, value: &str) -> Result<(), SidecarCommandError> {
+    if value.trim().is_empty() {
+        return Err(bridge_error(
+            SIDECAR_PROTOCOL_ERROR,
+            &format!("The {label} argument is required."),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cookie_export_format(format: &str) -> Result<(), SidecarCommandError> {
+    validate_non_empty_arg("cookie export format", format)?;
+    match format {
+        COOKIE_FORMAT_NETSCAPE | COOKIE_FORMAT_THEPRIVATOR_JSON => Ok(()),
+        _ => Err(bridge_error(
+            SIDECAR_PROTOCOL_ERROR,
+            "The cookie export format is unsupported.",
+        )),
+    }
 }
 
 async fn invoke_fixed_method<R: SidecarRunner>(
@@ -1213,6 +1309,13 @@ mod tests {
                 .expect("last_timeout lock poisoned")
                 .expect("runner was not called")
         }
+
+        fn was_called(&self) -> bool {
+            self.last_request
+                .lock()
+                .expect("last_request lock poisoned")
+                .is_some()
+        }
     }
 
     #[async_trait]
@@ -1544,6 +1647,36 @@ mod tests {
             runner,
             store_root.to_string(),
             legacy_root.to_string(),
+        ))
+    }
+
+    fn run_profile_cookies_export(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        destination_path: &str,
+        format: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profile_cookies_export_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            destination_path.to_string(),
+            format.to_string(),
+        ))
+    }
+
+    fn run_profile_cookies_replace(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        source_path: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profile_cookies_replace_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            source_path.to_string(),
         ))
     }
 
@@ -2301,6 +2434,220 @@ mod tests {
 
         assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
         assert_eq!(runner.last_request()["method"], "identity.audit.plan");
+    }
+
+    #[test]
+    fn profile_cookies_export_injects_store_root_profile_path_and_format_only() {
+        for format in [COOKIE_FORMAT_NETSCAPE, COOKIE_FORMAT_THEPRIVATOR_JSON] {
+            let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+            run_profile_cookies_export(
+                &runner,
+                "/app/data/root",
+                "profile-id",
+                "/selected/private/export.cookies",
+                format,
+            )
+            .expect("cookie export reaches sidecar");
+
+            let request = runner.last_request();
+            assert_request_params(
+                &request,
+                "portability.cookies.export",
+                &[
+                    ("storeRoot", json!("/app/data/root")),
+                    ("profileId", json!("profile-id")),
+                    ("destinationPath", json!("/selected/private/export.cookies")),
+                    ("format", json!(format)),
+                ],
+            );
+            assert_eq!(runner.last_timeout(), COOKIE_PORTABILITY_TIMEOUT);
+            assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+            assert!(runner.last_timeout() < LEGACY_IMPORT_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn profile_cookies_replace_injects_store_root_profile_and_source_path_only() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_profile_cookies_replace(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/import.cookies.json",
+        )
+        .expect("cookie replace reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "portability.cookies.replace",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("sourcePath", json!("/selected/private/import.cookies.json")),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), COOKIE_PORTABILITY_TIMEOUT);
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+        assert!(runner.last_timeout() < LEGACY_IMPORT_TIMEOUT);
+    }
+
+    #[test]
+    fn profile_cookies_busy_error_is_passed_through() {
+        let runner = FakeRunner::new(FakeMode::TypedError {
+            code: "PORTABILITY_PROFILE_BUSY",
+            message: "Profile must be stopped before cookie portability.",
+            detail_ref: "sidecar-portability-busy-detail",
+        });
+
+        let error = run_profile_cookies_export(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/export.cookies",
+            COOKIE_FORMAT_NETSCAPE,
+        )
+        .expect_err("cookie busy error surfaces");
+
+        assert_eq!(error.code, "PORTABILITY_PROFILE_BUSY");
+        assert_eq!(
+            error.message,
+            "Profile must be stopped before cookie portability."
+        );
+        assert!(error.recoverable);
+        assert_eq!(error.detail_ref, "sidecar-portability-busy-detail");
+        assert_eq!(
+            runner.last_request()["method"],
+            "portability.cookies.export"
+        );
+    }
+
+    #[test]
+    fn profile_cookies_malformed_inputs_are_rejected_before_dispatch() {
+        let export_cases = [
+            (
+                "empty profile id",
+                " ",
+                "/selected/private/export.cookies",
+                COOKIE_FORMAT_NETSCAPE,
+                "profile id",
+            ),
+            (
+                "empty destination path",
+                "profile-id",
+                "  ",
+                COOKIE_FORMAT_NETSCAPE,
+                "destination path",
+            ),
+            (
+                "empty format",
+                "profile-id",
+                "/selected/private/export.cookies",
+                "",
+                "format",
+            ),
+            (
+                "unsupported format",
+                "profile-id",
+                "/selected/private/export.cookies",
+                "chromium-sqlite",
+                "unsupported",
+            ),
+        ];
+
+        for (label, profile_id, destination_path, format, message_fragment) in export_cases {
+            let runner = FakeRunner::new(FakeMode::HealthSuccess);
+            let error = run_profile_cookies_export(
+                &runner,
+                "/app/data/root",
+                profile_id,
+                destination_path,
+                format,
+            )
+            .expect_err(label);
+
+            assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR, "{label}");
+            assert!(error.message.contains(message_fragment), "{label}");
+            assert!(error.detail_ref.starts_with("bridge-"), "{label}");
+            assert!(!error.message.contains("/app/data/root"), "{label}");
+            assert!(!error.message.contains("/selected/private"), "{label}");
+            assert!(!error.message.contains("chromium-sqlite"), "{label}");
+            assert!(!runner.was_called(), "{label} dispatched unexpectedly");
+        }
+
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let error = run_profile_cookies_replace(&runner, "/app/data/root", "profile-id", " ")
+            .expect_err("empty source path is rejected");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert!(error.message.contains("source path"));
+        assert!(!error.message.contains("/app/data/root"));
+        assert!(!runner.was_called());
+    }
+
+    #[test]
+    fn profile_cookies_timeout_and_unavailable_errors_use_safe_bridge_messages() {
+        let timeout_runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+        let timeout_error = run_profile_cookies_export(
+            &timeout_runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/export.cookies",
+            COOKIE_FORMAT_THEPRIVATOR_JSON,
+        )
+        .expect_err("cookie export timeout surfaces");
+
+        assert_eq!(timeout_error.code, SIDECAR_TIMEOUT);
+        assert!(timeout_error.detail_ref.starts_with("bridge-"));
+        assert_eq!(
+            timeout_runner.last_request()["method"],
+            "portability.cookies.export"
+        );
+        assert_eq!(timeout_runner.last_timeout(), COOKIE_PORTABILITY_TIMEOUT);
+        assert!(!timeout_error.message.contains("/app/data/root"));
+        assert!(!timeout_error.message.contains("/selected/private"));
+
+        let unavailable_runner =
+            FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Unavailable));
+        let unavailable_error = run_profile_cookies_replace(
+            &unavailable_runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/import.cookies.json",
+        )
+        .expect_err("cookie replace missing sidecar surfaces");
+
+        assert_eq!(unavailable_error.code, SIDECAR_UNAVAILABLE);
+        assert!(unavailable_error.message.contains("sidecar:build"));
+        assert_eq!(
+            unavailable_runner.last_request()["method"],
+            "portability.cookies.replace"
+        );
+        assert!(!unavailable_error.message.contains("/app/data/root"));
+        assert!(!unavailable_error.message.contains("/selected/private"));
+    }
+
+    #[test]
+    fn profile_cookies_malformed_sidecar_response_maps_to_protocol_error() {
+        let runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+
+        let error = run_profile_cookies_replace(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/import.cookies.json",
+        )
+        .expect_err("cookie replace malformed stdout surfaces");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(
+            runner.last_request()["method"],
+            "portability.cookies.replace"
+        );
+        assert_eq!(runner.last_timeout(), COOKIE_PORTABILITY_TIMEOUT);
+        assert!(!error.message.contains("/selected/private"));
     }
 
     #[test]
