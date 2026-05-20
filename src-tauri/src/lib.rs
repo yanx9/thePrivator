@@ -49,6 +49,8 @@ pub fn run() {
             sidecar::profiles_proxy_check,
             sidecar::profile_cookies_export,
             sidecar::profile_cookies_replace,
+            sidecar::profile_package_export,
+            sidecar::profile_package_import,
             sidecar::profiles_list,
             sidecar::profiles_create,
             sidecar::profiles_update,

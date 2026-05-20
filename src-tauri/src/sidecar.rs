@@ -31,6 +31,10 @@ const PROXY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 // Cookie portability touches SQLite and selected files, so it gets a bounded
 // budget longer than the generic bridge timeout but shorter than legacy copy.
 const COOKIE_PORTABILITY_TIMEOUT: Duration = Duration::from_secs(30);
+// Profile packages may include sanitized Chromium user-data payload copies, so
+// they get a bounded long-command budget without granting unbounded renderer IO.
+const PROFILE_PACKAGE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_PROFILE_PACKAGE_ARGUMENT_CHARS: usize = 4096;
 
 const COOKIE_FORMAT_NETSCAPE: &str = "netscape";
 const COOKIE_FORMAT_THEPRIVATOR_JSON: &str = "theprivator-json";
@@ -264,6 +268,27 @@ pub async fn profile_cookies_replace(
     let store_root = resolve_profile_store_root(&app)?;
     let runner = TauriSidecarRunner::new(app);
     profile_cookies_replace_with_runner(&runner, store_root, profile_id, source_path).await
+}
+
+#[tauri::command]
+pub async fn profile_package_export(
+    app: tauri::AppHandle,
+    profile_id: String,
+    destination_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profile_package_export_with_runner(&runner, store_root, profile_id, destination_path).await
+}
+
+#[tauri::command]
+pub async fn profile_package_import(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profile_package_import_with_runner(&runner, store_root, source_path).await
 }
 
 #[tauri::command]
@@ -553,6 +578,57 @@ async fn profile_cookies_replace_with_runner<R: SidecarRunner>(
     .await
 }
 
+async fn profile_package_export_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    destination_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    validate_bounded_non_empty_arg(
+        "profile id",
+        &profile_id,
+        MAX_PROFILE_PACKAGE_ARGUMENT_CHARS,
+    )?;
+    validate_bounded_non_empty_arg(
+        "profile package destination path",
+        &destination_path,
+        MAX_PROFILE_PACKAGE_ARGUMENT_CHARS,
+    )?;
+    invoke_method_with_params_timeout(
+        runner,
+        "portability.profile_package.export",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "destinationPath": destination_path,
+        }),
+        PROFILE_PACKAGE_TIMEOUT,
+    )
+    .await
+}
+
+async fn profile_package_import_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    source_path: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    validate_bounded_non_empty_arg(
+        "profile package source path",
+        &source_path,
+        MAX_PROFILE_PACKAGE_ARGUMENT_CHARS,
+    )?;
+    invoke_method_with_params_timeout(
+        runner,
+        "portability.profile_package.import",
+        json!({
+            "storeRoot": store_root,
+            "sourcePath": source_path,
+        }),
+        PROFILE_PACKAGE_TIMEOUT,
+    )
+    .await
+}
+
 async fn profiles_list_with_runner<R: SidecarRunner>(
     runner: &R,
     store_root: String,
@@ -728,6 +804,21 @@ fn validate_non_empty_arg(label: &str, value: &str) -> Result<(), SidecarCommand
         return Err(bridge_error(
             SIDECAR_PROTOCOL_ERROR,
             &format!("The {label} argument is required."),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bounded_non_empty_arg(
+    label: &str,
+    value: &str,
+    max_chars: usize,
+) -> Result<(), SidecarCommandError> {
+    validate_non_empty_arg(label, value)?;
+    if value.chars().count() > max_chars {
+        return Err(bridge_error(
+            SIDECAR_PROTOCOL_ERROR,
+            &format!("The {label} argument exceeds the allowed length."),
         ));
     }
     Ok(())
@@ -1676,6 +1767,32 @@ mod tests {
             runner,
             store_root.to_string(),
             profile_id.to_string(),
+            source_path.to_string(),
+        ))
+    }
+
+    fn run_profile_package_export(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+        destination_path: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profile_package_export_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+            destination_path.to_string(),
+        ))
+    }
+
+    fn run_profile_package_import(
+        runner: &FakeRunner,
+        store_root: &str,
+        source_path: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(profile_package_import_with_runner(
+            runner,
+            store_root.to_string(),
             source_path.to_string(),
         ))
     }
@@ -2648,6 +2765,307 @@ mod tests {
         );
         assert_eq!(runner.last_timeout(), COOKIE_PORTABILITY_TIMEOUT);
         assert!(!error.message.contains("/selected/private"));
+    }
+
+    #[test]
+    fn profile_package_export_injects_store_root_profile_and_destination_only_with_opaque_path() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let selected_path = "/selected/private/../opaque-export.tpkg";
+
+        run_profile_package_export(&runner, "/app/data/root", "profile-id", selected_path)
+            .expect("package export reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "portability.profile_package.export",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("profileId", json!("profile-id")),
+                ("destinationPath", json!(selected_path)),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), PROFILE_PACKAGE_TIMEOUT);
+        assert!(runner.last_timeout() > COOKIE_PORTABILITY_TIMEOUT);
+    }
+
+    #[test]
+    fn profile_package_import_injects_store_root_and_source_only_with_opaque_path() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        let selected_path = "/selected/private/../opaque-import.tpkg";
+
+        run_profile_package_import(&runner, "/app/data/root", selected_path)
+            .expect("package import reaches sidecar");
+
+        let request = runner.last_request();
+        assert_request_params(
+            &request,
+            "portability.profile_package.import",
+            &[
+                ("storeRoot", json!("/app/data/root")),
+                ("sourcePath", json!(selected_path)),
+            ],
+        );
+        assert_eq!(runner.last_timeout(), PROFILE_PACKAGE_TIMEOUT);
+        assert!(runner.last_timeout() > COOKIE_PORTABILITY_TIMEOUT);
+    }
+
+    #[test]
+    fn profile_package_typed_busy_and_package_errors_are_passed_through() {
+        let busy_runner = FakeRunner::new(FakeMode::TypedError {
+            code: "PORTABILITY_PROFILE_BUSY",
+            message: "Profile must be stopped before package export.",
+            detail_ref: "profile-package-busy-detail",
+        });
+
+        let busy_error = run_profile_package_export(
+            &busy_runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/export.tpkg",
+        )
+        .expect_err("package busy error surfaces");
+
+        assert_eq!(busy_error.code, "PORTABILITY_PROFILE_BUSY");
+        assert_eq!(
+            busy_error.message,
+            "Profile must be stopped before package export."
+        );
+        assert!(busy_error.recoverable);
+        assert_eq!(busy_error.detail_ref, "profile-package-busy-detail");
+        assert_eq!(
+            busy_runner.last_request()["method"],
+            "portability.profile_package.export"
+        );
+
+        for code in [
+            "PORTABILITY_PACKAGE_INVALID",
+            "PORTABILITY_PACKAGE_READ_FAILED",
+            "PORTABILITY_PACKAGE_WRITE_FAILED",
+        ] {
+            let package_runner = FakeRunner::new(FakeMode::TypedError {
+                code,
+                message: "The selected ThePrivator package could not be processed.",
+                detail_ref: "profile-package-detail",
+            });
+
+            let package_error = run_profile_package_import(
+                &package_runner,
+                "/app/data/root",
+                "/selected/private/import.tpkg",
+            )
+            .expect_err("package typed error surfaces");
+
+            assert_eq!(package_error.code, code);
+            assert_eq!(
+                package_error.message,
+                "The selected ThePrivator package could not be processed."
+            );
+            assert!(package_error.recoverable);
+            assert_eq!(package_error.detail_ref, "profile-package-detail");
+            assert_eq!(
+                package_runner.last_request()["method"],
+                "portability.profile_package.import"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_package_malformed_inputs_are_rejected_before_dispatch() {
+        let selected_destination = "/selected/private/export.tpkg".to_string();
+        let too_long = "x".repeat(MAX_PROFILE_PACKAGE_ARGUMENT_CHARS + 1);
+        let export_cases = vec![
+            (
+                "empty profile id",
+                " ".to_string(),
+                selected_destination.clone(),
+                "profile id",
+            ),
+            (
+                "empty destination path",
+                "profile-id".to_string(),
+                "  ".to_string(),
+                "destination path",
+            ),
+            (
+                "too long profile id",
+                too_long.clone(),
+                selected_destination.clone(),
+                "exceeds",
+            ),
+            (
+                "too long destination path",
+                "profile-id".to_string(),
+                too_long.clone(),
+                "exceeds",
+            ),
+        ];
+
+        for (label, profile_id, destination_path, message_fragment) in export_cases {
+            let runner = FakeRunner::new(FakeMode::HealthSuccess);
+            let error = run_profile_package_export(
+                &runner,
+                "/app/data/root",
+                &profile_id,
+                &destination_path,
+            )
+            .expect_err(label);
+
+            assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR, "{label}");
+            assert!(error.message.contains(message_fragment), "{label}");
+            assert!(error.detail_ref.starts_with("bridge-"), "{label}");
+            assert!(!error.message.contains("/app/data/root"), "{label}");
+            assert!(!error.message.contains("/selected/private"), "{label}");
+            assert!(!error.message.contains(&too_long), "{label}");
+            assert!(!runner.was_called(), "{label} dispatched unexpectedly");
+        }
+
+        for (label, source_path, message_fragment) in [
+            ("empty source path", " ".to_string(), "source path"),
+            ("too long source path", too_long.clone(), "exceeds"),
+        ] {
+            let runner = FakeRunner::new(FakeMode::HealthSuccess);
+            let error = run_profile_package_import(&runner, "/app/data/root", &source_path)
+                .expect_err(label);
+
+            assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR, "{label}");
+            assert!(error.message.contains(message_fragment), "{label}");
+            assert!(!error.message.contains("/app/data/root"), "{label}");
+            assert!(!error.message.contains(&too_long), "{label}");
+            assert!(!runner.was_called(), "{label} dispatched unexpectedly");
+        }
+    }
+
+    #[test]
+    fn profile_package_timeout_unavailable_and_protocol_errors_use_safe_messages() {
+        let timeout_runner = FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Timeout));
+        let timeout_error = run_profile_package_export(
+            &timeout_runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/export.tpkg",
+        )
+        .expect_err("package export timeout surfaces");
+
+        assert_eq!(timeout_error.code, SIDECAR_TIMEOUT);
+        assert!(timeout_error.detail_ref.starts_with("bridge-"));
+        assert_eq!(
+            timeout_runner.last_request()["method"],
+            "portability.profile_package.export"
+        );
+        assert_eq!(timeout_runner.last_timeout(), PROFILE_PACKAGE_TIMEOUT);
+        assert!(!timeout_error.message.contains("/app/data/root"));
+        assert!(!timeout_error.message.contains("/selected/private"));
+
+        let unavailable_runner =
+            FakeRunner::new(FakeMode::RunnerError(SidecarRunnerError::Unavailable));
+        let unavailable_error = run_profile_package_import(
+            &unavailable_runner,
+            "/app/data/root",
+            "/selected/private/import.tpkg",
+        )
+        .expect_err("package import missing sidecar surfaces");
+
+        assert_eq!(unavailable_error.code, SIDECAR_UNAVAILABLE);
+        assert!(unavailable_error.message.contains("sidecar:build"));
+        assert_eq!(
+            unavailable_runner.last_request()["method"],
+            "portability.profile_package.import"
+        );
+        assert!(!unavailable_error.message.contains("/app/data/root"));
+        assert!(!unavailable_error.message.contains("/selected/private"));
+
+        let protocol_runner = FakeRunner::new(FakeMode::Static(output(Some(0), "not json\n", "")));
+        let protocol_error = run_profile_package_import(
+            &protocol_runner,
+            "/app/data/root",
+            "/selected/private/import.tpkg",
+        )
+        .expect_err("package malformed stdout surfaces");
+
+        assert_eq!(protocol_error.code, SIDECAR_PROTOCOL_ERROR);
+        assert_eq!(
+            protocol_runner.last_request()["method"],
+            "portability.profile_package.import"
+        );
+        assert_eq!(protocol_runner.last_timeout(), PROFILE_PACKAGE_TIMEOUT);
+        assert!(!protocol_error.message.contains("/app/data/root"));
+        assert!(!protocol_error.message.contains("/selected/private"));
+    }
+
+    #[test]
+    fn profile_package_bridge_failure_diagnostics_redact_selected_paths() {
+        let store = temp_diagnostics_store();
+        let runner = FakeRunner::with_diagnostics(
+            FakeMode::Static(output(Some(0), "not json\n", "")),
+            store.clone(),
+        );
+
+        let error = run_profile_package_export(
+            &runner,
+            "/app/data/root",
+            "profile-id",
+            "/selected/private/export.tpkg",
+        )
+        .expect_err("malformed package response persists bridge diagnostic");
+
+        assert_eq!(error.code, SIDECAR_PROTOCOL_ERROR);
+        let log = diagnostics_log_text(&store);
+        assert!(log.contains("sidecar.bridge_failure"));
+        assert!(log.contains("portability.profile_package.export"));
+        assert!(!log.contains("/app/data/root"));
+        assert!(!log.contains("/selected/private"));
+        assert!(!log.contains("export.tpkg"));
+    }
+
+    #[test]
+    fn profile_package_capability_posture_remains_minimal() {
+        let capability_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
+        let capability: Value = serde_json::from_str(
+            &fs::read_to_string(capability_path).expect("default capability is readable"),
+        )
+        .expect("default capability is valid JSON");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("permissions are an array");
+        let string_permissions: Vec<&str> = permissions.iter().filter_map(Value::as_str).collect();
+
+        assert_eq!(
+            string_permissions,
+            vec!["core:default", "dialog:allow-open", "dialog:allow-save"]
+        );
+
+        let spawn_permissions: Vec<&Value> = permissions
+            .iter()
+            .filter(|permission| permission.get("identifier") == Some(&json!("shell:allow-spawn")))
+            .collect();
+        assert_eq!(spawn_permissions.len(), 1);
+        let allow = spawn_permissions[0]["allow"]
+            .as_array()
+            .expect("shell spawn allowlist is an array");
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0]["name"], SIDECAR_EXTERNAL_BIN);
+        assert_eq!(allow[0]["sidecar"], true);
+
+        let serialized = serde_json::to_string(&capability).expect("capability serializes");
+        for forbidden in [
+            "fs:",
+            "opener:",
+            "shell:allow-open",
+            "shell:allow-execute",
+            "shell:allow-kill",
+            "dialog:default",
+            "dialog:allow-message",
+            "dialog:allow-ask",
+            "dialog:allow-confirm",
+            "dialog:allow-pick-folder",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "capability unexpectedly contains {forbidden}"
+            );
+        }
     }
 
     #[test]
