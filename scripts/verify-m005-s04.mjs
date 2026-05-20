@@ -31,6 +31,7 @@ import {
   readTargetTriple as readS06TargetTriple,
   resolveChromiumExecutable as resolveS06ChromiumExecutable,
   waitForProfileButton as waitS06ProfileButton,
+  waitForMetricValue as waitS06MetricValueVisible,
   startTauriDriverProcess as startS06TauriDriverProcess,
   waitForProfileCard as waitS06ProfileCard,
   waitForVisibleElement as waitS06VisibleElement,
@@ -60,6 +61,7 @@ const NATIVE_DIALOG_TOOL_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_DIALOG_
 const PACKAGE_ARCHIVE_MAX_MEMBERS = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBERS ?? 512);
 const PACKAGE_ARCHIVE_MAX_MEMBER_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBER_BYTES ?? 4 * 1024 * 1024);
 const PACKAGE_ARCHIVE_MAX_TOTAL_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_TOTAL_BYTES ?? 16 * 1024 * 1024);
+const PACKAGED_SIDECAR_BUSY_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_BUSY_TIMEOUT_MS ?? 20_000);
 
 const S04_SOURCE_GUARD_FILES = Object.freeze([
   "scripts/verify-m005-s04.mjs",
@@ -1020,6 +1022,100 @@ export function inspectM005S04Diagnostics({ appDataRoot, requiredMethods = FIXED
   return { value: { records }, log: summary };
 }
 
+export function inspectM005S04CookieExportFile({ exportPath, expectedRows = [] } = {}, context = createM005S04PublicScanContext({ selectedPaths: [exportPath].filter(Boolean), cookieDomains: expectedRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedRows.map((row) => row.name).filter(Boolean), cookieValues: expectedRows.map((row) => row.value).filter(Boolean) })) {
+  assert(typeof exportPath === "string" && exportPath.length > 0, "M005/S04 cookie export inspection requires a private selected path.", { phase: "cookie-export-file", markerClass: "missing_selected_path" });
+  const payload = readJsonFile(exportPath, "exported cookie file");
+  assert(payload?.format === "theprivator.cookies" && payload.version === 1 && Array.isArray(payload.cookies), "M005/S04 exported ThePrivator cookie file was malformed.", { phase: "cookie-export-file", markerClass: "cookie_export_malformed" });
+  const missingExpectedCount = expectedRows.filter((expected) => !payload.cookies.some((cookie) => cookie?.domain === expected.domain && cookie?.name === expected.name && cookie?.value === expected.value)).length;
+  assert(missingExpectedCount === 0, "M005/S04 exported cookie file missed expected portable cookies.", { phase: "cookie-export-file", markerClass: "cookie_export_mismatch", missingExpectedCount, expectedCookieCount: expectedRows.length });
+  const summary = { cookieExportFile: "valid", format: "theprivator-json", cookieRowCount: payload.cookies.length, expectedRowsPresent: true, selectionPrivate: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { cookieCount: payload.cookies.length }, log: summary };
+}
+
+export function assertM005S04RuntimeBookkeeping({ appDataRoot, profile, expectedRunning, expectedRunningCount } = {}, context = createM005S04PublicScanContext({ appDataRoot })) {
+  assert(typeof appDataRoot === "string" && appDataRoot.length > 0, "M005/S04 runtime bookkeeping assertion requires an app-data root.", { phase: "runtime.bookkeeping", markerClass: "missing_app_data_root" });
+  assert(isPlainObject(profile) && typeof profile.id === "string", "M005/S04 runtime bookkeeping assertion requires a profile record.", { phase: "runtime.bookkeeping", markerClass: "profile_store_malformed" });
+  const registryPath = join(appDataRoot, "profile-store", "runtime", "chromium-processes.json");
+  let payload = { registryVersion: "absent", processes: {} };
+  if (existsSync(registryPath)) {
+    payload = readJsonFile(registryPath, "runtime/chromium-processes.json");
+    assert(isPlainObject(payload) && payload.registryVersion === 1 && isPlainObject(payload.processes), "M005/S04 Chromium runtime registry was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+  }
+
+  const processes = isPlainObject(payload.processes) ? payload.processes : {};
+  const entries = Object.entries(processes);
+  for (const [profileId, record] of entries) {
+    assert(isPlainObject(record) && record.profileId === profileId, "M005/S04 runtime record profile id was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+    assert(typeof record.profileId === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(record.profileId), "M005/S04 runtime record profile id was unsafe.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+    assert(Number.isInteger(record.pid) && record.pid > 0, "M005/S04 runtime record pid was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+    assert(typeof record.startedAt === "string" && record.startedAt.endsWith("Z"), "M005/S04 runtime record timestamp was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+    assert(isSafeRelativeStorePath(record.userDataDir), "M005/S04 runtime record user-data scope was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+    assert(typeof record.ownerToken === "string", "M005/S04 runtime record owner token shape was malformed.", { phase: "runtime.bookkeeping", markerClass: "runtime_registry_malformed" });
+  }
+
+  const hasProfile = Object.prototype.hasOwnProperty.call(processes, profile.id);
+  assert(Boolean(hasProfile) === Boolean(expectedRunning), expectedRunning ? "M005/S04 restored profile did not reach running runtime bookkeeping." : "M005/S04 restored profile did not stop cleanly in runtime bookkeeping.", { phase: "runtime.bookkeeping", markerClass: expectedRunning ? "runtime_not_running" : "runtime_not_stopped", runningCount: entries.length });
+  if (expectedRunningCount !== undefined) assert(entries.length === expectedRunningCount, "M005/S04 runtime running count did not match expectation.", { phase: "runtime.bookkeeping", markerClass: "runtime_count_mismatch", runningCount: entries.length, expectedRunningCount });
+  const summary = { runtimeBookkeeping: expectedRunning ? "running" : "stopped", registry: existsSync(registryPath) ? "present" : "absent", profileRecord: hasProfile ? "present" : "absent", runningCount: entries.length, userDataScope: hasProfile ? "safe-relative" : "not-running" };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { runningCount: entries.length, hasProfile }, log: summary };
+}
+
+function parseM005S04NdjsonStream(text, label, context) {
+  return String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parsed = parseJsonLine(line, label);
+    const marker = findM005S04ForbiddenPublicMarker(redactM005S04(parsed, context), context);
+    assert(!marker, "M005/S04 packaged sidecar stream contained forbidden public material after redaction.", { phase: "sidecar-direct", markerClass: marker?.markerClass ?? "sidecar_stream_forbidden", fieldPath: marker?.fieldPath ?? "$" });
+    return parsed;
+  });
+}
+
+function assertM005S04SafeSidecarDiagnostic(diagnostic, { method, status, errorCode } = {}) {
+  assert(isPlainObject(diagnostic), "M005/S04 packaged sidecar diagnostic was not an object.", { phase: "sidecar-direct", markerClass: "diagnostics_malformed" });
+  const unsafeKeys = Object.keys(diagnostic).filter((key) => !SAFE_DIAGNOSTIC_KEYS.has(key));
+  assert(unsafeKeys.length === 0, "M005/S04 packaged sidecar diagnostic contained unsafe raw fields.", { phase: "sidecar-direct", markerClass: "diagnostics_forbidden_field", unsafeFieldCount: unsafeKeys.length });
+  assert(diagnostic.event === "sidecar.request", "M005/S04 packaged sidecar diagnostic event mismatch.", { phase: "sidecar-direct", markerClass: "diagnostics_event_unsafe" });
+  assert(diagnostic.method === method, "M005/S04 packaged sidecar diagnostic method mismatch.", { phase: "sidecar-direct", markerClass: "diagnostics_method_mismatch" });
+  assert(diagnostic.status === status, "M005/S04 packaged sidecar diagnostic status mismatch.", { phase: "sidecar-direct", markerClass: "diagnostics_status_unsafe" });
+  assert(diagnostic.errorCode === errorCode, "M005/S04 packaged sidecar diagnostic error code mismatch.", { phase: "sidecar-direct", markerClass: "diagnostics_error_mismatch" });
+  assertSafeDiagnosticToken(diagnostic.detailRef, "detailRef");
+  return diagnostic;
+}
+
+export function runM005S04PackagedSidecarRequest(binaryPath, payload, { rootDir = ROOT_DIR, env = {}, timeoutMs = PACKAGED_SIDECAR_BUSY_TIMEOUT_MS, context = createM005S04PublicScanContext({ rootDir }) } = {}) {
+  assert(typeof binaryPath === "string" && binaryPath.length > 0, "M005/S04 packaged sidecar request requires a binary path.", { phase: "sidecar-direct", markerClass: "missing_sidecar_binary" });
+  assert(isPlainObject(payload) && typeof payload.method === "string", "M005/S04 packaged sidecar request requires a method payload.", { phase: "sidecar-direct", markerClass: "sidecar_request_malformed" });
+  const result = spawnSync(executable(binaryPath), [], { cwd: rootDir, input: `${JSON.stringify(payload)}\n`, env: { ...process.env, ...env, PYTHONUNBUFFERED: "1" }, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
+  if (result.error || result.status !== 0) {
+    const failure = formatM005S04CommandFailure("packaged-sidecar", result, context, "sidecar-direct");
+    fail("M005/S04 packaged sidecar direct request failed to execute.", { ...failure, markerClass: result.error?.code === "ETIMEDOUT" ? "sidecar_direct_timeout" : "sidecar_direct_failed" });
+  }
+  const responses = parseM005S04NdjsonStream(result.stdout, "packaged sidecar response", context);
+  const diagnostics = parseM005S04NdjsonStream(result.stderr, "packaged sidecar diagnostic", context);
+  assert(responses.length === 1, "M005/S04 packaged sidecar direct request produced a malformed response stream.", { phase: "sidecar-direct", markerClass: "sidecar_response_malformed", responseCount: responses.length });
+  assert(diagnostics.length >= 1, "M005/S04 packaged sidecar direct request did not emit diagnostics.", { phase: "sidecar-direct", markerClass: "diagnostics_missing" });
+  return { response: responses[0], diagnostic: diagnostics[0], diagnostics };
+}
+
+export function assertM005S04BusyGuardTranscript({ transcript, requestId, method = "portability.profile_package.export" } = {}, context = createM005S04PublicScanContext()) {
+  const response = transcript?.response;
+  assert(isPlainObject(response), "M005/S04 busy guard response envelope was malformed.", { phase: "busy-guard", markerClass: "busy_response_malformed" });
+  assert(response.id === requestId && response.ok === false, "M005/S04 busy guard did not return the expected failed response envelope.", { phase: "busy-guard", markerClass: "busy_response_malformed", ok: response.ok === false });
+  const error = response.error;
+  assertExactKeys(error, ["code", "detailRef", "message", "recoverable"], "busy error", "busy-guard");
+  assert(error.code === "PORTABILITY_PROFILE_BUSY", "M005/S04 busy guard returned an unexpected error code.", { phase: "busy-guard", markerClass: "busy_guard_unexpected", errorCode: error.code ?? null });
+  assert(error.recoverable === true, "M005/S04 busy guard error must remain recoverable.", { phase: "busy-guard", markerClass: "busy_response_malformed" });
+  assertSafeDiagnosticToken(error.detailRef, "detailRef");
+  const messageMarker = findM005S04ForbiddenPublicMarker(error.message, context);
+  assert(!messageMarker, "M005/S04 busy guard message contained forbidden material.", { phase: "busy-guard", markerClass: messageMarker?.markerClass ?? "busy_message_forbidden", fieldPath: messageMarker?.fieldPath ?? "$" });
+  const diagnostic = assertM005S04SafeSidecarDiagnostic(transcript.diagnostic, { method, status: "error", errorCode: "PORTABILITY_PROFILE_BUSY" });
+  assert(diagnostic.detailRef === error.detailRef, "M005/S04 busy guard diagnostic detailRef mismatch.", { phase: "busy-guard", markerClass: "diagnostics_error_mismatch" });
+  const summary = { busyGuard: "blocked", method, errorCode: "PORTABILITY_PROFILE_BUSY", recoverable: true, detailRef: "observed", diagnosticStatus: "error" };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { errorCode: error.code }, log: summary };
+}
+
 function safeCleanupStatus(value) {
   if (typeof value === "string") return value.replace(/[^A-Za-z0-9_.:-]/g, "-").slice(0, 80) || "unknown";
   if (isPlainObject(value) && typeof value.status === "string") return safeCleanupStatus(value.status);
@@ -1182,8 +1278,29 @@ export function assertM005S04SourceGuardrails({ rootDir = ROOT_DIR } = {}) {
   return { scannedFiles: scannedFiles.length, ignoredArtifactImports: "absent", frontendFilesystemAuthority: "absent", shellOpenAuthority: "absent", uiUsesNativeDialogs: true, uiUsesTypedWrappers: true, clientUsesFixedCommands: true, rustFixedCommands: true, privateScopeInjected: true };
 }
 
+export function assertM005S04Documentation({ rootDir = ROOT_DIR } = {}) {
+  const readme = readFileSync(assertFileExists(rootDir, "README.md"), "utf8");
+  const requiredFragments = [
+    "npm run verify:m005:s04",
+    "--preflight-only",
+    "--build-only",
+    "--ui-only",
+    "--skip-build",
+    "--keep-temp",
+    "PORTABILITY_PROFILE_BUSY",
+    "R033/R034/R035/R037/R038/R039/R040",
+    "verify.m005.s04",
+    "native open/save dialogs",
+    "redaction scanner",
+    "cleanup",
+  ];
+  const missingFragments = requiredFragments.filter((fragment) => !readme.includes(fragment));
+  assert(missingFragments.length === 0, "README must document the M005/S04 packaged portability verifier boundary.", { phase: "docs", markerClass: "docs_missing", missingFragmentCount: missingFragments.length });
+  return { readme: "documented", command: "verify:m005:s04", modes: 5, requirements: "R033/R034/R035/R037/R038/R039/R040" };
+}
+
 export function assertM005S04Guardrails({ rootDir = ROOT_DIR, platform = process.platform } = {}) {
-  return { capability: assertM005S04CapabilityConfig({ rootDir }), tauriConfig: assertM005S04TauriConfig({ rootDir, platform }), source: assertM005S04SourceGuardrails({ rootDir }) };
+  return { capability: assertM005S04CapabilityConfig({ rootDir }), tauriConfig: assertM005S04TauriConfig({ rootDir, platform }), source: assertM005S04SourceGuardrails({ rootDir }), docs: assertM005S04Documentation({ rootDir }) };
 }
 
 function missingTool(name, toolClass, remediation) {
@@ -1343,6 +1460,26 @@ async function readM005S04PackageImportSuccessText(driver) {
   return readM005S04FirstVisibleText(driver, By.xpath(`//section[contains(concat(' ', normalize-space(@class), ' '), ' package-portability-success ')][.//strong[normalize-space()='ThePrivator package import completed.']]`));
 }
 
+async function readM005S04CookieSuccessText(driver, profileName, headingText) {
+  return readM005S04FirstVisibleText(driver, By.xpath(`${m005S04ProfileCardXPath(profileName)}//section[contains(concat(' ', normalize-space(@class), ' '), ' cookie-portability-success ')][.//strong[normalize-space()=${xpathLiteral(headingText)}]]`));
+}
+
+async function findM005S04ProfileButton(driver, profileName, buttonText) {
+  const buttons = await driver.findElements(By.xpath(`${m005S04ProfileCardXPath(profileName)}//button[normalize-space()=${xpathLiteral(buttonText)}]`));
+  for (const button of buttons) {
+    if (await button.isDisplayed()) return button;
+  }
+  return null;
+}
+
+async function assertM005S04ProfileButtonDisabled(driver, profileName, buttonText) {
+  const button = await findM005S04ProfileButton(driver, profileName, buttonText);
+  assert(button, "M005/S04 expected a visible profile portability control.", { phase: "ui.busy-guard", markerClass: "ui_control_missing", control: buttonText });
+  const enabled = await button.isEnabled();
+  assert(!enabled, "M005/S04 running profile portability control was not disabled.", { phase: "ui.busy-guard", markerClass: "running_control_enabled", control: buttonText });
+  return { control: buttonText, disabled: true };
+}
+
 async function waitForM005S04GlobalButton(driver, buttonText, runtime, options = {}) {
   const selector = By.xpath(`//button[normalize-space()=${xpathLiteral(buttonText)}]`);
   return waitS06VisibleElement(driver, selector, runtime, buttonText, { ...options, step: options.step ?? "m005-global-button" });
@@ -1363,7 +1500,7 @@ export function buildM005S04FinalSummary({ status, mode = "full", checks = STEP_
     event: VERIFY_EVENT,
     status,
     mode,
-    guardrails: { capability: guardrails.capability ? "pass" : undefined, tauriConfig: guardrails.tauriConfig ? "pass" : undefined, source: guardrails.source ? "pass" : undefined, permissions: guardrails.capability?.permissions, dialogOpenSave: guardrails.capability?.dialogOpenSave, fixedSidecarSpawn: guardrails.capability?.fixedSidecarSpawn },
+    guardrails: { capability: guardrails.capability ? "pass" : undefined, tauriConfig: guardrails.tauriConfig ? "pass" : undefined, source: guardrails.source ? "pass" : undefined, docs: guardrails.docs ? "pass" : undefined, permissions: guardrails.capability?.permissions, dialogOpenSave: guardrails.capability?.dialogOpenSave, fixedSidecarSpawn: guardrails.capability?.fixedSidecarSpawn },
     preflight: { webdriver: preflight.webdriver ? { status: preflight.webdriver.missingToolClasses?.length ? "missing" : "available", display: preflight.webdriver.display, missingToolClasses: preflight.webdriver.missingToolClasses ?? [] } : undefined, nativeDialog: preflight.nativeDialog ? { status: preflight.nativeDialog.status, strategy: preflight.nativeDialog.strategy, display: preflight.nativeDialog.display, missingToolClasses: preflight.nativeDialog.missingToolClasses ?? [] } : undefined, chromium: preflight.chromium ? { status: "available", source: preflight.chromium.source ?? "detected" } : undefined },
     build,
     runtime,
@@ -1433,7 +1570,7 @@ export async function driveM005S04PackageImportViaUi(driver, runtime, { packageP
   const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan }, context);
   await waitForVisibleText(driver, "ThePrivator package import completed.", runtime, { step: "m005-package-import-success" });
   await waitForVisibleText(driver, "The sidecar imported a stopped copied profile and returned only safe aggregate metadata to the UI.", runtime, { step: "m005-package-import-redaction-copy" });
-  const restored = assertM005S04CopiedProfileRestored({ profileStorePath: runtime.profileStore.profileStorePath, appDataRoot: runtime.profileStore.appDataRoot, sourceProfile: runtime.profileStore.profile, expectedCookieRows: runtime.fixtures?.sourceCookies ?? [], expectedPayloadRelativePaths: runtime.fixtures?.expectedPayloadRelativePaths ?? ["Default/Preferences"] }, context);
+  const restored = assertM005S04CopiedProfileRestored({ profileStorePath: runtime.profileStore.profileStorePath, appDataRoot: runtime.profileStore.appDataRoot, sourceProfile: runtime.profileStore.profile, expectedCookieRows: runtime.fixtures?.currentCookies ?? runtime.fixtures?.sourceCookies ?? [], expectedPayloadRelativePaths: runtime.fixtures?.expectedPayloadRelativePaths ?? ["Default/Preferences"] }, context);
   await waitForProfileCard(driver, restored.value.profile.name, runtime, { step: "m005-package-import-card" });
   const successText = await readM005S04PackageImportSuccessText(driver);
   assert(successText.length > 0, "M005/S04 package import success summary was not readable for redaction scanning.", { phase: "ui.package-import", markerClass: "ui_success_missing" });
@@ -1441,6 +1578,84 @@ export async function driveM005S04PackageImportViaUi(driver, runtime, { packageP
   const summary = { packageImportUi: "success", dialog: dialog.log, clickMode, copiedProfileVisible: true, copiedProfileRestored: restored.log, successTextScanned: true };
   assertM005S04PublicEvidenceRedacted(summary, context);
   return { value: { importedProfile: restored.value.profile, importedUserDataRoot: restored.value.userDataRoot, successText }, log: summary };
+}
+
+export async function driveM005S04CookieExportViaUi(driver, runtime, { exportPath, strategyPlan, readProfileCardText = readS06ProfileCardText, waitForProfileButton = waitS06ProfileButton, waitForVisibleText = waitS06VisibleText, driveNativeDialogSelection = driveM005S04NativeDialogSelection } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [exportPath].filter(Boolean), cookieDomains: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.value).filter(Boolean) })) {
+  assert(driver, "M005/S04 cookie export requires a WebDriver session.", { phase: "ui.cookie-export", markerClass: "missing_webdriver_session" });
+  assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 cookie export requires a source profile name.", { phase: "ui.cookie-export", markerClass: "missing_smoke_context" });
+  assert(typeof exportPath === "string" && exportPath.endsWith(".json"), "M005/S04 cookie export requires a private JSON destination.", { phase: "ui.cookie-export", markerClass: "missing_selected_path" });
+  const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Export ThePrivator JSON", runtime, { step: "m005-cookie-export-click" });
+  const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.cookie-export", "cookie_export_click_failed");
+  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: exportPath, extension: "json", strategyPlan }, context);
+  await waitForVisibleText(driver, "ThePrivator JSON export completed.", runtime, { step: "m005-cookie-export-success" });
+  await waitForVisibleText(driver, "The sidecar wrote the selected destination without returning the path or cookie contents to the UI.", runtime, { step: "m005-cookie-export-redaction-copy" });
+  const successText = await readM005S04CookieSuccessText(driver, runtime.smokeContext.smokeProfileName, "ThePrivator JSON export completed.");
+  assert(successText.length > 0, "M005/S04 cookie export success summary was not readable for redaction scanning.", { phase: "ui.cookie-export", markerClass: "ui_success_missing" });
+  assertM005S04VisibleTextRedacted({ text: successText, phase: "ui.cookie-export" }, context);
+  const cardText = await readProfileCardText(driver, runtime.smokeContext.smokeProfileName);
+  assert(cardText.includes("Cookie portability for stopped profiles"), "M005/S04 source profile card did not expose cookie portability copy.", { phase: "ui.cookie-export", markerClass: "ui_card_malformed" });
+  const summary = { cookieExportUi: "success", dialog: dialog.log, clickMode, successTextObserved: true, successTextScanned: true, sourceCardObserved: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { successText }, log: summary };
+}
+
+export async function driveM005S04CookieReplaceViaUi(driver, runtime, { importPath, strategyPlan, waitForProfileButton = waitS06ProfileButton, waitForVisibleText = waitS06VisibleText, driveNativeDialogSelection = driveM005S04NativeDialogSelection } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [importPath].filter(Boolean), cookieDomains: (runtime?.fixtures?.importCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.importCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.importCookies ?? []).map((row) => row.value).filter(Boolean) })) {
+  assert(driver, "M005/S04 cookie replace requires a WebDriver session.", { phase: "ui.cookie-replace", markerClass: "missing_webdriver_session" });
+  assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 cookie replace requires a source profile name.", { phase: "ui.cookie-replace", markerClass: "missing_smoke_context" });
+  assert(typeof importPath === "string" && importPath.endsWith(".json"), "M005/S04 cookie replace requires a private JSON source.", { phase: "ui.cookie-replace", markerClass: "missing_selected_path" });
+  const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Replace cookies", runtime, { step: "m005-cookie-replace-click" });
+  const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.cookie-replace", "cookie_replace_click_failed");
+  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: importPath, extension: "json", strategyPlan }, context);
+  await waitForVisibleText(driver, "ThePrivator JSON import replaced existing cookies.", runtime, { step: "m005-cookie-replace-success" });
+  await waitForVisibleText(driver, "The sidecar replaced profile cookies from the selected source without returning the path or cookie contents to the UI.", runtime, { step: "m005-cookie-replace-redaction-copy" });
+  const successText = await readM005S04CookieSuccessText(driver, runtime.smokeContext.smokeProfileName, "ThePrivator JSON import replaced existing cookies.");
+  assert(successText.length > 0, "M005/S04 cookie replace success summary was not readable for redaction scanning.", { phase: "ui.cookie-replace", markerClass: "ui_success_missing" });
+  assertM005S04VisibleTextRedacted({ text: successText, phase: "ui.cookie-replace" }, context);
+  const summary = { cookieReplaceUi: "success", dialog: dialog.log, clickMode, successTextObserved: true, successTextScanned: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { successText }, log: summary };
+}
+
+export async function driveM005S04RestoredLaunchAndBusyGuard(driver, runtime, { artifactProof, packageProof, waitForProfileButton = waitS06ProfileButton, waitForVisibleText = waitS06VisibleText, waitForMetricValue = waitS06MetricValueVisible, readProfileSectionText = readS06ProfileSectionText, runPackagedSidecarRequest = runM005S04PackagedSidecarRequest } = {}, context = createM005S04PublicScanContext({ rootDir: runtime?.rootDir, tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: packageProof?.imported?.importedUserDataRoot, selectedPaths: [runtime?.fixtures?.busyPackagePath].filter(Boolean), cookieDomains: (runtime?.fixtures?.currentCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.currentCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.currentCookies ?? []).map((row) => row.value).filter(Boolean) })) {
+  const importedProfile = packageProof?.imported?.importedProfile;
+  assert(driver, "M005/S04 restored launch requires a WebDriver session.", { phase: "runtime.restored-launch", markerClass: "missing_webdriver_session" });
+  assert(isPlainObject(importedProfile) && typeof importedProfile.name === "string", "M005/S04 restored launch requires the imported copied profile.", { phase: "runtime.restored-launch", markerClass: "copied_profile_missing" });
+  assert(artifactProof?.releaseSidecar, "M005/S04 busy guard requires the packaged sidecar proof.", { phase: "busy-guard", markerClass: "missing_sidecar_binary" });
+  const launchButton = await waitForProfileButton(driver, importedProfile.name, "Launch Chromium", runtime, { step: "m005-restored-launch-click" });
+  const launchClickMode = await clickM005S04UiElement(driver, launchButton, runtime, "runtime.restored-launch", "restored_launch_click_failed");
+  runtime.m005S04RunningObserved = true;
+  await waitForVisibleText(driver, "Running from sidecar runtime bookkeeping", runtime, { step: "m005-restored-launch-running" });
+  await waitForMetricValue(driver, "Profile observability", "Running count", "1", runtime, { step: "m005-restored-launch-running" });
+  const running = assertM005S04RuntimeBookkeeping({ appDataRoot: runtime.profileStore.appDataRoot, profile: importedProfile, expectedRunning: true, expectedRunningCount: 1 }, context);
+  await waitForVisibleText(driver, "Cookie portability is stopped-profile only while Chromium is running.", runtime, { step: "m005-restored-launch-cookie-guard" });
+  await waitForVisibleText(driver, "Profile package export is stopped-profile only while Chromium is running.", runtime, { step: "m005-restored-launch-package-guard" });
+  const disabledControls = [
+    await assertM005S04ProfileButtonDisabled(driver, importedProfile.name, "Export ThePrivator package"),
+    await assertM005S04ProfileButtonDisabled(driver, importedProfile.name, "Export ThePrivator JSON"),
+    await assertM005S04ProfileButtonDisabled(driver, importedProfile.name, "Replace cookies"),
+  ];
+  const runningSectionText = await readProfileSectionText(driver, importedProfile.name, `${importedProfile.name} Chromium lifecycle`);
+  assertM005S04VisibleTextRedacted({ text: runningSectionText, phase: "runtime.restored-launch" }, context);
+
+  const requestId = "verify-m005-s04-busy-package-export";
+  const transcript = runPackagedSidecarRequest(join(runtime.rootDir, artifactProof.releaseSidecar), {
+    id: requestId,
+    method: "portability.profile_package.export",
+    params: { storeRoot: runtime.profileStore.appDataRoot, profileId: importedProfile.id, destinationPath: runtime.fixtures.busyPackagePath },
+  }, { rootDir: runtime.rootDir, context });
+  const busy = assertM005S04BusyGuardTranscript({ transcript, requestId, method: "portability.profile_package.export" }, context);
+
+  const stopButton = await waitForProfileButton(driver, importedProfile.name, "Stop Chromium", runtime, { step: "m005-restored-stop-click" });
+  const stopClickMode = await clickM005S04UiElement(driver, stopButton, runtime, "runtime.restored-stop", "restored_stop_click_failed");
+  await waitForProfileButton(driver, importedProfile.name, "Launch Chromium", runtime, { step: "m005-restored-stop-ready" });
+  await waitForMetricValue(driver, "Profile observability", "Running count", "0", runtime, { step: "m005-restored-stop-ready" });
+  const stopped = assertM005S04RuntimeBookkeeping({ appDataRoot: runtime.profileStore.appDataRoot, profile: importedProfile, expectedRunning: false, expectedRunningCount: 0 }, context);
+  runtime.m005S04RunningObserved = false;
+  const stoppedSectionText = await readProfileSectionText(driver, importedProfile.name, `${importedProfile.name} Chromium lifecycle`);
+  assertM005S04VisibleTextRedacted({ text: stoppedSectionText, phase: "runtime.restored-stop" }, context);
+  const summary = { restoredLaunch: "launched-stopped", launchClickMode, stopClickMode, running: running.log, stopped: stopped.log, controlsDisabledWhileRunning: disabledControls.length, busyGuard: busy.log, visibleRuntimeTextScanned: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { importedProfile, running, stopped, busyGuard: busy, runningSectionText, stoppedSectionText }, log: summary };
 }
 
 function summarizeArtifactProof(proof = {}) {
@@ -1491,7 +1706,37 @@ export function runBuildOnlyVerification({ rootDir = ROOT_DIR, platform = proces
   return summary;
 }
 
-export async function runM005S04PackagePortabilityLoop({ driver, runtime, strategyPlan, packagePath = runtime?.fixtures?.selectedPackagePath } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [packagePath].filter(Boolean), cookieDomains: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.value).filter(Boolean) })) {
+export async function runM005S04CookiePortabilityLoop({ driver, runtime, strategyPlan, exportPath = runtime?.fixtures?.cookieExportPath, importPath = runtime?.fixtures?.cookieImportJsonPath } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [exportPath, importPath].filter(Boolean), cookieDomains: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.domain).filter(Boolean), cookieNames: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.name).filter(Boolean), cookieValues: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.value).filter(Boolean) })) {
+  assert(driver, "M005/S04 cookie portability loop requires a WebDriver session.", { phase: "runtime.cookie-loop", markerClass: "missing_webdriver_session" });
+  assert(runtime?.profileStore?.profile, "M005/S04 cookie portability loop requires a discovered source profile.", { phase: "runtime.cookie-loop", markerClass: "source_profile_missing" });
+  assert(typeof exportPath === "string" && exportPath.endsWith(".json"), "M005/S04 cookie portability loop requires a private export JSON path.", { phase: "runtime.cookie-loop", markerClass: "missing_selected_path" });
+  assert(typeof importPath === "string" && importPath.endsWith(".json"), "M005/S04 cookie portability loop requires a private import JSON path.", { phase: "runtime.cookie-loop", markerClass: "missing_selected_path" });
+
+  const cookieContext = createM005S04PublicScanContext({
+    rootDir: runtime.rootDir,
+    tempRoot: runtime.smokeContext?.smokeRoot,
+    appDataRoot: runtime.profileStore.appDataRoot,
+    userDataRoot: runtime.profileStore.userDataRoot,
+    selectedPaths: [exportPath, importPath],
+    cookieDomains: [...runtime.fixtures.sourceCookies, ...runtime.fixtures.importCookies].map((row) => row.domain).filter(Boolean),
+    cookieNames: [...runtime.fixtures.sourceCookies, ...runtime.fixtures.importCookies].map((row) => row.name).filter(Boolean),
+    cookieValues: [...runtime.fixtures.sourceCookies, ...runtime.fixtures.importCookies].map((row) => row.value).filter(Boolean),
+  });
+
+  const exportUi = await runStepAsync("ui.cookie-export", async () => driveM005S04CookieExportViaUi(driver, runtime, { exportPath, strategyPlan }, cookieContext), cookieContext);
+  const exportFile = runStep("cookie.export-file-inspect", () => inspectM005S04CookieExportFile({ exportPath, expectedRows: runtime.fixtures.sourceCookies }, cookieContext), cookieContext);
+  const replaceUi = await runStepAsync("ui.cookie-replace", async () => driveM005S04CookieReplaceViaUi(driver, runtime, { importPath, strategyPlan }, cookieContext), cookieContext);
+  const replacedCookies = runStep("cookie.replace-db-inspect", () => inspectM005S04CookieDbRows({ appDataRoot: runtime.profileStore.appDataRoot, userDataRoot: runtime.profileStore.userDataRoot, expectedRows: runtime.fixtures.importCookies }, cookieContext), cookieContext);
+  assert(replacedCookies.expectedRowsPresent, "M005/S04 cookie replace did not restore the selected import cookie set.", { phase: "cookie-replace", markerClass: "cookie_rows_missing", missingExpectedCount: replacedCookies.missingExpectedCount });
+  runtime.fixtures.currentCookies = runtime.fixtures.importCookies;
+  const diagnostics = runStep("diagnostics.cookie-portability", () => inspectM005S04Diagnostics({ appDataRoot: runtime.profileStore.appDataRoot, requiredMethods: ["portability.cookies.export", "portability.cookies.replace"] }, cookieContext), cookieContext);
+
+  const summary = { cookieLoop: "exported-replaced", exportUiObserved: Boolean(exportUi.successText), exportFileValidated: true, replaceUiObserved: Boolean(replaceUi.successText), replacementRowsPresent: true, diagnosticsRows: Array.isArray(diagnostics.records) ? diagnostics.records.length : 0, exportedCookieRows: exportFile.cookieCount, replacedCookieRows: replacedCookies.count };
+  assertM005S04PublicEvidenceRedacted(summary, cookieContext);
+  return { summary, exportUi, exportFile, replaceUi, replacedCookies, diagnostics };
+}
+
+export async function runM005S04PackagePortabilityLoop({ driver, runtime, strategyPlan, packagePath = runtime?.fixtures?.selectedPackagePath } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [packagePath].filter(Boolean), cookieDomains: (runtime?.fixtures?.currentCookies ?? runtime?.fixtures?.sourceCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.currentCookies ?? runtime?.fixtures?.sourceCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.currentCookies ?? runtime?.fixtures?.sourceCookies ?? []).map((row) => row.value).filter(Boolean) })) {
   assert(driver, "M005/S04 package portability loop requires a WebDriver session.", { phase: "runtime.package-loop", markerClass: "missing_webdriver_session" });
   assert(runtime?.profileStore?.profile, "M005/S04 package portability loop requires a discovered source profile.", { phase: "runtime.package-loop", markerClass: "source_profile_missing" });
   assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package portability loop requires a private .tpkg path.", { phase: "runtime.package-loop", markerClass: "missing_package_path" });
@@ -1502,9 +1747,9 @@ export async function runM005S04PackagePortabilityLoop({ driver, runtime, strate
     appDataRoot: runtime.profileStore.appDataRoot,
     userDataRoot: runtime.profileStore.userDataRoot,
     selectedPaths: [packagePath],
-    cookieDomains: runtime.fixtures.sourceCookies.map((row) => row.domain).filter(Boolean),
-    cookieNames: runtime.fixtures.sourceCookies.map((row) => row.name).filter(Boolean),
-    cookieValues: runtime.fixtures.sourceCookies.map((row) => row.value).filter(Boolean),
+    cookieDomains: (runtime.fixtures.currentCookies ?? runtime.fixtures.sourceCookies).map((row) => row.domain).filter(Boolean),
+    cookieNames: (runtime.fixtures.currentCookies ?? runtime.fixtures.sourceCookies).map((row) => row.name).filter(Boolean),
+    cookieValues: (runtime.fixtures.currentCookies ?? runtime.fixtures.sourceCookies).map((row) => row.value).filter(Boolean),
   });
 
   const exportUi = await runStepAsync("ui.package-export", async () => driveM005S04PackageExportViaUi(driver, runtime, { packagePath, strategyPlan }, packageContext), packageContext);
@@ -1514,7 +1759,7 @@ export async function runM005S04PackagePortabilityLoop({ driver, runtime, strate
     packagePath,
     selectedPaths: [packagePath],
     expectedProfileName: runtime.profileStore.profile.name,
-    expectedCookieRows: runtime.fixtures.sourceCookies,
+    expectedCookieRows: runtime.fixtures.currentCookies ?? runtime.fixtures.sourceCookies,
     expectedPayloadRelativePaths: runtime.fixtures.expectedPayloadRelativePaths,
   }, packageContext), packageContext);
   const imported = await runStepAsync("ui.package-import", async () => driveM005S04PackageImportViaUi(driver, runtime, { packagePath, strategyPlan }, packageContext), packageContext);
@@ -1530,13 +1775,44 @@ export async function runM005S04PackagePortabilityLoop({ driver, runtime, strate
     warningCount: archive.manifestSummary.warningCount,
     cookieCount: archive.manifestSummary.cookieCount,
     payloadFileCount: archive.manifestSummary.payloadFileCount,
-    nextProof: "restored-launch-pending",
+    nextProof: "restored-launch-ready",
   };
   assertM005S04PublicEvidenceRedacted(summary, packageContext);
   return { summary, exportUi, archive, imported, diagnostics };
 }
 
-export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = ROOT_DIR, platform = process.platform, env = process.env, keepTemp = false, strategyPlan = null, packageLoop = null } = {}, context = createM005S04PublicScanContext({ rootDir })) {
+export function scanM005S04FinalEvidence({ runtime, cookieProof, packageProof, restoredProof, cleanup = null, verifierEvents = VERIFIER_EVENTS } = {}, context = createM005S04PublicScanContext({ rootDir: runtime?.rootDir, tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: packageProof?.imported?.importedUserDataRoot, selectedPaths: [runtime?.fixtures?.cookieExportPath, runtime?.fixtures?.cookieImportJsonPath, runtime?.fixtures?.selectedPackagePath, runtime?.fixtures?.busyPackagePath].filter(Boolean), cookieDomains: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.domain).filter(Boolean), cookieNames: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.name).filter(Boolean), cookieValues: [...(runtime?.fixtures?.sourceCookies ?? []), ...(runtime?.fixtures?.importCookies ?? [])].map((row) => row.value).filter(Boolean) })) {
+  assert(isPlainObject(runtime?.profileStore), "M005/S04 final scan requires runtime profile-store proof.", { phase: "final-scan", markerClass: "profile_store_missing" });
+  const visibleTextSnippets = [
+    cookieProof?.exportUi?.successText,
+    cookieProof?.replaceUi?.successText,
+    packageProof?.exportUi?.successText,
+    packageProof?.imported?.successText,
+    restoredProof?.runningSectionText,
+    restoredProof?.stoppedSectionText,
+  ].filter((text) => typeof text === "string");
+  assert(visibleTextSnippets.length >= 4, "M005/S04 final UI visible-text scan did not cover the required summaries.", { phase: "final-scan", markerClass: "ui_text_malformed", visibleTextCount: visibleTextSnippets.length });
+  for (const [index, text] of visibleTextSnippets.entries()) assertM005S04VisibleTextRedacted({ text, phase: `final-scan.ui.${index}` }, context);
+
+  const diagnostics = inspectM005S04Diagnostics({
+    appDataRoot: runtime.profileStore.appDataRoot,
+    requiredMethods: ["portability.cookies.export", "portability.cookies.replace", "portability.profile_package.export", "portability.profile_package.import", "chromium.launch", "chromium.stop"],
+  }, context);
+  for (const [method, proof] of Object.entries(diagnostics.log.required)) {
+    assert(proof.observed > 0, "M005/S04 final diagnostics scan missed a required method.", { phase: "final-scan.diagnostics", markerClass: "diagnostics_missing", method });
+    if (method !== "portability.profile_package.export") assert(proof.okRows > 0, "M005/S04 final diagnostics scan missed a successful required method.", { phase: "final-scan.diagnostics", markerClass: "diagnostics_missing", method });
+  }
+  assert(diagnostics.log.required["portability.profile_package.export"].okRows > 0, "M005/S04 final diagnostics scan missed successful package export evidence.", { phase: "final-scan.diagnostics", markerClass: "diagnostics_missing", method: "portability.profile_package.export" });
+  assert(diagnostics.log.required["portability.profile_package.export"].errorRows > 0 && diagnostics.log.typedErrorCodes.includes("PORTABILITY_PROFILE_BUSY"), "M005/S04 final diagnostics scan missed typed busy guard evidence.", { phase: "final-scan.diagnostics", markerClass: "busy_guard_missing" });
+
+  assertM005S04PublicEvidenceRedacted(verifierEvents, context);
+  assertM005S04PublicEvidenceRedacted([cookieProof?.summary, packageProof?.summary, restoredProof?.log, cleanup].filter(Boolean), context);
+  const summary = { finalScan: "clean", visibleTextSnippets: visibleTextSnippets.length, diagnosticsRows: diagnostics.log.validRows, verifierEvents: Array.isArray(verifierEvents) ? verifierEvents.length : 0, packageArchiveScanned: Boolean(packageProof?.archive?.scanClean ?? packageProof?.summary?.archiveInspected), busyGuardTyped: true, cleanupScanned: cleanup ? "included" : "pending" };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { diagnostics: diagnostics.value }, log: summary };
+}
+
+export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = ROOT_DIR, platform = process.platform, env = process.env, keepTemp = false, strategyPlan = null, cookieLoop = runM005S04CookiePortabilityLoop, packageLoop = runM005S04PackagePortabilityLoop, restoredLaunchLoop = driveM005S04RestoredLaunchAndBusyGuard, finalEvidenceScan = scanM005S04FinalEvidence } = {}, context = createM005S04PublicScanContext({ rootDir })) {
   assert(artifactProof?.releaseExecutable, "M005/S04 packaged harness setup requires a release executable proof.", { phase: "runtime.harness", markerClass: "missing_release_executable" });
   const applicationPath = join(rootDir, artifactProof.releaseExecutable);
   let smokeContext = null;
@@ -1581,12 +1857,23 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
     const cookieRows = runStep("fixture.cookie-db-inspect", () => inspectM005S04CookieDbRows({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, expectedRows: cookieFixture.cookies }, fixtureContext), fixtureContext);
     assert(cookieRows.expectedRowsPresent, "M005/S04 cookie DB fixture rows were not readable after seeding.", { phase: "cookie-db", markerClass: "cookie_rows_missing", missingExpectedCount: cookieRows.missingExpectedCount });
     const importFixtures = runStep("fixture.cookie-import-files", () => writeM005S04CookieImportFixtures({ smokeRoot: smokeContext.smokeRoot }, fixtureContext), fixtureContext);
+    const cookieExportPath = join(smokeContext.smokeRoot, "fixtures", "cookies-export.theprivator.json");
     const selectedPackagePath = join(profileStore.userDataRoot, "Default", "selected-package-output.tpkg");
+    const busyPackagePath = join(smokeContext.smokeRoot, "fixtures", "busy-while-running.tpkg");
     const expectedPayloadRelativePaths = ["Default/Preferences", "Default/Local Storage/leveldb/000003.log"];
     const payloadFixtures = runStep("fixture.payload-files", () => writeM005S04PayloadFixtures({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, selectedPackagePath }, fixtureContext), fixtureContext);
-    runtime.fixtures = { sourceCookies: cookieFixture.cookies, importCookies: importFixtures.cookies, payloadFixtures, selectedPackagePath, expectedPayloadRelativePaths };
+    runtime.fixtures = { sourceCookies: cookieFixture.cookies, importCookies: importFixtures.cookies, cookieExportPath, cookieImportJsonPath: importFixtures.jsonPath, cookieImportNetscapePath: importFixtures.netscapePath, currentCookies: cookieFixture.cookies, payloadFixtures, selectedPackagePath, busyPackagePath, expectedPayloadRelativePaths };
+    const cookieProof = cookieLoop
+      ? await cookieLoop({ driver, driverProcess, runtime, strategyPlan, exportPath: cookieExportPath, importPath: importFixtures.jsonPath, context: fixtureContext })
+      : null;
     const packageProof = packageLoop
       ? await packageLoop({ driver, driverProcess, runtime, strategyPlan, packagePath: selectedPackagePath, context: fixtureContext })
+      : null;
+    const restoredProof = restoredLaunchLoop
+      ? await runStepAsync("runtime.restored-launch", async () => restoredLaunchLoop(driver, runtime, { artifactProof, packageProof }, fixtureContext), fixtureContext)
+      : null;
+    const finalScan = finalEvidenceScan
+      ? runStep("final.redaction-scan", () => finalEvidenceScan({ runtime, cookieProof, packageProof, restoredProof }, fixtureContext), fixtureContext)
       : null;
     setupCompleted = true;
     setupProof = {
@@ -1599,14 +1886,19 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
         safePayloadFiles: payloadFixtures.preferencesPath ? 2 : 2,
         volatileRuntimeFiles: 3,
       },
-      portabilityLoop: packageProof?.summary ?? "pending-next-task",
+      portabilityLoop: {
+        cookies: cookieProof?.summary ?? "not-run",
+        package: packageProof?.summary ?? "not-run",
+        restoredLaunch: restoredProof?.log ?? "not-run",
+        finalScan: finalScan ?? "not-run",
+      },
     };
     assertM005S04PublicEvidenceRedacted(setupProof, fixtureContext);
     return setupProof;
   } finally {
     if (runtime || driver || driverProcess) {
       const cleanupContext = createM005S04PublicScanContext({ rootDir, tempRoot: smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot });
-      const cleanup = await runStepAsync("cleanup.packaged-harness", async () => cleanupM005S04PackagedHarness({ driver, driverProcess, runtime, runningObserved, keepTemp, passed: setupCompleted }, cleanupContext), cleanupContext);
+      const cleanup = await runStepAsync("cleanup.packaged-harness", async () => cleanupM005S04PackagedHarness({ driver, driverProcess, runtime, runningObserved: runningObserved || Boolean(runtime?.m005S04RunningObserved), keepTemp, passed: setupCompleted }, cleanupContext), cleanupContext);
       if (setupProof) setupProof.cleanup = cleanup;
     }
   }
@@ -1620,12 +1912,14 @@ async function runFullOrUiSkeleton(args, { rootDir = ROOT_DIR, platform = proces
   const chromium = runStep("preflight.chromium", () => assertM005S04ChromiumExecutable({ rootDir, platform, env }), context);
   const nativeDialog = runStep("preflight.native-dialog", () => assertNativeDialogAutomationPreflight({ platform, env, strict: true }), context);
   const artifactProof = prepareM005S04BuildArtifacts({ rootDir, platform, context, skipBuild: args.skipBuild });
-  const runtime = await runM005S04PackagedHarnessSetup({ artifactProof, rootDir, platform, env, keepTemp: args.keepTemp, strategyPlan: nativeDialog, packageLoop: runM005S04PackagePortabilityLoop }, context);
-  fail("M005/S04 restored launch proof is not implemented after package export/import yet.", { phase: "runtime.restored-launch", markerClass: "restored_launch_pending", mode: args.mode, preflight: { webdriver: webdriver.missingToolClasses.length === 0, chromium: true, nativeDialog: nativeDialog.status }, build: summarizeArtifactProof(artifactProof), runtime: { harness: runtime.harness, sourceProfile: runtime.sourceProfile?.createdVia, fixtures: runtime.fixtures, packageLoop: runtime.portabilityLoop, cleanup: runtime.cleanup?.tempRoot ?? "attempted" }, outputSuppressed: true });
+  const runtime = await runM005S04PackagedHarnessSetup({ artifactProof, rootDir, platform, env, keepTemp: args.keepTemp, strategyPlan: nativeDialog }, context);
+  const summary = buildM005S04FinalSummary({ status: "pass", mode: args.mode, guardrails, preflight: { webdriver, chromium, nativeDialog }, build: summarizeArtifactProof(artifactProof), runtime, cleanup: runtime.cleanup ?? {}, checks: STEP_RESULTS }, context);
+  emit({ phase: "summary", status: "pass", summary }, context);
+  return summary;
 }
 
 function printHelp() {
-  console.log(`Usage: npm run verify:m005:s04 -- [--preflight-only|--build-only|--ui-only] [--skip-build] [--keep-temp]\n\nModes:\n  default           Full packaged portability proof; T04 now drives .tpkg export/import and T05 completes restored launch/busy guard proof.\n  --preflight-only  Run M005 guardrails, WebDriver preflight, and native-dialog preflight only.\n  --build-only      Build release artifacts and validate their shape without running the UI loop.\n  --ui-only         Validate existing artifacts and run the packaged UI loop.\n\nDiagnostics:\n  --skip-build      Reuse existing artifacts for full/UI modes.\n  --keep-temp       Retain the isolated smoke root for private local diagnostics; public paths remain redacted.`);
+  console.log(`Usage: npm run verify:m005:s04 -- [--preflight-only|--build-only|--ui-only] [--skip-build] [--keep-temp]\n\nModes:\n  default           Full packaged portability proof: real cookie dialogs, .tpkg dialogs, restored launch/stop, busy guard, final scans, and cleanup.\n  --preflight-only  Run M005 guardrails, WebDriver preflight, and native-dialog preflight only.\n  --build-only      Build release artifacts and validate their shape without running the UI loop.\n  --ui-only         Validate existing artifacts and run the packaged UI loop.\n\nDiagnostics:\n  --skip-build      Reuse existing artifacts for full/UI modes.\n  --keep-temp       Retain the isolated smoke root for private local diagnostics; public paths remain redacted.`);
 }
 
 async function runCli(argv = process.argv.slice(2)) {

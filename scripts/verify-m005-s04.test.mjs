@@ -19,8 +19,10 @@ import {
   assertM005S04Guardrails,
   assertM005S04PackageManifestContract,
   assertM005S04PublicEvidenceRedacted,
+  assertM005S04RuntimeBookkeeping,
   assertM005S04SourceGuardrails,
   assertM005S04VisibleTextRedacted,
+  assertM005S04BusyGuardTranscript,
   assertNativeDialogAutomationPreflight,
   assertValidArgs,
   buildM005S04FinalSummary,
@@ -30,6 +32,7 @@ import {
   findM005S04ForbiddenPublicMarker,
   formatM005S04CommandFailure,
   inspectM005S04CookieDbRows,
+  inspectM005S04CookieExportFile,
   inspectM005S04Diagnostics,
   inspectM005S04PackageArchive,
   parseArgs,
@@ -170,6 +173,7 @@ function seedS04Root({ permissions, appSource, clientSource, libSource, sidecarS
     scripts: { "verify:m005:s04": packageScript },
     dependencies: { "@tauri-apps/api": "^2.0.0", "@tauri-apps/plugin-dialog": "^2.0.0" },
   });
+  writeText(join(root, "README.md"), "npm run verify:m005:s04 --preflight-only --build-only --ui-only --skip-build --keep-temp verify.m005.s04 native open/save dialogs redaction scanner cleanup PORTABILITY_PROFILE_BUSY R033/R034/R035/R037/R038/R039/R040\n");
   writeText(join(root, "src", "App.tsx"), appSource ?? "import { open, save } from '@tauri-apps/plugin-dialog';\nimport { exportProfileCookies, replaceProfileCookies, exportProfilePackage, importProfilePackage } from './sidecar/client';\nopen(); save(); void exportProfileCookies; void replaceProfileCookies; void exportProfilePackage; void importProfilePackage;\n");
   writeText(join(root, "src", "sidecar", "client.ts"), clientSource ?? 'invoke<unknown>("profile_cookies_export", {});\ninvoke<unknown>("profile_cookies_replace", {});\ninvoke<unknown>("profile_package_export", {});\ninvoke<unknown>("profile_package_import", {});\n');
   writeText(join(root, "src-tauri", "src", "lib.rs"), libSource ?? "sidecar::profile_cookies_export\nsidecar::profile_cookies_replace\nsidecar::profile_package_export\nsidecar::profile_package_import\n");
@@ -483,6 +487,47 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
 
     writeJson(profileStorePath, { storeVersion: 3, profiles: [seeded.profile, { ...imported, name: "Wrong Imported Name" }] });
     expect(() => assertM005S04CopiedProfileRestored({ profileStorePath, appDataRoot: seeded.appDataRoot, sourceProfile: seeded.profile, expectedCookieRows: cookies.value.cookies }, context)).toThrow(VerifyFailure);
+  });
+
+  it("validates exported cookie files and runtime bookkeeping without leaking cookie material or owner tokens", () => {
+    const seeded = seedPackagedProfileStore({ profileName: "M005 Packaged Portability Smoke Runtime Unit" });
+    const exportPath = join(seeded.smokeContext.smokeRoot, "fixtures", "exported.json");
+    const cookies = [
+      { domain: "m005-s04-export.invalid", name: "m005_s04_export", value: "m005-s04-export-value" },
+    ];
+    writeJson(exportPath, { format: "theprivator.cookies", version: 1, cookies });
+    const context = createM005S04PublicScanContext({ appDataRoot: seeded.appDataRoot, selectedPaths: [exportPath], cookieDomains: cookies.map((cookie) => cookie.domain), cookieNames: cookies.map((cookie) => cookie.name), cookieValues: cookies.map((cookie) => cookie.value) });
+    const inspected = inspectM005S04CookieExportFile({ exportPath, expectedRows: cookies }, context);
+    expect(inspected.log).toMatchObject({ cookieExportFile: "valid", cookieRowCount: 1, expectedRowsPresent: true, selectionPrivate: true });
+
+    const runtimePath = join(seeded.appDataRoot, "profile-store", "runtime", "chromium-processes.json");
+    writeJson(runtimePath, { registryVersion: 1, processes: { [seeded.profile.id]: { profileId: seeded.profile.id, pid: 12345, startedAt: "2026-01-01T00:00:00.000Z", userDataDir: seeded.profile.storage.userDataDir, ownerToken: "private-owner-token" } } });
+    const running = assertM005S04RuntimeBookkeeping({ appDataRoot: seeded.appDataRoot, profile: seeded.profile, expectedRunning: true, expectedRunningCount: 1 }, createM005S04PublicScanContext({ appDataRoot: seeded.appDataRoot }));
+    expect(running.log).toMatchObject({ runtimeBookkeeping: "running", profileRecord: "present", runningCount: 1, userDataScope: "safe-relative" });
+    expect(JSON.stringify(running.log)).not.toContain("private-owner-token");
+    expect(findM005S04ForbiddenPublicMarker([inspected.log, running.log], context)).toBeNull();
+
+    writeJson(runtimePath, { registryVersion: 1, processes: {} });
+    const stopped = assertM005S04RuntimeBookkeeping({ appDataRoot: seeded.appDataRoot, profile: seeded.profile, expectedRunning: false, expectedRunningCount: 0 }, context);
+    expect(stopped.log).toMatchObject({ runtimeBookkeeping: "stopped", profileRecord: "absent", runningCount: 0 });
+    writeJson(runtimePath, { registryVersion: 1, processes: { [seeded.profile.id]: { profileId: seeded.profile.id, pid: "bad" } } });
+    expect(() => assertM005S04RuntimeBookkeeping({ appDataRoot: seeded.appDataRoot, profile: seeded.profile, expectedRunning: true }, context)).toThrow(VerifyFailure);
+  });
+
+  it("accepts only typed PORTABILITY_PROFILE_BUSY direct sidecar envelopes", () => {
+    const context = createM005S04PublicScanContext({ selectedPaths: ["/private/busy-output.tpkg"] });
+    const transcript = {
+      response: { id: "busy", ok: false, protocolVersion: "1.0.0", durationMs: 4, error: { code: "PORTABILITY_PROFILE_BUSY", message: "Profile must be stopped before package portability.", recoverable: true, detailRef: "sidecar-busy-ref" } },
+      diagnostic: diagnosticRow("portability.profile_package.export", { requestId: "busy", status: "error", errorCode: "PORTABILITY_PROFILE_BUSY", detailRef: "sidecar-busy-ref" }),
+    };
+    const busy = assertM005S04BusyGuardTranscript({ transcript, requestId: "busy" }, context);
+    expect(busy.log).toMatchObject({ busyGuard: "blocked", errorCode: "PORTABILITY_PROFILE_BUSY", detailRef: "observed", diagnosticStatus: "error" });
+    expect(findM005S04ForbiddenPublicMarker(busy.log, context)).toBeNull();
+
+    const malformed = { ...transcript, response: { ...transcript.response, error: { ...transcript.response.error, debugPort: "9222" } } };
+    expect(() => assertM005S04BusyGuardTranscript({ transcript: malformed, requestId: "busy" }, context)).toThrow(VerifyFailure);
+    const unexpectedSuccess = { ...transcript, response: { id: "busy", ok: true, result: {} } };
+    expect(() => assertM005S04BusyGuardTranscript({ transcript: unexpectedSuccess, requestId: "busy" }, context)).toThrow(VerifyFailure);
   });
 
   it("parses bounded diagnostics JSONL into safe aggregate counts and rejects forbidden raw fields", () => {
