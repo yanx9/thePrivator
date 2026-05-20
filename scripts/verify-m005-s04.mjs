@@ -30,6 +30,7 @@ import {
   readProfileSectionText as readS06ProfileSectionText,
   readTargetTriple as readS06TargetTriple,
   resolveChromiumExecutable as resolveS06ChromiumExecutable,
+  waitForProfileButton as waitS06ProfileButton,
   startTauriDriverProcess as startS06TauriDriverProcess,
   waitForProfileCard as waitS06ProfileCard,
   waitForVisibleElement as waitS06VisibleElement,
@@ -54,6 +55,11 @@ const WAYLAND_TYPE_TOOL = "wtype";
 const WAYLAND_CLIPBOARD_TOOLS = Object.freeze(["wl-copy", "wl-paste"]);
 const X11_TYPE_TOOL = "xdotool";
 const X11_CLIPBOARD_TOOLS = Object.freeze(["xclip", "xsel"]);
+const DEFAULT_NATIVE_DIALOG_SETTLE_MS = Number(process.env.VERIFY_M005_S04_DIALOG_SETTLE_MS ?? 350);
+const NATIVE_DIALOG_TOOL_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_DIALOG_TOOL_TIMEOUT_MS ?? 8_000);
+const PACKAGE_ARCHIVE_MAX_MEMBERS = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBERS ?? 512);
+const PACKAGE_ARCHIVE_MAX_MEMBER_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBER_BYTES ?? 4 * 1024 * 1024);
+const PACKAGE_ARCHIVE_MAX_TOTAL_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_TOTAL_BYTES ?? 16 * 1024 * 1024);
 
 const S04_SOURCE_GUARD_FILES = Object.freeze([
   "scripts/verify-m005-s04.mjs",
@@ -696,15 +702,119 @@ export function writeM005S04PayloadFixtures({ userDataRoot, appDataRoot, selecte
   };
 }
 
-export function inspectM005S04PackageArchive({ packagePath, rootDir = ROOT_DIR, appDataRoot, selectedPaths = [], packageScanContext } = {}, context = createM005S04PublicScanContext({ rootDir, appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean) })) {
+function assertExactKeys(value, expectedKeys, label, phase = "package-manifest") {
+  assert(isPlainObject(value), `M005/S04 ${label} must be an object.`, { phase, markerClass: "manifest_malformed", label });
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  assert(JSON.stringify(actual) === JSON.stringify(expected), `M005/S04 ${label} keys did not match the expected package contract.`, { phase, markerClass: "manifest_keys_mismatch", label, expectedKeyCount: expected.length, actualKeyCount: actual.length });
+}
+
+function assertNoPackageCredentials(value, label = "package") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoPackageCredentials(item, `${label}[${index}]`));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (key !== "credentialState") assert(!/(?:credentials?|username|password|secret|token|authorization)/i.test(key), "M005/S04 package manifest retained credential-bearing fields.", { phase: "package-manifest", markerClass: "credential", label });
+    assertNoPackageCredentials(nested, label);
+  }
+}
+
+function assertSha256Hex(value, label) {
+  assert(typeof value === "string" && /^[0-9a-f]{64}$/.test(value), `M005/S04 ${label} checksum must be a lowercase SHA-256 hex digest.`, { phase: "package-manifest", markerClass: "checksum_malformed", label });
+}
+
+function safePositiveInteger(value, label, { allowZero = true } = {}) {
+  assert(Number.isInteger(value) && value >= (allowZero ? 0 : 1), `M005/S04 ${label} must be a non-negative integer.`, { phase: "package-manifest", markerClass: "manifest_malformed", label });
+  return value;
+}
+
+export function assertM005S04PackageManifestContract(manifest, { expectedProfileName } = {}) {
+  assertExactKeys(manifest, ["cookies", "createdAt", "format", "payload", "profile", "version", "warnings"], "manifest");
+  assert(manifest.format === PACKAGE_FORMAT && manifest.version === PACKAGE_VERSION, "M005/S04 package manifest format or version mismatch.", { phase: "package-manifest", markerClass: "manifest_mismatch", formatOk: manifest.format === PACKAGE_FORMAT, versionOk: manifest.version === PACKAGE_VERSION });
+  assert(typeof manifest.createdAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(manifest.createdAt), "M005/S04 package manifest createdAt must be UTC ISO text.", { phase: "package-manifest", markerClass: "manifest_malformed" });
+
+  assertExactKeys(manifest.profile, ["identity", "name", "proxy", "proxySummary"], "manifest.profile");
+  if (expectedProfileName !== undefined) assert(manifest.profile.name === expectedProfileName, "M005/S04 package manifest profile name mismatch.", { phase: "package-manifest", markerClass: "profile_name_mismatch" });
+  assert(typeof manifest.profile.name === "string" && manifest.profile.name.length > 0 && manifest.profile.name.length <= 160, "M005/S04 package manifest profile name was malformed.", { phase: "package-manifest", markerClass: "manifest_malformed" });
+  assert(isPlainObject(manifest.profile.identity) && manifest.profile.identity.identityVersion === 1, "M005/S04 package manifest identity was not normalized.", { phase: "package-manifest", markerClass: "identity_malformed" });
+  assertNoPackageCredentials(manifest.profile.proxy, "manifest.profile.proxy");
+  assertNoPackageCredentials(manifest.profile.proxySummary, "manifest.profile.proxySummary");
+  const proxyMode = manifest.profile.proxy?.mode;
+  assert(proxyMode === "direct" || proxyMode === "fixedServer", "M005/S04 package manifest proxy mode must be direct or fixedServer.", { phase: "package-manifest", markerClass: "proxy_malformed" });
+  assert(manifest.profile.proxySummary?.mode === proxyMode, "M005/S04 package proxy summary mode mismatch.", { phase: "package-manifest", markerClass: "proxy_summary_mismatch" });
+  assert(manifest.profile.proxySummary?.credentialState === "none", "M005/S04 package proxy summary must be credential-stripped.", { phase: "package-manifest", markerClass: "credential" });
+
+  assertExactKeys(manifest.cookies, ["byteCount", "cookieCount", "format", "member", "sha256", "skippedCount", "version"], "manifest.cookies");
+  assert(manifest.cookies.member === COOKIE_MEMBER, "M005/S04 package cookie member mismatch.", { phase: "package-manifest", markerClass: "missing_package_member" });
+  assert(manifest.cookies.format === "theprivator.cookies" && manifest.cookies.version === 1, "M005/S04 package cookie manifest format mismatch.", { phase: "package-manifest", markerClass: "cookie_manifest_mismatch" });
+  const cookieCount = safePositiveInteger(manifest.cookies.cookieCount, "cookieCount");
+  const skippedCookieCount = safePositiveInteger(manifest.cookies.skippedCount, "skippedCookieCount");
+  const cookieByteCount = safePositiveInteger(manifest.cookies.byteCount, "cookieByteCount");
+  assertSha256Hex(manifest.cookies.sha256, "cookie member");
+
+  assertExactKeys(manifest.payload, ["byteCount", "fileCount", "files", "prefix"], "manifest.payload");
+  assert(manifest.payload.prefix === PAYLOAD_PREFIX, "M005/S04 package payload prefix mismatch.", { phase: "package-manifest", markerClass: "payload_mismatch" });
+  assert(Array.isArray(manifest.payload.files), "M005/S04 package payload files must be an array.", { phase: "package-manifest", markerClass: "payload_mismatch" });
+  const payloadFileCount = safePositiveInteger(manifest.payload.fileCount, "payloadFileCount");
+  const payloadByteCount = safePositiveInteger(manifest.payload.byteCount, "payloadByteCount");
+  assert(manifest.payload.files.length === payloadFileCount, "M005/S04 package payload file count mismatch.", { phase: "package-manifest", markerClass: "payload_mismatch" });
+  let computedPayloadBytes = 0;
+  const seenPayloadPaths = new Set();
+  for (const file of manifest.payload.files) {
+    assertExactKeys(file, ["byteCount", "member", "path", "sha256"], "manifest.payload.files[]");
+    assert(typeof file.path === "string" && file.path.length > 0 && !file.path.startsWith("/") && !file.path.includes("..") && !file.path.includes("\\"), "M005/S04 package payload path was unsafe.", { phase: "package-manifest", markerClass: "payload_path_unsafe" });
+    assert(file.member === `${PAYLOAD_PREFIX}${file.path}`, "M005/S04 package payload member mismatch.", { phase: "package-manifest", markerClass: "payload_mismatch" });
+    assert(!seenPayloadPaths.has(file.path), "M005/S04 package payload path was duplicated.", { phase: "package-manifest", markerClass: "payload_mismatch" });
+    seenPayloadPaths.add(file.path);
+    const fileBytes = safePositiveInteger(file.byteCount, "payloadFileByteCount");
+    computedPayloadBytes += fileBytes;
+    assertSha256Hex(file.sha256, "payload member");
+  }
+  assert(computedPayloadBytes === payloadByteCount, "M005/S04 package payload byte count mismatch.", { phase: "package-manifest", markerClass: "payload_mismatch", payloadFileCount });
+  assert(Array.isArray(manifest.warnings), "M005/S04 package warnings must be an array.", { phase: "package-manifest", markerClass: "manifest_malformed" });
+
+  return {
+    format: manifest.format,
+    version: manifest.version,
+    profileNamePresent: true,
+    proxyMode,
+    proxyCredentialStripped: true,
+    directProxyAccepted: proxyMode === "direct",
+    cookieCount,
+    skippedCookieCount,
+    cookieByteCount,
+    payloadFileCount,
+    payloadByteCount,
+    warningCount: manifest.warnings.length,
+  };
+}
+
+function assertPackageMemberChecksum(member, expected, label) {
+  assert(member, `M005/S04 ${label} package member was missing.`, { phase: "package-inspection", markerClass: "missing_package_member", label });
+  assert(member.byteCount === expected.byteCount, `M005/S04 ${label} byte count mismatch.`, { phase: "package-inspection", markerClass: "checksum_mismatch", label });
+  assert(member.sha256 === expected.sha256, `M005/S04 ${label} checksum mismatch.`, { phase: "package-inspection", markerClass: "checksum_mismatch", label });
+}
+
+export function inspectM005S04PackageArchive({ packagePath, rootDir = ROOT_DIR, appDataRoot, selectedPaths = [], expectedProfileName, expectedCookieRows = [], expectedPayloadRelativePaths = ["Default/Preferences"], packageScanContext } = {}, context = createM005S04PublicScanContext({ rootDir, appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean), cookieDomains: expectedCookieRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedCookieRows.map((row) => row.name).filter(Boolean), cookieValues: expectedCookieRows.map((row) => row.value).filter(Boolean) })) {
   assert(typeof packagePath === "string" && packagePath.length > 0, "M005/S04 package archive inspection requires a package path.", { phase: "package-inspection", markerClass: "missing_package_path" });
   const script = String.raw`
 import hashlib, json, sys, zipfile
 payload = json.load(sys.stdin)
 try:
     with zipfile.ZipFile(payload["packagePath"], "r") as archive:
+        infos = archive.infolist()
+        if len(infos) > int(payload["maxMembers"]):
+            print(json.dumps({"ok": False, "errorType": "TooManyMembers"}))
+            sys.exit(0)
         members = []
-        for info in archive.infolist():
+        total_bytes = 0
+        for info in infos:
+            total_bytes += int(info.file_size)
+            if int(info.file_size) > int(payload["maxMemberBytes"]) or total_bytes > int(payload["maxTotalBytes"]):
+                print(json.dumps({"ok": False, "errorType": "BoundedReadLimit"}))
+                sys.exit(0)
             raw = archive.read(info.filename)
             try:
                 text = raw.decode("utf-8")
@@ -716,35 +826,131 @@ try:
 except Exception as exc:
     print(json.dumps({"ok": False, "errorType": exc.__class__.__name__}))
     sys.exit(0)
-print(json.dumps({"ok": True, "members": members, "manifest": manifest, "cookiePayload": cookie_payload}))
+print(json.dumps({"ok": True, "members": members, "manifest": manifest, "cookiePayload": cookie_payload, "totalByteCount": total_bytes}))
 `;
-  const inspection = runPythonJsonFixture(script, { packagePath }, context, "package-archive-inspect");
-  assert(inspection.ok === true, "M005/S04 package archive could not be inspected as a valid .tpkg ZIP.", { phase: "package-inspection", markerClass: "package_malformed", errorType: inspection.errorType ?? "unknown" });
-  const memberNames = inspection.members.map((member) => member.name);
-  const scanContext = packageScanContext ?? createM005S02PackageScanContext({ rootDir, storeRoot: appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean), packageMemberNames: memberNames });
+  const inspection = runPythonJsonFixture(script, { packagePath, maxMembers: PACKAGE_ARCHIVE_MAX_MEMBERS, maxMemberBytes: PACKAGE_ARCHIVE_MAX_MEMBER_BYTES, maxTotalBytes: PACKAGE_ARCHIVE_MAX_TOTAL_BYTES }, context, "package-archive-inspect");
+  assert(inspection.ok === true, "M005/S04 package archive could not be inspected as a valid bounded .tpkg ZIP.", { phase: "package-inspection", markerClass: "package_malformed", errorType: inspection.errorType ?? "unknown" });
+  const members = Array.isArray(inspection.members) ? inspection.members : [];
+  const memberNames = members.map((member) => member.name);
+  const scanContext = packageScanContext ?? createM005S02PackageScanContext({ rootDir, storeRoot: appDataRoot, selectedPaths: [packagePath, ...selectedPaths].filter(Boolean), cookieDomains: expectedCookieRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedCookieRows.map((row) => row.name).filter(Boolean), cookieValues: expectedCookieRows.map((row) => row.value).filter(Boolean) });
   const scan = assertM005S02PackageContentClean(inspection, scanContext);
+  assert(memberNames.includes(MANIFEST_MEMBER) && memberNames.includes(COOKIE_MEMBER), "M005/S04 package archive missed required fixed members.", { phase: "package-inspection", markerClass: "missing_package_member", requiredMemberCount: 2 });
+  const extraNonPayloadMembers = memberNames.filter((name) => name !== MANIFEST_MEMBER && name !== COOKIE_MEMBER && !name.startsWith(PAYLOAD_PREFIX)).length;
+  assert(extraNonPayloadMembers === 0, "M005/S04 package archive contained unexpected non-payload members.", { phase: "package-inspection", markerClass: "extra_package_member", extraNonPayloadMembers });
   const runtimeMemberCount = memberNames.filter((name) => /(?:^|\/)DevToolsActivePort$|(?:^|\/)Singleton|Default\/Network\/Cookies(?:-journal)?$/i.test(name)).length;
   assert(runtimeMemberCount === 0, "M005/S04 package archive included volatile runtime or raw cookie database members.", { phase: "package-inspection", markerClass: "runtime_member", runtimeMemberCount });
+  const selectedBasenames = [packagePath, ...selectedPaths].map((item) => (typeof item === "string" ? basename(item) : "")).filter(Boolean);
+  const selfIncludedCount = memberNames.filter((name) => selectedBasenames.some((selected) => selected && name.endsWith(`/${selected}`))).length;
+  assert(selfIncludedCount === 0, "M005/S04 package archive included the selected package destination in its payload.", { phase: "package-inspection", markerClass: "self_inclusion", selfIncludedCount });
+
   const manifest = inspection.manifest ?? {};
-  assert(manifest.format === PACKAGE_FORMAT && manifest.version === PACKAGE_VERSION, "M005/S04 package archive manifest format or version mismatch.", { phase: "package-inspection", markerClass: "manifest_mismatch", formatOk: manifest.format === PACKAGE_FORMAT, versionOk: manifest.version === PACKAGE_VERSION });
-  assert(memberNames.includes(MANIFEST_MEMBER) && memberNames.includes(COOKIE_MEMBER), "M005/S04 package archive missed required fixed members.", { phase: "package-inspection", markerClass: "missing_package_member", requiredMemberCount: 2 });
-  const payloadFileCount = memberNames.filter((name) => name.startsWith(PAYLOAD_PREFIX)).length;
-  const cookieCount = Number(manifest.cookies?.cookieCount ?? inspection.cookiePayload?.cookies?.length ?? 0);
+  const manifestSummary = assertM005S04PackageManifestContract(manifest, { expectedProfileName });
+  const manifestPayloadMembers = manifest.payload.files.map((file) => file.member).sort();
+  const actualPayloadMembers = memberNames.filter((name) => name.startsWith(PAYLOAD_PREFIX)).sort();
+  assert(JSON.stringify(actualPayloadMembers) === JSON.stringify(manifestPayloadMembers), "M005/S04 package payload members did not match the manifest.", { phase: "package-inspection", markerClass: "payload_member_mismatch", payloadFileCount: manifestPayloadMembers.length, actualPayloadCount: actualPayloadMembers.length });
+  assertPackageMemberChecksum(members.find((member) => member.name === COOKIE_MEMBER), { byteCount: manifest.cookies.byteCount, sha256: manifest.cookies.sha256 }, "cookie");
+  for (const file of manifest.payload.files) assertPackageMemberChecksum(members.find((member) => member.name === file.member), { byteCount: file.byteCount, sha256: file.sha256 }, "payload");
+
+  const cookiePayload = inspection.cookiePayload ?? {};
+  assert(cookiePayload.format === "theprivator.cookies" && cookiePayload.version === 1 && Array.isArray(cookiePayload.cookies), "M005/S04 package cookie member was malformed.", { phase: "package-inspection", markerClass: "cookie_member_malformed" });
+  assert(cookiePayload.cookies.length === manifest.cookies.cookieCount, "M005/S04 package cookie member count did not match the manifest.", { phase: "package-inspection", markerClass: "cookie_member_mismatch", cookieCount: manifest.cookies.cookieCount, actualCookieCount: cookiePayload.cookies.length });
+  const missingExpectedCookies = expectedCookieRows.filter((expected) => !cookiePayload.cookies.some((cookie) => cookie?.domain === expected.domain && cookie?.name === expected.name && cookie?.value === expected.value)).length;
+  assert(missingExpectedCookies === 0, "M005/S04 package cookie member missed expected portable cookies.", { phase: "package-inspection", markerClass: "cookie_member_mismatch", missingExpectedCookies });
+  const payloadRelativePaths = new Set(manifest.payload.files.map((file) => file.path));
+  const missingPayloadFiles = expectedPayloadRelativePaths.filter((relativePath) => !payloadRelativePaths.has(relativePath)).length;
+  assert(missingPayloadFiles === 0, "M005/S04 package payload missed expected safe files.", { phase: "package-inspection", markerClass: "payload_missing", missingPayloadFiles, expectedPayloadCount: expectedPayloadRelativePaths.length });
+
   const summary = {
     archive: "valid",
     memberCount: memberNames.length,
     manifestPresent: true,
     cookieMemberPresent: true,
-    payloadFileCount,
-    cookieCount,
-    payloadByteCount: Number(manifest.payload?.byteCount ?? 0),
-    warningCount: Array.isArray(manifest.warnings) ? manifest.warnings.length : 0,
+    payloadFileCount: manifestSummary.payloadFileCount,
+    cookieCount: manifestSummary.cookieCount,
+    payloadByteCount: manifestSummary.payloadByteCount,
+    warningCount: manifestSummary.warningCount,
+    proxyMode: manifestSummary.proxyMode,
+    proxyCredentialStripped: manifestSummary.proxyCredentialStripped,
+    checksumValidated: true,
+    packageByteBounded: true,
     scanClean: true,
     scannedMembers: Number(scan.scannedMembers ?? memberNames.length),
     runtimeMembersSkipped: true,
+    destinationSelfIncluded: false,
   };
   assertM005S04PublicEvidenceRedacted(summary, context);
-  return { value: { inspection, scan }, log: summary };
+  return { value: { inspection, scan, manifestSummary }, log: summary };
+}
+
+function resolveM005S04ProfileUserDataRoot(appDataRoot, profile, phase = "copied-profile") {
+  const storage = profile?.storage;
+  assert(isPlainObject(storage), "M005/S04 profile storage metadata is missing.", { phase, markerClass: "profile_storage_missing" });
+  assert(isSafeRelativeStorePath(storage.profileDir), "M005/S04 profile storage.profileDir must be a safe relative store path.", { phase, markerClass: "profile_storage_malformed" });
+  assert(isSafeRelativeStorePath(storage.userDataDir) && storage.userDataDir === `${storage.profileDir}/user-data`, "M005/S04 profile storage.userDataDir must be a safe relative user-data path.", { phase, markerClass: "profile_storage_malformed" });
+  const userDataRoot = join(appDataRoot, storage.userDataDir);
+  assert(pathInside(appDataRoot, userDataRoot), "M005/S04 profile user data root must stay inside the app-data root.", { phase, markerClass: "profile_storage_malformed" });
+  return userDataRoot;
+}
+
+function readM005S04RuntimeRegistry(appDataRoot) {
+  const registryPath = join(appDataRoot, "profile-store", "runtime", "chromium-processes.json");
+  if (!existsSync(registryPath)) return {};
+  try {
+    const payload = JSON.parse(readFileSync(registryPath, "utf8"));
+    return isPlainObject(payload?.processes) ? payload.processes : {};
+  } catch {
+    return {};
+  }
+}
+
+function copiedProfileNameMatches(sourceName, importedName) {
+  if (typeof sourceName !== "string" || typeof importedName !== "string") return false;
+  return importedName === `${sourceName} Copy` || new RegExp(`^${escapeRegExp(sourceName)} Copy \\d+$`).test(importedName);
+}
+
+export function assertM005S04CopiedProfileRestored({ profileStorePath, appDataRoot, sourceProfile, expectedCookieRows = [], expectedPayloadRelativePaths = ["Default/Preferences"], expectedImportedName } = {}, context = createM005S04PublicScanContext({ appDataRoot, cookieDomains: expectedCookieRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedCookieRows.map((row) => row.name).filter(Boolean), cookieValues: expectedCookieRows.map((row) => row.value).filter(Boolean) })) {
+  assert(typeof profileStorePath === "string" && profileStorePath.length > 0, "M005/S04 copied-profile assertion requires a profile store path.", { phase: "copied-profile", markerClass: "missing_profile_store" });
+  assert(typeof appDataRoot === "string" && appDataRoot.length > 0, "M005/S04 copied-profile assertion requires an app-data root.", { phase: "copied-profile", markerClass: "missing_app_data_root" });
+  assert(isPlainObject(sourceProfile) && typeof sourceProfile.id === "string" && typeof sourceProfile.name === "string", "M005/S04 copied-profile assertion requires the source profile record.", { phase: "copied-profile", markerClass: "source_profile_missing" });
+  const payload = readJsonFile(profileStorePath, "profile-store/profiles.json");
+  assert(isPlainObject(payload) && Array.isArray(payload.profiles), "M005/S04 profile-store payload was malformed after package import.", { phase: "copied-profile", markerClass: "profile_store_malformed" });
+  const sourceMatches = payload.profiles.filter((profile) => profile?.id === sourceProfile.id);
+  assert(sourceMatches.length === 1, "M005/S04 package import overwrote or removed the source profile.", { phase: "copied-profile", markerClass: "source_profile_missing", sourceMatches: sourceMatches.length });
+  const candidates = payload.profiles.filter((profile) => profile?.id !== sourceProfile.id && profile?.metadata?.source === "profile-package" && copiedProfileNameMatches(sourceProfile.name, profile?.name));
+  const importedProfile = expectedImportedName ? candidates.find((profile) => profile?.name === expectedImportedName) : candidates.at(-1);
+  assert(importedProfile, "M005/S04 package import did not create a copied profile with a conflict-resolved name.", { phase: "copied-profile", markerClass: "copied_profile_missing", profileCount: payload.profiles.length, copiedCandidateCount: candidates.length });
+  assert(importedProfile.id !== sourceProfile.id, "M005/S04 package import reused the source profile id.", { phase: "copied-profile", markerClass: "copied_profile_id_mismatch" });
+  assert(copiedProfileNameMatches(sourceProfile.name, importedProfile.name), "M005/S04 package import did not resolve the copied profile name.", { phase: "copied-profile", markerClass: "copied_profile_name_mismatch" });
+  assert(importedProfile.metadata?.originalName === sourceProfile.name, "M005/S04 package import metadata did not preserve the original profile name.", { phase: "copied-profile", markerClass: "copied_profile_metadata_mismatch" });
+  const importedUserDataRoot = resolveM005S04ProfileUserDataRoot(appDataRoot, importedProfile, "copied-profile");
+  const runtimeRecords = readM005S04RuntimeRegistry(appDataRoot);
+  assert(!Object.prototype.hasOwnProperty.call(runtimeRecords, importedProfile.id), "M005/S04 imported copied profile was not stopped after import.", { phase: "copied-profile", markerClass: "copied_profile_busy" });
+
+  const cookies = inspectM005S04CookieDbRows({ appDataRoot, userDataRoot: importedUserDataRoot, expectedRows: expectedCookieRows }, context);
+  assert(cookies.value.expectedRowsPresent && cookies.value.count >= expectedCookieRows.length, "M005/S04 imported copied profile did not restore the expected cookies.", { phase: "copied-profile", markerClass: "cookies_not_restored", missingExpectedCount: Math.max(0, expectedCookieRows.length - Number(cookies.value.count ?? 0)) });
+  const missingPayloadFiles = expectedPayloadRelativePaths.filter((relativePath) => !existsSync(join(importedUserDataRoot, ...relativePath.split("/")))).length;
+  assert(missingPayloadFiles === 0, "M005/S04 imported copied profile did not restore expected payload files.", { phase: "copied-profile", markerClass: "payload_not_restored", expectedPayloadCount: expectedPayloadRelativePaths.length, missingPayloadFiles });
+
+  const summary = {
+    copiedProfile: "restored",
+    profileCount: payload.profiles.length,
+    sourcePreserved: true,
+    copiedIdDistinct: true,
+    nameConflictResolved: true,
+    runtimeStatus: "stopped",
+    cookieRowsRestored: cookies.value.count,
+    expectedCookiesPresent: true,
+    payloadFilesRestored: expectedPayloadRelativePaths.length,
+  };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { profile: importedProfile, userDataRoot: importedUserDataRoot, profileStore: payload }, log: summary };
+}
+
+export function assertM005S04VisibleTextRedacted({ text, phase = "ui.visible-text" } = {}, context = createM005S04PublicScanContext()) {
+  assert(typeof text === "string", "M005/S04 visible UI text projection must be text.", { phase, markerClass: "ui_text_malformed" });
+  const marker = findM005S04ForbiddenPublicMarker(text, context);
+  assert(!marker, "M005/S04 visible UI text contained forbidden material.", { phase, markerClass: marker?.markerClass ?? "ui_text_forbidden", fieldPath: marker?.fieldPath ?? "$" });
+  return { textObserved: text.length > 0, characterCount: text.length };
 }
 
 const SAFE_DIAGNOSTIC_KEYS = new Set(["schemaVersion", "ts", "requestId", "logPath", "event", "source", "method", "status", "durationMs", "errorCode", "detailRef"]);
@@ -1039,6 +1245,109 @@ export function createNativeDialogCommandPlan({ dialog, extension, strategyPlan 
   return commandPlan;
 }
 
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function runNativeDialogTool(command, args = [], { input = "", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS, context = createM005S04PublicScanContext(), phase = "native-dialog" } = {}) {
+  const result = spawnSync(executable(command), args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 512 * 1024 });
+  if (result.error || result.status !== 0) {
+    const failure = formatM005S04CommandFailure(command, result, context, phase);
+    fail("M005/S04 native dialog automation command failed.", { ...failure, phase, markerClass: "native_dialog_tool_failed" });
+  }
+  return { commandClass: commandClassFromLabel(command), exitCode: result.status ?? 0 };
+}
+
+export async function driveM005S04NativeDialogSelection({ dialog, targetPath, extension, strategyPlan, settleMs = DEFAULT_NATIVE_DIALOG_SETTLE_MS } = {}, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) })) {
+  assert(typeof targetPath === "string" && targetPath.length > 0, "M005/S04 native dialog selection requires a private target path.", { phase: "native-dialog", markerClass: "missing_selected_path" });
+  const commandPlan = createNativeDialogCommandPlan({ dialog, extension, strategyPlan });
+  assert(commandPlan.selected, "M005/S04 native dialog automation is unavailable for the current desktop session.", { phase: "native-dialog", markerClass: "missing_native_dialog_tool", strategy: commandPlan.strategy });
+  await sleep(settleMs);
+  const phase = `native-dialog.${commandPlan.dialog}.${commandPlan.extension}`;
+  if (commandPlan.strategy === "wayland") {
+    if (strategyPlan?.clipboard === "wl-clipboard") {
+      runNativeDialogTool("wl-copy", [], { input: targetPath, context, phase });
+      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
+      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"], { context, phase });
+    } else {
+      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
+      runNativeDialogTool(WAYLAND_TYPE_TOOL, [targetPath], { context, phase });
+    }
+    runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-P", "Return", "-p", "Return"], { context, phase });
+  } else if (commandPlan.strategy === "x11") {
+    if (strategyPlan?.clipboard === "xsel") runNativeDialogTool("xsel", ["--clipboard", "--input"], { input: targetPath, context, phase });
+    else runNativeDialogTool("xclip", ["-selection", "clipboard"], { input: targetPath, context, phase });
+    runNativeDialogTool(X11_TYPE_TOOL, ["key", "ctrl+l", "ctrl+v", "Return"], { context, phase });
+  } else {
+    fail("M005/S04 native dialog automation strategy is unsupported.", { phase: "native-dialog", markerClass: "native_dialog_strategy_unsupported", strategy: commandPlan.strategy });
+  }
+  const summary = { dialog: commandPlan.dialog, selected: true, extension: commandPlan.extension, strategy: commandPlan.strategy, steps: commandPlan.steps.length, privateSelection: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { targetPath }, log: summary };
+}
+
+function xpathLiteral(value) {
+  const text = String(value ?? "");
+  if (!text.includes("'")) return `'${text}'`;
+  if (!text.includes('"')) return `"${text}"`;
+  return `concat(${text.split("'").map((part) => `'${part}'`).join(', "\'", ')})`;
+}
+
+function m005S04ProfileCardXPath(name) {
+  return `//article[contains(concat(' ', normalize-space(@class), ' '), ' profile-card ')][.//h3[normalize-space()=${xpathLiteral(name)}]]`;
+}
+
+async function clickM005S04UiElement(driver, element, runtime, step, markerClass) {
+  try {
+    await driver.executeScript("arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' });", element);
+    await element.click();
+    return "native-click";
+  } catch (error) {
+    try {
+      await driver.executeScript("arguments[0].click();", element);
+      return "dom-click";
+    } catch {
+      fail("M005/S04 packaged UI click failed.", { phase: step, markerClass, message: error instanceof Error ? error.message : String(error), outputSuppressed: true });
+    }
+  }
+}
+
+async function readM005S04VisibleBodyText(driver) {
+  try {
+    const body = await driver.findElement(By.css("body"));
+    return (await body.getText()).trim();
+  } catch {
+    return "";
+  }
+}
+
+async function readM005S04FirstVisibleText(driver, by) {
+  try {
+    const elements = await driver.findElements(by);
+    for (const element of elements) {
+      if (!(await element.isDisplayed())) continue;
+      const text = (await element.getText()).trim();
+      if (text) return text;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+async function readM005S04PackageExportSuccessText(driver, profileName) {
+  return readM005S04FirstVisibleText(driver, By.xpath(`${m005S04ProfileCardXPath(profileName)}//section[contains(concat(' ', normalize-space(@class), ' '), ' package-portability-success ')][.//strong[normalize-space()='ThePrivator package export completed.']]`));
+}
+
+async function readM005S04PackageImportSuccessText(driver) {
+  return readM005S04FirstVisibleText(driver, By.xpath(`//section[contains(concat(' ', normalize-space(@class), ' '), ' package-portability-success ')][.//strong[normalize-space()='ThePrivator package import completed.']]`));
+}
+
+async function waitForM005S04GlobalButton(driver, buttonText, runtime, options = {}) {
+  const selector = By.xpath(`//button[normalize-space()=${xpathLiteral(buttonText)}]`);
+  return waitS06VisibleElement(driver, selector, runtime, buttonText, { ...options, step: options.step ?? "m005-global-button" });
+}
+
 export function assertM005S04WebDriverPreflight({ rootDir = ROOT_DIR, platform = process.platform, env = process.env, strict = true } = {}) {
   try {
     const result = assertS06WebDriverPreflight({ rootDir, platform, env, strict });
@@ -1098,6 +1407,42 @@ export async function createM005S04SourceProfileViaUi(driver, runtime, {
   };
 }
 
+export async function driveM005S04PackageExportViaUi(driver, runtime, { packagePath, strategyPlan, readProfileCardText = readS06ProfileCardText, waitForProfileButton = waitS06ProfileButton, waitForVisibleText = waitS06VisibleText, driveNativeDialogSelection = driveM005S04NativeDialogSelection } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [packagePath].filter(Boolean) })) {
+  assert(driver, "M005/S04 package export requires a WebDriver session.", { phase: "ui.package-export", markerClass: "missing_webdriver_session" });
+  assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 package export requires a source profile name.", { phase: "ui.package-export", markerClass: "missing_smoke_context" });
+  assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package export requires a private .tpkg destination.", { phase: "ui.package-export", markerClass: "missing_package_path" });
+  const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Export ThePrivator package", runtime, { step: "m005-package-export-click" });
+  const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-export", "package_export_click_failed");
+  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: packagePath, extension: "tpkg", strategyPlan }, context);
+  await waitForVisibleText(driver, "ThePrivator package export completed.", runtime, { step: "m005-package-export-success" });
+  await waitForVisibleText(driver, "The sidecar wrote the selected destination without returning the location or archive internals to the UI.", runtime, { step: "m005-package-export-redaction-copy" });
+  const successText = await readM005S04PackageExportSuccessText(driver, runtime.smokeContext.smokeProfileName);
+  assert(successText.length > 0, "M005/S04 package export success summary was not readable for redaction scanning.", { phase: "ui.package-export", markerClass: "ui_success_missing" });
+  assertM005S04VisibleTextRedacted({ text: successText, phase: "ui.package-export" }, context);
+  const summary = { packageExportUi: "success", dialog: dialog.log, clickMode, successTextObserved: successText.length > 0, successTextScanned: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { successText }, log: summary };
+}
+
+export async function driveM005S04PackageImportViaUi(driver, runtime, { packagePath, strategyPlan, waitForVisibleText = waitS06VisibleText, waitForProfileCard = waitS06ProfileCard, driveNativeDialogSelection = driveM005S04NativeDialogSelection } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [packagePath].filter(Boolean) })) {
+  assert(driver, "M005/S04 package import requires a WebDriver session.", { phase: "ui.package-import", markerClass: "missing_webdriver_session" });
+  assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 package import requires a source profile name.", { phase: "ui.package-import", markerClass: "missing_smoke_context" });
+  assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package import requires a private .tpkg source.", { phase: "ui.package-import", markerClass: "missing_package_path" });
+  const button = await waitForM005S04GlobalButton(driver, "Import ThePrivator package", runtime, { step: "m005-package-import-click" });
+  const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-import", "package_import_click_failed");
+  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan }, context);
+  await waitForVisibleText(driver, "ThePrivator package import completed.", runtime, { step: "m005-package-import-success" });
+  await waitForVisibleText(driver, "The sidecar imported a stopped copied profile and returned only safe aggregate metadata to the UI.", runtime, { step: "m005-package-import-redaction-copy" });
+  const restored = assertM005S04CopiedProfileRestored({ profileStorePath: runtime.profileStore.profileStorePath, appDataRoot: runtime.profileStore.appDataRoot, sourceProfile: runtime.profileStore.profile, expectedCookieRows: runtime.fixtures?.sourceCookies ?? [], expectedPayloadRelativePaths: runtime.fixtures?.expectedPayloadRelativePaths ?? ["Default/Preferences"] }, context);
+  await waitForProfileCard(driver, restored.value.profile.name, runtime, { step: "m005-package-import-card" });
+  const successText = await readM005S04PackageImportSuccessText(driver);
+  assert(successText.length > 0, "M005/S04 package import success summary was not readable for redaction scanning.", { phase: "ui.package-import", markerClass: "ui_success_missing" });
+  assertM005S04VisibleTextRedacted({ text: successText, phase: "ui.package-import" }, context);
+  const summary = { packageImportUi: "success", dialog: dialog.log, clickMode, copiedProfileVisible: true, copiedProfileRestored: restored.log, successTextScanned: true };
+  assertM005S04PublicEvidenceRedacted(summary, context);
+  return { value: { importedProfile: restored.value.profile, importedUserDataRoot: restored.value.userDataRoot, successText }, log: summary };
+}
+
 function summarizeArtifactProof(proof = {}) {
   return { targetTriple: proof.targetTriple ? "detected" : "detected", releaseExecutable: proof.releaseExecutable ? "present" : "missing", releaseSidecar: proof.releaseSidecar ? "present" : "missing", packageCount: Array.isArray(proof.packages) ? proof.packages.length : 0 };
 }
@@ -1146,7 +1491,52 @@ export function runBuildOnlyVerification({ rootDir = ROOT_DIR, platform = proces
   return summary;
 }
 
-export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = ROOT_DIR, platform = process.platform, env = process.env, keepTemp = false } = {}, context = createM005S04PublicScanContext({ rootDir })) {
+export async function runM005S04PackagePortabilityLoop({ driver, runtime, strategyPlan, packagePath = runtime?.fixtures?.selectedPackagePath } = {}, context = createM005S04PublicScanContext({ tempRoot: runtime?.smokeContext?.smokeRoot, appDataRoot: runtime?.profileStore?.appDataRoot, userDataRoot: runtime?.profileStore?.userDataRoot, selectedPaths: [packagePath].filter(Boolean), cookieDomains: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.domain).filter(Boolean), cookieNames: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.name).filter(Boolean), cookieValues: (runtime?.fixtures?.sourceCookies ?? []).map((row) => row.value).filter(Boolean) })) {
+  assert(driver, "M005/S04 package portability loop requires a WebDriver session.", { phase: "runtime.package-loop", markerClass: "missing_webdriver_session" });
+  assert(runtime?.profileStore?.profile, "M005/S04 package portability loop requires a discovered source profile.", { phase: "runtime.package-loop", markerClass: "source_profile_missing" });
+  assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package portability loop requires a private .tpkg path.", { phase: "runtime.package-loop", markerClass: "missing_package_path" });
+
+  const packageContext = createM005S04PublicScanContext({
+    rootDir: runtime.rootDir,
+    tempRoot: runtime.smokeContext?.smokeRoot,
+    appDataRoot: runtime.profileStore.appDataRoot,
+    userDataRoot: runtime.profileStore.userDataRoot,
+    selectedPaths: [packagePath],
+    cookieDomains: runtime.fixtures.sourceCookies.map((row) => row.domain).filter(Boolean),
+    cookieNames: runtime.fixtures.sourceCookies.map((row) => row.name).filter(Boolean),
+    cookieValues: runtime.fixtures.sourceCookies.map((row) => row.value).filter(Boolean),
+  });
+
+  const exportUi = await runStepAsync("ui.package-export", async () => driveM005S04PackageExportViaUi(driver, runtime, { packagePath, strategyPlan }, packageContext), packageContext);
+  const archive = runStep("package.archive-inspect", () => inspectM005S04PackageArchive({
+    rootDir: runtime.rootDir,
+    appDataRoot: runtime.profileStore.appDataRoot,
+    packagePath,
+    selectedPaths: [packagePath],
+    expectedProfileName: runtime.profileStore.profile.name,
+    expectedCookieRows: runtime.fixtures.sourceCookies,
+    expectedPayloadRelativePaths: runtime.fixtures.expectedPayloadRelativePaths,
+  }, packageContext), packageContext);
+  const imported = await runStepAsync("ui.package-import", async () => driveM005S04PackageImportViaUi(driver, runtime, { packagePath, strategyPlan }, packageContext), packageContext);
+  const diagnostics = runStep("diagnostics.package-portability", () => inspectM005S04Diagnostics({ appDataRoot: runtime.profileStore.appDataRoot, requiredMethods: ["portability.profile_package.export", "portability.profile_package.import"] }, packageContext), packageContext);
+
+  const summary = {
+    packageLoop: "exported-imported",
+    exportUiObserved: Boolean(exportUi.successText),
+    archiveInspected: true,
+    copiedProfileRestored: Boolean(imported.importedProfile),
+    importedCardVisible: Boolean(imported.importedProfile),
+    diagnosticsRows: Array.isArray(diagnostics.records) ? diagnostics.records.length : 0,
+    warningCount: archive.manifestSummary.warningCount,
+    cookieCount: archive.manifestSummary.cookieCount,
+    payloadFileCount: archive.manifestSummary.payloadFileCount,
+    nextProof: "restored-launch-pending",
+  };
+  assertM005S04PublicEvidenceRedacted(summary, packageContext);
+  return { summary, exportUi, archive, imported, diagnostics };
+}
+
+export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = ROOT_DIR, platform = process.platform, env = process.env, keepTemp = false, strategyPlan = null, packageLoop = null } = {}, context = createM005S04PublicScanContext({ rootDir })) {
   assert(artifactProof?.releaseExecutable, "M005/S04 packaged harness setup requires a release executable proof.", { phase: "runtime.harness", markerClass: "missing_release_executable" });
   const applicationPath = join(rootDir, artifactProof.releaseExecutable);
   let smokeContext = null;
@@ -1172,6 +1562,7 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
     const uiProfile = await runStepAsync("ui.source-profile-create", async () => createM005S04SourceProfileViaUi(driver, runtime), runtimeContext);
     const profileStore = runStep("profile-store.discover", () => discoverM005S04SourceProfile({ rootDir, smokeContext }), runtimeContext);
     runtime.profileStore = profileStore;
+    runtime.driverProcess = driverProcess;
     const cookieDomain = "m005-s04-source.invalid";
     const cookieName = "m005_s04_source";
     const cookieValue = "m005-s04-source-cookie-value";
@@ -1190,8 +1581,13 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
     const cookieRows = runStep("fixture.cookie-db-inspect", () => inspectM005S04CookieDbRows({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, expectedRows: cookieFixture.cookies }, fixtureContext), fixtureContext);
     assert(cookieRows.expectedRowsPresent, "M005/S04 cookie DB fixture rows were not readable after seeding.", { phase: "cookie-db", markerClass: "cookie_rows_missing", missingExpectedCount: cookieRows.missingExpectedCount });
     const importFixtures = runStep("fixture.cookie-import-files", () => writeM005S04CookieImportFixtures({ smokeRoot: smokeContext.smokeRoot }, fixtureContext), fixtureContext);
-    const selectedPackagePath = join(smokeContext.smokeRoot, "fixtures", "selected-package-output.tpkg");
+    const selectedPackagePath = join(profileStore.userDataRoot, "Default", "selected-package-output.tpkg");
+    const expectedPayloadRelativePaths = ["Default/Preferences", "Default/Local Storage/leveldb/000003.log"];
     const payloadFixtures = runStep("fixture.payload-files", () => writeM005S04PayloadFixtures({ appDataRoot: profileStore.appDataRoot, userDataRoot: profileStore.userDataRoot, selectedPackagePath }, fixtureContext), fixtureContext);
+    runtime.fixtures = { sourceCookies: cookieFixture.cookies, importCookies: importFixtures.cookies, payloadFixtures, selectedPackagePath, expectedPayloadRelativePaths };
+    const packageProof = packageLoop
+      ? await packageLoop({ driver, driverProcess, runtime, strategyPlan, packagePath: selectedPackagePath, context: fixtureContext })
+      : null;
     setupCompleted = true;
     setupProof = {
       harness: "ready",
@@ -1203,7 +1599,7 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
         safePayloadFiles: payloadFixtures.preferencesPath ? 2 : 2,
         volatileRuntimeFiles: 3,
       },
-      portabilityLoop: "pending-next-task",
+      portabilityLoop: packageProof?.summary ?? "pending-next-task",
     };
     assertM005S04PublicEvidenceRedacted(setupProof, fixtureContext);
     return setupProof;
@@ -1224,12 +1620,12 @@ async function runFullOrUiSkeleton(args, { rootDir = ROOT_DIR, platform = proces
   const chromium = runStep("preflight.chromium", () => assertM005S04ChromiumExecutable({ rootDir, platform, env }), context);
   const nativeDialog = runStep("preflight.native-dialog", () => assertNativeDialogAutomationPreflight({ platform, env, strict: true }), context);
   const artifactProof = prepareM005S04BuildArtifacts({ rootDir, platform, context, skipBuild: args.skipBuild });
-  const runtime = await runM005S04PackagedHarnessSetup({ artifactProof, rootDir, platform, env, keepTemp: args.keepTemp }, context);
-  fail("M005/S04 cookie/package UI portability loop is not implemented after the packaged harness setup yet.", { phase: "runtime.loop", markerClass: "runtime_loop_pending", mode: args.mode, preflight: { webdriver: webdriver.missingToolClasses.length === 0, chromium: true, nativeDialog: nativeDialog.status }, build: summarizeArtifactProof(artifactProof), runtime: { harness: runtime.harness, sourceProfile: runtime.sourceProfile?.createdVia, fixtures: runtime.fixtures, cleanup: runtime.cleanup?.tempRoot ?? "attempted" }, outputSuppressed: true });
+  const runtime = await runM005S04PackagedHarnessSetup({ artifactProof, rootDir, platform, env, keepTemp: args.keepTemp, strategyPlan: nativeDialog, packageLoop: runM005S04PackagePortabilityLoop }, context);
+  fail("M005/S04 restored launch proof is not implemented after package export/import yet.", { phase: "runtime.restored-launch", markerClass: "restored_launch_pending", mode: args.mode, preflight: { webdriver: webdriver.missingToolClasses.length === 0, chromium: true, nativeDialog: nativeDialog.status }, build: summarizeArtifactProof(artifactProof), runtime: { harness: runtime.harness, sourceProfile: runtime.sourceProfile?.createdVia, fixtures: runtime.fixtures, packageLoop: runtime.portabilityLoop, cleanup: runtime.cleanup?.tempRoot ?? "attempted" }, outputSuppressed: true });
 }
 
 function printHelp() {
-  console.log(`Usage: npm run verify:m005:s04 -- [--preflight-only|--build-only|--ui-only] [--skip-build] [--keep-temp]\n\nModes:\n  default           Full packaged portability proof; later S04 tasks fill in the UI runtime loop.\n  --preflight-only  Run M005 guardrails, WebDriver preflight, and native-dialog preflight only.\n  --build-only      Build release artifacts and validate their shape without running the UI loop.\n  --ui-only         Validate existing artifacts and run the packaged UI loop.\n\nDiagnostics:\n  --skip-build      Reuse existing artifacts for full/UI modes.\n  --keep-temp       Reserved for later runtime cleanup diagnostics; paths remain redacted.`);
+  console.log(`Usage: npm run verify:m005:s04 -- [--preflight-only|--build-only|--ui-only] [--skip-build] [--keep-temp]\n\nModes:\n  default           Full packaged portability proof; T04 now drives .tpkg export/import and T05 completes restored launch/busy guard proof.\n  --preflight-only  Run M005 guardrails, WebDriver preflight, and native-dialog preflight only.\n  --build-only      Build release artifacts and validate their shape without running the UI loop.\n  --ui-only         Validate existing artifacts and run the packaged UI loop.\n\nDiagnostics:\n  --skip-build      Reuse existing artifacts for full/UI modes.\n  --keep-temp       Retain the isolated smoke root for private local diagnostics; public paths remain redacted.`);
 }
 
 async function runCli(argv = process.argv.slice(2)) {

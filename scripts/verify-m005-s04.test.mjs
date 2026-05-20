@@ -15,9 +15,12 @@ import {
   createM005S04SourceProfileViaUi,
   createNativeDialogCommandPlan,
   assertM005S04CapabilityConfig,
+  assertM005S04CopiedProfileRestored,
   assertM005S04Guardrails,
+  assertM005S04PackageManifestContract,
   assertM005S04PublicEvidenceRedacted,
   assertM005S04SourceGuardrails,
+  assertM005S04VisibleTextRedacted,
   assertNativeDialogAutomationPreflight,
   assertValidArgs,
   buildM005S04FinalSummary,
@@ -71,7 +74,7 @@ function seedPackagedProfileStore({ root = makeRoot(), profileName = "M005 Packa
   return { root, smokeContext: { smokeRoot, dataRoot, smokeProfileName: profileName, runId: "unit" }, appDataRoot, profile, userDataRoot: join(appDataRoot, profile.storage.userDataDir) };
 }
 
-function writePackageFixture(packagePath, { includeRuntimeMember = false } = {}) {
+function writePackageFixture(packagePath, { includeRuntimeMember = false, omitCookieMember = false, extraRawMember = false, credentialProxy = false, manifestCookieLeak = false, missingLocalStorage = false } = {}) {
   const script = String.raw`
 import hashlib, json, sys, zipfile
 from pathlib import Path
@@ -81,23 +84,38 @@ package_path.parent.mkdir(parents=True, exist_ok=True)
 cookie_payload = {"format":"theprivator.cookies","version":1,"cookies":[{"domain":"m005-s04-package.invalid","name":"m005_s04_package","value":"package-cookie-value","path":"/","secure":True,"httpOnly":True,"expires":1900000000}]}
 cookie_bytes = json.dumps(cookie_payload, sort_keys=True).encode("utf-8")
 pref_bytes = b'{"profile":{"name":"M005 S04 package payload"}}\n'
+storage_bytes = b'm005-s04-safe-local-storage-payload\n'
+payload_files = [{"path":"Default/Preferences","member":"payload/Default/Preferences","bytes":pref_bytes}]
+if not payload.get("missingLocalStorage"):
+  payload_files.append({"path":"Default/Local Storage/leveldb/000003.log","member":"payload/Default/Local Storage/leveldb/000003.log","bytes":storage_bytes})
+proxy = {"proxyVersion":1,"mode":"direct"}
+proxy_summary = {"proxyVersion":1,"mode":"direct","credentialState":"none","summary":"Direct connection"}
+if payload.get("credentialProxy"):
+  proxy = {"proxyVersion":1,"mode":"fixedServer","protocol":"http","host":"proxy.m005-s04.invalid","port":8080,"credentials":{"username":"u","password":"p"}}
+  proxy_summary = {"proxyVersion":1,"mode":"fixedServer","credentialState":"configured","summary":"credentialed proxy should stay private"}
 manifest = {
   "format":"theprivator.profile-package",
   "version":1,
   "createdAt":"2026-01-01T00:00:00.000Z",
-  "profile":{"name":"M005 S04 Package","identity":{"identityVersion":1},"proxy":{"proxyVersion":1,"mode":"direct"},"proxySummary":{"proxyVersion":1,"mode":"direct","credentialState":"none","summary":"Direct connection"}},
+  "profile":{"name":"M005 S04 Package","identity":{"identityVersion":1},"proxy":proxy,"proxySummary":proxy_summary},
   "cookies":{"member":"cookies/theprivator-cookies.json","format":"theprivator.cookies","version":1,"byteCount":len(cookie_bytes),"sha256":hashlib.sha256(cookie_bytes).hexdigest(),"cookieCount":1,"skippedCount":0},
-  "payload":{"prefix":"payload/","fileCount":1,"byteCount":len(pref_bytes),"files":[{"path":"Default/Preferences","member":"payload/Default/Preferences","byteCount":len(pref_bytes),"sha256":hashlib.sha256(pref_bytes).hexdigest()}]},
+  "payload":{"prefix":"payload/","fileCount":len(payload_files),"byteCount":sum(len(item["bytes"]) for item in payload_files),"files":[{"path":item["path"],"member":item["member"],"byteCount":len(item["bytes"]),"sha256":hashlib.sha256(item["bytes"]).hexdigest()} for item in payload_files]},
   "warnings":[],
 }
+if payload.get("manifestCookieLeak"):
+  manifest["profile"]["name"] = "package-cookie-value"
 with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
   archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True).encode("utf-8"))
-  archive.writestr("cookies/theprivator-cookies.json", cookie_bytes)
-  archive.writestr("payload/Default/Preferences", pref_bytes)
+  if not payload.get("omitCookieMember"):
+    archive.writestr("cookies/theprivator-cookies.json", cookie_bytes)
+  for item in payload_files:
+    archive.writestr(item["member"], item["bytes"])
   if payload.get("includeRuntimeMember"):
     archive.writestr("payload/Default/Network/Cookies", b"raw runtime db")
+  if payload.get("extraRawMember"):
+    archive.writestr("raw-diagnostics.txt", b"Traceback stdout stderr")
 `;
-  const result = spawnSync(process.env.PYTHON ?? "python3", ["-c", script], { input: JSON.stringify({ packagePath, includeRuntimeMember }), encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  const result = spawnSync(process.env.PYTHON ?? "python3", ["-c", script], { input: JSON.stringify({ packagePath, includeRuntimeMember, omitCookieMember, extraRawMember, credentialProxy, manifestCookieLeak, missingLocalStorage }), encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
   if (result.status !== 0 || result.error) throw new Error(`package fixture failed: ${result.stderr || result.error?.message}`);
 }
 
@@ -393,7 +411,7 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
     writePackageFixture(packagePath);
     const context = createM005S04PublicScanContext({ rootDir: root, selectedPaths: [packagePath], packageMemberNames: ["manifest.json", "cookies/theprivator-cookies.json", "payload/Default/Preferences"] });
     const inspection = inspectM005S04PackageArchive({ rootDir: root, packagePath, selectedPaths: [packagePath] }, context);
-    expect(inspection.log).toMatchObject({ archive: "valid", manifestPresent: true, cookieMemberPresent: true, payloadFileCount: 1, cookieCount: 1, runtimeMembersSkipped: true });
+    expect(inspection.log).toMatchObject({ archive: "valid", manifestPresent: true, cookieMemberPresent: true, payloadFileCount: 2, cookieCount: 1, runtimeMembersSkipped: true, proxyMode: "direct", checksumValidated: true });
     const encoded = JSON.stringify(inspection.log);
     expect(encoded).not.toContain("manifest.json");
     expect(encoded).not.toContain("payload/Default/Preferences");
@@ -402,6 +420,69 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
     const unsafePackagePath = join(root, "fixtures", "runtime-member.tpkg");
     writePackageFixture(unsafePackagePath, { includeRuntimeMember: true });
     expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: unsafePackagePath })).toThrow(VerifyFailure);
+  });
+
+  it("accepts direct-proxy manifests and rejects credentials, missing members, unsafe markers, and missing payload expectations", () => {
+    const root = makeRoot();
+    const packagePath = join(root, "fixtures", "direct.tpkg");
+    writePackageFixture(packagePath);
+    const context = createM005S04PublicScanContext({ rootDir: root, selectedPaths: [packagePath], cookieValues: ["package-cookie-value"] });
+    const inspection = inspectM005S04PackageArchive({ rootDir: root, packagePath, selectedPaths: [packagePath], expectedPayloadRelativePaths: ["Default/Preferences", "Default/Local Storage/leveldb/000003.log"] }, context);
+    expect(assertM005S04PackageManifestContract(inspection.value.inspection.manifest, { expectedProfileName: "M005 S04 Package" })).toMatchObject({ proxyMode: "direct", directProxyAccepted: true, proxyCredentialStripped: true });
+
+    const credentialPath = join(root, "fixtures", "credential.tpkg");
+    writePackageFixture(credentialPath, { credentialProxy: true });
+    expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: credentialPath })).toThrow(VerifyFailure);
+
+    const missingCookiePath = join(root, "fixtures", "missing-cookie.tpkg");
+    writePackageFixture(missingCookiePath, { omitCookieMember: true });
+    expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: missingCookiePath })).toThrow(VerifyFailure);
+
+    const extraMemberPath = join(root, "fixtures", "extra-raw.tpkg");
+    writePackageFixture(extraMemberPath, { extraRawMember: true });
+    expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: extraMemberPath })).toThrow(VerifyFailure);
+
+    const manifestLeakPath = join(root, "fixtures", "manifest-cookie-leak.tpkg");
+    writePackageFixture(manifestLeakPath, { manifestCookieLeak: true });
+    expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: manifestLeakPath, expectedCookieRows: [{ domain: "m005-s04-package.invalid", name: "m005_s04_package", value: "package-cookie-value" }] })).toThrow(VerifyFailure);
+
+    const missingPayloadPath = join(root, "fixtures", "missing-local-storage.tpkg");
+    writePackageFixture(missingPayloadPath, { missingLocalStorage: true });
+    expect(() => inspectM005S04PackageArchive({ rootDir: root, packagePath: missingPayloadPath, expectedPayloadRelativePaths: ["Default/Preferences", "Default/Local Storage/leveldb/000003.log"] })).toThrow(VerifyFailure);
+  });
+
+  it("asserts copied-profile store, stopped runtime, restored cookies, and restored payload files", () => {
+    const seeded = seedPackagedProfileStore({ profileName: "M005 Packaged Portability Smoke Copy Unit" });
+    const imported = {
+      ...seeded.profile,
+      id: "m005-s04-profile-copy",
+      name: `${seeded.profile.name} Copy`,
+      storage: {
+        profileDir: "profile-store/profiles/m005-s04-profile-copy",
+        userDataDir: "profile-store/profiles/m005-s04-profile-copy/user-data",
+      },
+      metadata: {
+        source: "profile-package",
+        format: "theprivator.profile-package",
+        formatVersion: "1",
+        originalName: seeded.profile.name,
+        hasUserData: true,
+      },
+    };
+    const profileStorePath = join(seeded.appDataRoot, "profile-store", "profiles.json");
+    writeJson(profileStorePath, { storeVersion: 3, profiles: [seeded.profile, imported] });
+    const importedUserDataRoot = join(seeded.appDataRoot, imported.storage.userDataDir);
+    const context = createM005S04PublicScanContext({ appDataRoot: seeded.appDataRoot, userDataRoot: importedUserDataRoot, cookieDomains: ["m005-s04-cookie.invalid"], cookieNames: ["m005_s04_session", "m005_s04_theme"], cookieValues: ["m005-s04-cookie-value", "m005-s04-second-cookie-value"] });
+    const cookies = createM005S04CookieDbFixture({ appDataRoot: seeded.appDataRoot, userDataRoot: importedUserDataRoot }, context);
+    writeText(join(importedUserDataRoot, "Default", "Preferences"), "restored preferences\n");
+    writeText(join(importedUserDataRoot, "Default", "Local Storage", "leveldb", "000003.log"), "restored local storage\n");
+    const restored = assertM005S04CopiedProfileRestored({ profileStorePath, appDataRoot: seeded.appDataRoot, sourceProfile: seeded.profile, expectedCookieRows: cookies.value.cookies, expectedPayloadRelativePaths: ["Default/Preferences", "Default/Local Storage/leveldb/000003.log"] }, context);
+    expect(restored.value.profile.id).toBe(imported.id);
+    expect(restored.log).toMatchObject({ copiedProfile: "restored", sourcePreserved: true, copiedIdDistinct: true, nameConflictResolved: true, runtimeStatus: "stopped", expectedCookiesPresent: true, payloadFilesRestored: 2 });
+    expect(findM005S04ForbiddenPublicMarker(restored.log, context)).toBeNull();
+
+    writeJson(profileStorePath, { storeVersion: 3, profiles: [seeded.profile, { ...imported, name: "Wrong Imported Name" }] });
+    expect(() => assertM005S04CopiedProfileRestored({ profileStorePath, appDataRoot: seeded.appDataRoot, sourceProfile: seeded.profile, expectedCookieRows: cookies.value.cookies }, context)).toThrow(VerifyFailure);
   });
 
   it("parses bounded diagnostics JSONL into safe aggregate counts and rejects forbidden raw fields", () => {
