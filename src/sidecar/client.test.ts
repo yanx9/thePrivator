@@ -6,6 +6,7 @@ import {
   copyAutomationApiToken,
   createProfile,
   deleteProfile,
+  exportProfileCookies,
   getAutomationApiStatus,
   getChromiumStatus,
   getIdentityAuditPlan,
@@ -16,6 +17,7 @@ import {
   listProfiles,
   lookupDiagnosticDetail,
   openIdentityAuditPage,
+  replaceProfileCookies,
   scanLegacyProfiles,
   startAutomationApi,
   stopAutomationApi,
@@ -27,7 +29,7 @@ import {
   validateIdentity,
   validateProxy,
 } from "./client";
-import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR, type ProfileIdentity, type ProfileProxyDraft } from "./types";
+import { SIDECAR_BRIDGE_ERROR, SIDECAR_PROTOCOL_ERROR, type CookieExportFormat, type ProfileIdentity, type ProfileProxyDraft } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -36,6 +38,61 @@ vi.mock("@tauri-apps/api/core", () => ({
 const mockInvoke = vi.mocked(invoke);
 
 const PROXY_CHECK_PROFILE_ID = "11111111-1111-1111-1111-111111111111";
+const COOKIE_PROFILE_ID = "22222222-2222-2222-2222-222222222222";
+
+function cookieWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "NETSCAPE_METADATA_OMITTED",
+    message: "Some cookie metadata is not represented by Netscape cookies.txt and was omitted from that export.",
+    count: 2,
+    ...overrides,
+  };
+}
+
+function cookieExportResult(overrides: Record<string, unknown> = {}) {
+  return {
+    portabilityVersion: 1,
+    profileId: COOKIE_PROFILE_ID,
+    operation: "export",
+    format: "netscape",
+    exportedCount: 3,
+    skippedCount: 1,
+    warningCount: 1,
+    warnings: [cookieWarning()],
+    ...overrides,
+  };
+}
+
+function cookieReplaceResult(overrides: Record<string, unknown> = {}) {
+  return {
+    portabilityVersion: 1,
+    profileId: COOKIE_PROFILE_ID,
+    operation: "replace",
+    format: "theprivator-json",
+    importedCount: 4,
+    replacedCount: 2,
+    skippedCount: 1,
+    warningCount: 1,
+    warnings: [cookieWarning({ code: "IMPORT_DUPLICATE_REPLACED", message: "Duplicate imported cookies were resolved deterministically by domain, path, and name.", count: 1 })],
+    ...overrides,
+  };
+}
+
+function cookieEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-cookie-1",
+    protocolVersion: "1.0.0",
+    durationMs: 9.5,
+    result,
+    ...overrides,
+  };
+}
+
+function tooManyCookieWarnings() {
+  return Array.from({ length: 21 }, (_item, index) =>
+    cookieWarning({ code: `COOKIE_ROW_UNSUPPORTED_${index}`, message: `Safe warning ${index}.`, count: 1 }),
+  );
+}
 
 function healthEnvelope(overrides: Record<string, unknown> = {}) {
   return {
@@ -1197,6 +1254,204 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
       detailRef: "bridge-proxy-check-protocol",
+    });
+  });
+
+  it("exports and replaces profile cookies through fixed commands with safe DTO snapshots", async () => {
+    const exportDestination = "/selected/private/export.cookies";
+    const replaceSource = "/selected/private/import.cookies.json";
+    mockInvoke
+      .mockResolvedValueOnce(cookieEnvelope(cookieExportResult()))
+      .mockResolvedValueOnce(cookieEnvelope(cookieReplaceResult({ warningCount: 0, warnings: [], skippedCount: 0 })));
+
+    const exported = await exportProfileCookies(COOKIE_PROFILE_ID, exportDestination, "netscape");
+    const replaced = await replaceProfileCookies(COOKIE_PROFILE_ID, replaceSource);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "profile_cookies_export", {
+      profileId: COOKIE_PROFILE_ID,
+      destinationPath: exportDestination,
+      format: "netscape",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "profile_cookies_replace", {
+      profileId: COOKIE_PROFILE_ID,
+      sourcePath: replaceSource,
+    });
+    for (const [command, params] of mockInvoke.mock.calls) {
+      expect(command).toMatch(/^profile_cookies_(export|replace)$/);
+      expect(JSON.stringify(params)).not.toMatch(/storeRoot|method|portability\.cookies/i);
+    }
+    expect(exported).toMatchObject({
+      portabilityVersion: 1,
+      profileId: COOKIE_PROFILE_ID,
+      operation: "export",
+      format: "netscape",
+      exportedCount: 3,
+      skippedCount: 1,
+      warningCount: 1,
+      requestId: "bridge-cookie-1",
+      protocolVersion: "1.0.0",
+      bridgeDurationMs: 9.5,
+      warnings: [cookieWarning()],
+    });
+    expect(replaced).toMatchObject({
+      portabilityVersion: 1,
+      profileId: COOKIE_PROFILE_ID,
+      operation: "replace",
+      format: "theprivator-json",
+      importedCount: 4,
+      replacedCount: 2,
+      skippedCount: 0,
+      warningCount: 0,
+      warnings: [],
+    });
+    expect(JSON.stringify(exported)).not.toMatch(/\/selected\/private|storeRoot|sourcePath|destinationPath|cookieDomain|host_key|"domain"|"name"|"value"/i);
+    expect(JSON.stringify(replaced)).not.toMatch(/\/selected\/private|storeRoot|sourcePath|destinationPath|cookieDomain|host_key|"domain"|"name"|"value"/i);
+  });
+
+  it.each([
+    ["zero-cookie export", () => cookieEnvelope(cookieExportResult({ exportedCount: 0, skippedCount: 0, warningCount: 0, warnings: [] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/empty.cookies", "netscape")],
+    ["zero-cookie replace", () => cookieEnvelope(cookieReplaceResult({ importedCount: 0, replacedCount: 0, skippedCount: 0, warningCount: 0, warnings: [] })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/empty.cookies.json")],
+    ["bounded warning count", () => cookieEnvelope(cookieReplaceResult({ warningCount: 1, warnings: [cookieWarning({ code: "IMPORT_DUPLICATE_REPLACED", count: 4 })], skippedCount: 4 })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/duplicates.cookies.json")],
+  ] as Array<[string, () => unknown, () => Promise<unknown>]>)("accepts cookie portability boundary conditions: %s", async (_caseName, envelopeFactory, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelopeFactory());
+
+    await expect(callClient()).resolves.toMatchObject({
+      portabilityVersion: 1,
+      profileId: COOKIE_PROFILE_ID,
+    });
+  });
+
+  it.each([
+    ["blank export profile id", () => exportProfileCookies(" ", "/tmp/export.cookies", "netscape")],
+    ["path-like export profile id", () => exportProfileCookies("profile/../secret", "/tmp/export.cookies", "netscape")],
+    ["blank export destination", () => exportProfileCookies(COOKIE_PROFILE_ID, " ", "netscape")],
+    ["unsupported export format", () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "json" as CookieExportFormat)],
+    ["blank replace profile id", () => replaceProfileCookies("", "/tmp/import.cookies")],
+    ["blank replace source", () => replaceProfileCookies(COOKIE_PROFILE_ID, "")],
+  ])("rejects malformed cookie wrapper inputs before invoking Tauri: %s", async (_caseName, callClient) => {
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong portability version", () => cookieEnvelope(cookieExportResult({ portabilityVersion: 2 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["missing exported count", () => cookieEnvelope(cookieExportResult({ exportedCount: undefined })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["negative skipped count", () => cookieEnvelope(cookieExportResult({ skippedCount: -1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["non-integer warning count", () => cookieEnvelope(cookieExportResult({ warningCount: 1.5 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["unsafe integer count", () => cookieEnvelope(cookieExportResult({ exportedCount: Number.MAX_SAFE_INTEGER + 1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["mismatched profile id", () => cookieEnvelope(cookieExportResult({ profileId: PROXY_CHECK_PROFILE_ID })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["wrong export operation", () => cookieEnvelope(cookieExportResult({ operation: "replace" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["wrong export format", () => cookieEnvelope(cookieExportResult({ format: "theprivator-json" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["warning count mismatch", () => cookieEnvelope(cookieExportResult({ warningCount: 0 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["too many warnings", () => cookieEnvelope(cookieExportResult({ warningCount: 21, warnings: tooManyCookieWarnings() })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["duplicate warning codes", () => cookieEnvelope(cookieExportResult({ warningCount: 2, warnings: [cookieWarning(), cookieWarning()] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["zero warning item count", () => cookieEnvelope(cookieExportResult({ warnings: [cookieWarning({ count: 0 })] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["wrong replace operation", () => cookieEnvelope(cookieReplaceResult({ operation: "export" })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
+    ["unsupported replace format", () => cookieEnvelope(cookieReplaceResult({ format: "json" })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
+    ["replaced count exceeds imported count", () => cookieEnvelope(cookieReplaceResult({ importedCount: 1, replacedCount: 2 })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
+  ] as Array<[string, () => unknown, () => Promise<unknown>]>)("maps malformed cookie portability payloads to protocol errors: %s", async (_caseName, envelopeFactory, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelopeFactory());
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["selected destination path", { destinationPath: "/selected/private/export.cookies" }],
+    ["selected source path", { sourcePath: "/selected/private/import.cookies" }],
+    ["store root", { storeRoot: "/app/data/root" }],
+    ["cookie value", { value: "session-cookie-secret" }],
+    ["cookie domain", { domain: "private.example.invalid" }],
+    ["cookie name", { name: "sid" }],
+    ["cookie DB path", { cookieDbPath: "/app/data/profile/Cookies" }],
+    ["raw cookie list", { cookies: [{ domain: "private.example.invalid", name: "sid", value: "secret" }] }],
+  ])("rejects unsafe cookie portability result field before UI state sees it: %s", async (_caseName, extraFields) => {
+    mockInvoke.mockResolvedValueOnce(cookieEnvelope(cookieExportResult(extraFields)));
+
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it.each([
+    ["unsafe warning field", [cookieWarning({ domain: "private.example.invalid" })]],
+    ["absolute path in warning text", [cookieWarning({ message: "Cookie import skipped /Users/alice/private/Cookies." })]],
+    ["raw diagnostics in warning text", [cookieWarning({ message: "See raw diagnostics stderr for details." })]],
+  ])("rejects unsafe cookie portability warnings: %s", async (_caseName, warnings) => {
+    mockInvoke.mockResolvedValueOnce(cookieEnvelope(cookieExportResult({ warnings, warningCount: warnings.length })));
+
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it("preserves typed cookie portability sidecar, bridge, and protocol errors", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "PORTABILITY_PROFILE_BUSY",
+        message: "Stop this profile before importing or exporting cookies.",
+        recoverable: true,
+        detailRef: "sidecar-cookie-busy-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "PORTABILITY_COOKIE_FILE_INVALID",
+        message: "Cookie import file is malformed or unsupported.",
+        recoverable: true,
+        detailRef: "sidecar-cookie-invalid-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "SIDECAR_TIMEOUT",
+        message: "The Python sidecar did not respond before the bridge timeout.",
+        recoverable: true,
+        detailRef: "bridge-cookie-timeout-detail",
+      })
+      .mockRejectedValueOnce({
+        code: SIDECAR_PROTOCOL_ERROR,
+        message: "The Python sidecar returned malformed JSON.",
+        recoverable: true,
+        detailRef: "bridge-cookie-protocol-detail",
+      });
+
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+      code: "PORTABILITY_PROFILE_BUSY",
+      message: "Stop this profile before importing or exporting cookies.",
+      recoverable: true,
+      detailRef: "sidecar-cookie-busy-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")).rejects.toMatchObject({
+      code: "PORTABILITY_COOKIE_FILE_INVALID",
+      detailRef: "sidecar-cookie-invalid-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")).rejects.toMatchObject({
+      code: "SIDECAR_TIMEOUT",
+      detailRef: "bridge-cookie-timeout-detail",
+      source: "bridge",
+      phase: "bridge-error",
+    });
+    await expect(replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      detailRef: "bridge-cookie-protocol-detail",
+      source: "protocol",
+      phase: "bridge-error",
     });
   });
 

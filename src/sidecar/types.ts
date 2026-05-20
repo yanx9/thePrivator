@@ -193,6 +193,54 @@ export interface ProxyValidationSnapshot extends ProxyValidationResult {
   receivedAt: string;
 }
 
+export type CookieExportFormat = "netscape" | "theprivator-json";
+export type CookiePortabilityOperation = "export" | "replace";
+
+export interface CookiePortabilityWarning {
+  code: string;
+  message: string;
+  count: number;
+}
+
+export interface CookieExportResult {
+  portabilityVersion: 1;
+  profileId: string;
+  operation: Extract<CookiePortabilityOperation, "export">;
+  format: CookieExportFormat;
+  exportedCount: number;
+  skippedCount: number;
+  warningCount: number;
+  warnings: CookiePortabilityWarning[];
+}
+
+export interface CookieExportSnapshot extends CookieExportResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface CookieReplaceResult {
+  portabilityVersion: 1;
+  profileId: string;
+  operation: Extract<CookiePortabilityOperation, "replace">;
+  format: CookieExportFormat;
+  importedCount: number;
+  replacedCount: number;
+  skippedCount: number;
+  warningCount: number;
+  warnings: CookiePortabilityWarning[];
+}
+
+export interface CookieReplaceSnapshot extends CookieReplaceResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export type ProxyCheckRouteProofStatus = "not-run" | "proved";
 export type ProxyCheckRouteProofBasis = "direct-profile" | "sidecar-managed-local-fixture";
 export type ProxyCheckProofScope = "not-applicable" | "local-fixture";

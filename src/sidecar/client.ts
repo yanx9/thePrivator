@@ -16,6 +16,12 @@ import type {
   ChromiumStoppedProfileState,
   ChromiumStopSnapshot,
   ChromiumTermination,
+  CookieExportFormat,
+  CookieExportResult,
+  CookieExportSnapshot,
+  CookiePortabilityWarning,
+  CookieReplaceResult,
+  CookieReplaceSnapshot,
   DiagnosticEntry,
   DiagnosticEvent,
   DiagnosticLegacyContext,
@@ -366,6 +372,74 @@ const FORBIDDEN_AUTOMATION_API_TEXT_MARKERS = [
   "wss://",
 ];
 
+const MAX_COOKIE_PORTABILITY_WARNINGS = 20;
+
+const FORBIDDEN_COOKIE_PORTABILITY_FIELD_TOKENS = new Set([
+  "appdata",
+  "appdatadir",
+  "appdataroot",
+  "args",
+  "argv",
+  "command",
+  "content",
+  "cookie",
+  "cookies",
+  "cookiedb",
+  "cookiedbpath",
+  "cookiedomain",
+  "cookiename",
+  "cookievalue",
+  "databasepath",
+  "dbpath",
+  "destinationpath",
+  "devtoolsactiveport",
+  "domain",
+  "encryptedvalue",
+  "hostkey",
+  "launchargs",
+  "name",
+  "path",
+  "profiledir",
+  "raw",
+  "rawcontent",
+  "rawdiagnostics",
+  "sourcepath",
+  "stderr",
+  "stdout",
+  "store",
+  "storeroot",
+  "userdata",
+  "userdatadir",
+  "value",
+  "websocketdebuggerurl",
+]);
+
+const FORBIDDEN_COOKIE_PORTABILITY_TEXT_MARKERS = [
+  "--remote-debugging-port",
+  "--user-data-dir",
+  "cookie value",
+  "cookie domain",
+  "destination path",
+  "devtoolsactiveport",
+  "encrypted_value",
+  "host_key",
+  "profile-store/",
+  "raw diagnostics",
+  "rawdiagnostics",
+  "selected path",
+  "source path",
+  "stderr",
+  "stdout",
+  "store_root",
+  "storeroot",
+  "userdata",
+  "userdatadir",
+  "user-data-dir",
+  "value=",
+  "ws://",
+  "wss://",
+];
+
 let detailCounter = 0;
 
 export async function getSidecarHealth(): Promise<SidecarHealthSnapshot> {
@@ -506,6 +580,49 @@ export async function checkProfileProxy(profileId: string): Promise<ProxyCheckSn
     const safeProfileId = requireProfileClientId(profileId, "profileId");
     const envelope = await invoke<unknown>("profiles_proxy_check", { profileId: safeProfileId });
     return parseProxyCheckEnvelope(envelope, new Date().toISOString(), safeProfileId);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function exportProfileCookies(
+  profileId: string,
+  destinationPath: string,
+  format: CookieExportFormat,
+): Promise<CookieExportSnapshot> {
+  try {
+    const safeProfileId = requireProfileClientId(profileId, "profileId");
+    const safeDestinationPath = requireDialogPathString(destinationPath, "destinationPath");
+    const safeFormat = requireCookieExportFormat(format, "format");
+    const envelope = await invoke<unknown>("profile_cookies_export", {
+      profileId: safeProfileId,
+      destinationPath: safeDestinationPath,
+      format: safeFormat,
+    });
+    return parseCookieExportEnvelope(envelope, new Date().toISOString(), safeProfileId, safeFormat);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function replaceProfileCookies(
+  profileId: string,
+  sourcePath: string,
+): Promise<CookieReplaceSnapshot> {
+  try {
+    const safeProfileId = requireProfileClientId(profileId, "profileId");
+    const safeSourcePath = requireDialogPathString(sourcePath, "sourcePath");
+    const envelope = await invoke<unknown>("profile_cookies_replace", {
+      profileId: safeProfileId,
+      sourcePath: safeSourcePath,
+    });
+    return parseCookieReplaceEnvelope(envelope, new Date().toISOString(), safeProfileId);
   } catch (error) {
     if (isSidecarClientError(error)) {
       throw error;
@@ -968,6 +1085,39 @@ function parseProxyCheckEnvelope(value: unknown, receivedAt: string, requestedPr
   };
 }
 
+function parseCookieExportEnvelope(
+  value: unknown,
+  receivedAt: string,
+  requestedProfileId: string,
+  requestedFormat: CookieExportFormat,
+): CookieExportSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseCookieExportResult(envelope.result, requestedProfileId, requestedFormat);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseCookieReplaceEnvelope(value: unknown, receivedAt: string, requestedProfileId: string): CookieReplaceSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseCookieReplaceResult(envelope.result, requestedProfileId);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseIdentityAuditPlanEnvelope(value: unknown, receivedAt: string): IdentityAuditPlanSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityAuditPlanResult(envelope.result);
@@ -1363,6 +1513,131 @@ function parseProxyCheckResult(value: unknown, requestedProfileId: string): Prox
     ipHiding: parseProxyCheckIpHiding(record.ipHiding),
     webRtc: parseProxyCheckWebRtc(record.webRtc),
     publicCheckers: parseProxyCheckPublicCheckers(record.publicCheckers),
+  };
+}
+
+function parseCookieExportResult(
+  value: unknown,
+  requestedProfileId: string,
+  requestedFormat: CookieExportFormat,
+): CookieExportResult {
+  const record = requireRecord(value, "The sidecar cookie export result must be an object.");
+  assertNoForbiddenCookiePortabilityFields(record, "cookieExport");
+  requireExactCookiePortabilityKeys(
+    record,
+    ["portabilityVersion", "profileId", "operation", "format", "exportedCount", "skippedCount", "warningCount", "warnings"],
+    "cookieExport",
+  );
+  requireLiteralNumber(record.portabilityVersion, "portabilityVersion", 1);
+  const profileId = requireProfileClientId(record.profileId, "profileId");
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar cookie export result did not match the requested profileId.");
+  }
+  const operation = requireCookiePortabilityOperation(record.operation, "operation", "export");
+  const format = requireCookieExportFormat(record.format, "format");
+  if (format !== requestedFormat) {
+    throw makeProtocolError("The sidecar cookie export result did not match the requested format.");
+  }
+  const exportedCount = requireNonNegativeSafeInteger(record.exportedCount, "exportedCount");
+  const skippedCount = requireNonNegativeSafeInteger(record.skippedCount, "skippedCount");
+  const warningCount = requireNonNegativeSafeInteger(record.warningCount, "warningCount");
+  const warnings = parseCookiePortabilityWarnings(record.warnings, warningCount, "warnings");
+
+  return {
+    portabilityVersion: 1,
+    profileId,
+    operation,
+    format,
+    exportedCount,
+    skippedCount,
+    warningCount,
+    warnings,
+  };
+}
+
+function parseCookieReplaceResult(value: unknown, requestedProfileId: string): CookieReplaceResult {
+  const record = requireRecord(value, "The sidecar cookie replace result must be an object.");
+  assertNoForbiddenCookiePortabilityFields(record, "cookieReplace");
+  requireExactCookiePortabilityKeys(
+    record,
+    [
+      "portabilityVersion",
+      "profileId",
+      "operation",
+      "format",
+      "importedCount",
+      "replacedCount",
+      "skippedCount",
+      "warningCount",
+      "warnings",
+    ],
+    "cookieReplace",
+  );
+  requireLiteralNumber(record.portabilityVersion, "portabilityVersion", 1);
+  const profileId = requireProfileClientId(record.profileId, "profileId");
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar cookie replace result did not match the requested profileId.");
+  }
+  const operation = requireCookiePortabilityOperation(record.operation, "operation", "replace");
+  const format = requireCookieExportFormat(record.format, "format");
+  const importedCount = requireNonNegativeSafeInteger(record.importedCount, "importedCount");
+  const replacedCount = requireNonNegativeSafeInteger(record.replacedCount, "replacedCount");
+  const skippedCount = requireNonNegativeSafeInteger(record.skippedCount, "skippedCount");
+  const warningCount = requireNonNegativeSafeInteger(record.warningCount, "warningCount");
+  const warnings = parseCookiePortabilityWarnings(record.warnings, warningCount, "warnings");
+
+  if (replacedCount > importedCount) {
+    throw makeProtocolError("The sidecar cookie replace result cannot replace more cookies than it imported.");
+  }
+
+  return {
+    portabilityVersion: 1,
+    profileId,
+    operation,
+    format,
+    importedCount,
+    replacedCount,
+    skippedCount,
+    warningCount,
+    warnings,
+  };
+}
+
+function parseCookiePortabilityWarnings(
+  value: unknown,
+  expectedWarningCount: number,
+  field: string,
+): CookiePortabilityWarning[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be an array.`);
+  }
+  if (value.length > MAX_COOKIE_PORTABILITY_WARNINGS) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} exceeded the bounded warning count.`);
+  }
+  if (value.length !== expectedWarningCount) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} length must match warningCount.`);
+  }
+  const seenCodes = new Set<string>();
+  return value.map((item, index) => parseCookiePortabilityWarning(item, `${field}[${index}]`, seenCodes));
+}
+
+function parseCookiePortabilityWarning(
+  value: unknown,
+  field: string,
+  seenCodes: Set<string>,
+): CookiePortabilityWarning {
+  const record = requireRecord(value, `The sidecar cookie portability field ${field} must be an object.`);
+  assertNoForbiddenCookiePortabilityFields(record, field);
+  requireExactCookiePortabilityKeys(record, ["code", "message", "count"], field);
+  const code = requireDiagnosticErrorCode(record.code, `${field}.code`);
+  if (seenCodes.has(code)) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field}.code must be unique.`);
+  }
+  seenCodes.add(code);
+  return {
+    code,
+    message: requireCookiePortabilitySafeText(record.message, `${field}.message`, { maxLength: 256 }),
+    count: requirePositiveSafeInteger(record.count, `${field}.count`),
   };
 }
 
@@ -2668,6 +2943,103 @@ function requireProfileClientId(value: unknown, field: string): string {
     throw makeProtocolError(`The sidecar profile field ${field} must be an opaque safe id.`);
   }
   return id;
+}
+
+function requireDialogPathString(value: unknown, field: string): string {
+  const path = requireString(value, field);
+  if (!path.trim() || path.length > 4096 || containsControlCharacters(path) || path.includes("\0")) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be a bounded non-empty dialog path string.`);
+  }
+  return path;
+}
+
+function requireCookieExportFormat(value: unknown, field: string): CookieExportFormat {
+  if (value === "netscape" || value === "theprivator-json") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar cookie portability field ${field} must be a supported cookie export format.`);
+}
+
+function requireCookiePortabilityOperation<T extends "export" | "replace">(
+  value: unknown,
+  field: string,
+  expected: T,
+): T {
+  if (value !== expected) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be ${expected}.`);
+  }
+  return expected;
+}
+
+function requireExactCookiePortabilityKeys(record: Record<string, unknown>, keys: string[], field: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      throw makeProtocolError(`The sidecar cookie portability field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of keys) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar cookie portability field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function assertNoForbiddenCookiePortabilityFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenCookiePortabilityFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    if (typeof value === "string" && containsUnsafeCookiePortabilityText(value)) {
+      throw makeProtocolError(`The sidecar cookie portability field ${field} must not expose cookie material, selected paths, runtime roots, diagnostics, or debug endpoints.`);
+    }
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_COOKIE_PORTABILITY_FIELD_TOKENS.has(fieldToken(key))) {
+      throw makeProtocolError(`The sidecar cookie portability field ${field}.${key} must not expose cookie material, selected paths, runtime roots, diagnostics, or debug endpoints.`);
+    }
+    assertNoForbiddenCookiePortabilityFields(item, `${field}.${key}`);
+  }
+}
+
+function requireCookiePortabilitySafeText(value: unknown, field: string, options: { maxLength: number }): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > options.maxLength || containsControlCharacters(text) || containsUnsafeCookiePortabilityText(text)) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be safe UI copy.`);
+  }
+  return text;
+}
+
+function containsUnsafeCookiePortabilityText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (FORBIDDEN_COOKIE_PORTABILITY_TEXT_MARKERS.some((marker) => lowered.includes(marker.toLowerCase()))) {
+    return true;
+  }
+  if (/\b(?:file|ws|wss):\/\//i.test(value)) {
+    return true;
+  }
+  if (/(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /(?:^|\s)[A-Za-z]:[\\/][^\s]+/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function requireNonNegativeSafeInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be a non-negative safe integer.`);
+  }
+  return number;
+}
+
+function requirePositiveSafeInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw makeProtocolError(`The sidecar cookie portability field ${field} must be a positive safe integer.`);
+  }
+  return number;
 }
 
 function requireProxyCheckRouteProofStatus(value: unknown, field: string): ProxyCheckRouteProof["status"] {
