@@ -813,6 +813,9 @@ function commandCalls(command: string) {
   return mockInvoke.mock.calls.filter(([calledCommand]) => calledCommand === command);
 }
 
+const UNSAFE_PACKAGE_UI_CONTEXT = "manifest.json payload/Default/Cookies theprivator-cookies.json /tmp/theprivator-selected/research.tpkg profile-store/profiles/abc/user-data cookie domain private.example.invalid cookie name sessionid cookie value cookie-value-should-not-render proxy-user-should-not-leak proxy-pass-should-not-leak tpapi-secret-token DevToolsActivePort ws://127.0.0.1:9222/devtools/browser/abc --remote-debugging-port=9222 --user-data-dir=/private/profile raw diagnostics stdout stderr traceback stack trace";
+const UNSAFE_PACKAGE_UI_PATTERN = /manifest\.json|payload\/Default\/Cookies|theprivator-cookies\.json|theprivator-selected|profile-store\/profiles|private\.example\.invalid|sessionid|cookie-value-should-not-render|proxy-user-should-not-leak|proxy-pass-should-not-leak|tpapi-secret-token|DevToolsActivePort|ws:\/\/127\.0\.0\.1|--remote-debugging-port|--user-data-dir|raw diagnostics|stdout|stderr|traceback|stack trace/i;
+
 describe("ThePrivator profile library UI", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -3547,11 +3550,11 @@ describe("ThePrivator profile library UI", () => {
     mockSave.mockResolvedValueOnce("/tmp/theprivator-selected/research.tpkg");
     mockInvoke
       .mockRejectedValueOnce({
-        ...profileError("PACKAGE_CHECKSUM_INVALID", "Package checksum validation failed.", detailRef),
-        unsafeContext: "manifest.json payload/Default/Cookies example.com sessionid cookie-value-should-not-render /tmp/theprivator-selected/research.tpkg proxy-user-should-not-leak proxy-pass-should-not-leak DevToolsActivePort traceback stack trace",
+        ...profileError("PORTABILITY_PACKAGE_CHECKSUM_MISMATCH", "Profile package checksum verification failed.", detailRef),
+        unsafeContext: UNSAFE_PACKAGE_UI_CONTEXT,
       })
       .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
-        entries: [diagnosticEntry(detailRef, { errorCode: "PACKAGE_CHECKSUM_INVALID", method: "portability.profile_package.export" })],
+        entries: [diagnosticEntry(detailRef, { errorCode: "PORTABILITY_PACKAGE_CHECKSUM_MISMATCH", method: "portability.profile_package.export" })],
       }));
 
     render(<App />);
@@ -3560,20 +3563,62 @@ describe("ThePrivator profile library UI", () => {
     const panel = within(card).getByRole("region", { name: /profile package portability/i });
     fireEvent.click(within(panel).getByRole("button", { name: /export theprivator package/i }));
 
-    await waitFor(() => expect(panel).toHaveTextContent(/PACKAGE_CHECKSUM_INVALID/i));
-    expect(panel).toHaveTextContent(/Package checksum validation failed/i);
+    await waitFor(() => expect(panel).toHaveTextContent(/PORTABILITY_PACKAGE_CHECKSUM_MISMATCH/i));
+    expect(panel).toHaveTextContent(/Profile package checksum verification failed/i);
     expect(panel).toHaveTextContent(/Sourcesidecar/i);
     expect(panel).toHaveTextContent(/Recoverableyes/i);
     expect(panel).toHaveTextContent(detailRef);
-    expect(panel).not.toHaveTextContent(/manifest\.json|payload\/Default\/Cookies|example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|traceback|stack trace/i);
+    expect(panel).not.toHaveTextContent(UNSAFE_PACKAGE_UI_PATTERN);
 
     fireEvent.click(within(panel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
 
     const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
-    expect(lookupPanel).toHaveTextContent(/PACKAGE_CHECKSUM_INVALID/i);
+    expect(lookupPanel).toHaveTextContent(/PORTABILITY_PACKAGE_CHECKSUM_MISMATCH/i);
     expect(lookupPanel).toHaveTextContent(/portability\.profile_package\.export/i);
     expect(lookupPanel).toHaveTextContent(detailRef);
-    expect(lookupPanel).not.toHaveTextContent(/manifest\.json|payload\/Default\/Cookies|example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|proxy-user-should-not-leak|proxy-pass-should-not-leak|DevToolsActivePort|traceback|stack trace/i);
+    expect(lookupPanel).not.toHaveTextContent(UNSAFE_PACKAGE_UI_PATTERN);
+  });
+
+  it("renders global package import failures with redacted detailRef UI and no profile refresh", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const detailRef = "sidecar-package-import-detail";
+    const sourcePath = "/tmp/theprivator-selected/research.tpkg";
+    mockStartup([profile]);
+    mockOpen.mockResolvedValueOnce(sourcePath);
+    mockInvoke
+      .mockRejectedValueOnce({
+        ...profileError("PORTABILITY_PACKAGE_IMPORT_FAILED", "Profile package import failed.", detailRef),
+        unsafeContext: UNSAFE_PACKAGE_UI_CONTEXT,
+        rawDiagnostics: UNSAFE_PACKAGE_UI_CONTEXT,
+        stack: UNSAFE_PACKAGE_UI_CONTEXT,
+      })
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: "PORTABILITY_PACKAGE_IMPORT_FAILED", method: "portability.profile_package.import" })],
+      }));
+
+    render(<App />);
+
+    await screen.findByRole("listitem", { name: /research/i });
+    const importPanel = screen.getByRole("region", { name: /theprivator package import/i });
+    fireEvent.click(within(importPanel).getByRole("button", { name: /import theprivator package/i }));
+
+    await waitFor(() => expect(importPanel).toHaveTextContent(/PORTABILITY_PACKAGE_IMPORT_FAILED/i));
+    expect(importPanel).toHaveTextContent(/Profile package import failed/i);
+    expect(importPanel).toHaveTextContent(/Sourcesidecar/i);
+    expect(importPanel).toHaveTextContent(/Recoverableyes/i);
+    expect(importPanel).toHaveTextContent(detailRef);
+    expect(importPanel).not.toHaveTextContent(UNSAFE_PACKAGE_UI_PATTERN);
+    expect(commandCalls("profile_package_import")).toHaveLength(1);
+    expect(commandCalls("profiles_list")).toHaveLength(1);
+    expect(screen.queryByRole("listitem", { name: /research copy/i })).not.toBeInTheDocument();
+
+    fireEvent.click(within(importPanel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/PORTABILITY_PACKAGE_IMPORT_FAILED/i);
+    expect(lookupPanel).toHaveTextContent(/portability\.profile_package\.import/i);
+    expect(lookupPanel).toHaveTextContent(detailRef);
+    expect(lookupPanel).not.toHaveTextContent(UNSAFE_PACKAGE_UI_PATTERN);
   });
 
   it("surfaces package import refresh failures after success without dropping the safe import summary", async () => {

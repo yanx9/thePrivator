@@ -175,6 +175,26 @@ function tooManyProfilePackageWarnings() {
   );
 }
 
+const UNSAFE_PROFILE_PACKAGE_CONTEXT = "manifest.json payload/Default/Cookies theprivator-cookies.json /tmp/theprivator-selected/research.tpkg profile-store/profiles/abc/user-data cookie domain private.example.invalid cookie name sessionid cookie value cookie-value-should-not-render proxy-user-should-not-leak proxy-pass-should-not-leak tpapi-secret-token DevToolsActivePort ws://127.0.0.1:9222/devtools/browser/abc --remote-debugging-port=9222 --user-data-dir=/private/profile raw diagnostics stdout stderr traceback stack trace";
+const UNSAFE_PROFILE_PACKAGE_PATTERN = /manifest\.json|payload\/Default\/Cookies|theprivator-cookies\.json|theprivator-selected|profile-store\/profiles|private\.example\.invalid|sessionid|cookie-value-should-not-render|proxy-user-should-not-leak|proxy-pass-should-not-leak|tpapi-secret-token|DevToolsActivePort|ws:\/\/127\.0\.0\.1|--remote-debugging-port|--user-data-dir|raw diagnostics|stdout|stderr|traceback|stack trace/i;
+
+function profilePackageCommandError(code: string, message: string, detailRef: string) {
+  return {
+    code,
+    message,
+    recoverable: true,
+    detailRef,
+    unsafeContext: {
+      selectedPath: "/tmp/theprivator-selected/research.tpkg",
+      archiveMembers: ["manifest.json", "payload/Default/Cookies"],
+      rawManifest: { rawDiagnostics: UNSAFE_PROFILE_PACKAGE_CONTEXT },
+      stack: UNSAFE_PROFILE_PACKAGE_CONTEXT,
+    },
+    rawDiagnostics: UNSAFE_PROFILE_PACKAGE_CONTEXT,
+    stack: UNSAFE_PROFILE_PACKAGE_CONTEXT,
+  };
+}
+
 function healthEnvelope(overrides: Record<string, unknown> = {}) {
   return {
     requestId: "bridge-42",
@@ -1665,13 +1685,24 @@ describe("sidecar client", () => {
     ["cookie domain", { cookieDomain: "private.example.invalid" }],
     ["cookie name", { cookieName: "sid" }],
     ["credentials", { credentials: { username: "proxy-user", password: "proxy-pass" } }],
+    ["Automation API token", { automationApiToken: "tpapi-secret-token" }],
     ["debug endpoint", { debugEndpoint: "ws://127.0.0.1:9222/devtools/browser/abc" }],
+    ["CDP endpoint", { cdpEndpoint: "cdp://127.0.0.1:9222/devtools/browser/abc" }],
     ["launch args", { launchArgs: ["--user-data-dir=/private/profile"] }],
-    ["raw diagnostics", { stdout: "raw stdout" }],
+    ["raw diagnostics", { stdout: "raw stdout", stderr: "raw stderr", rawDiagnostics: "unsafe raw diagnostics" }],
+    ["stack trace", { stackTrace: "Traceback (most recent call last): package import stack trace" }],
   ])("rejects unsafe profile package result field before UI state sees it: %s", async (_caseName, extraFields) => {
     mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageExportResult(extraFields)));
 
     await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+
+    mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageImportResult(extraFields)));
+
+    await expect(importProfilePackage("/tmp/import.tpkg")).rejects.toMatchObject({
       code: SIDECAR_PROTOCOL_ERROR,
       source: "protocol",
       phase: "bridge-error",
@@ -1683,12 +1714,25 @@ describe("sidecar client", () => {
     ["absolute path in warning text", [profilePackageWarning({ message: "Profile package skipped /Users/alice/private/Default/Preferences." })]],
     ["manifest member in warning text", [profilePackageWarning({ message: "Skipped manifest.json from payload." })]],
     ["cookie detail in warning text", [profilePackageWarning({ message: "Cookie value sid=secret was skipped." })]],
+    ["proxy credential in warning text", [profilePackageWarning({ message: "Proxy credentials proxy-user-should-not-leak proxy-pass-should-not-leak were rejected." })]],
+    ["Automation API token in warning text", [profilePackageWarning({ message: "Automation API token tpapi-secret-token was rejected." })]],
     ["debug endpoint in warning text", [profilePackageWarning({ message: "See ws://127.0.0.1:9222/devtools/browser/abc." })]],
+    ["CDP endpoint in warning text", [profilePackageWarning({ message: "CDP endpoint cdp://127.0.0.1:9222/devtools/browser/abc was rejected." })]],
+    ["launch args in warning text", [profilePackageWarning({ message: "Launch args --user-data-dir=/private/profile were rejected." })]],
     ["raw diagnostics in warning text", [profilePackageWarning({ message: "See raw diagnostics stderr for details." })]],
+    ["stack trace in warning text", [profilePackageWarning({ message: "Traceback and stack trace output was rejected." })]],
   ])("rejects unsafe profile package warnings: %s", async (_caseName, warnings) => {
     mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageExportResult({ warnings, warningCount: warnings.length })));
 
     await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+
+    mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageImportResult({ warnings, warningCount: warnings.length })));
+
+    await expect(importProfilePackage("/tmp/import.tpkg")).rejects.toMatchObject({
       code: SIDECAR_PROTOCOL_ERROR,
       source: "protocol",
       phase: "bridge-error",
@@ -1760,6 +1804,37 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
     });
+  });
+
+  it.each([
+    ["PORTABILITY_PACKAGE_INVALID", "Profile package is invalid.", "sidecar-package-invalid-detail"],
+    ["PORTABILITY_PACKAGE_CHECKSUM_MISMATCH", "Profile package checksum verification failed.", "sidecar-package-checksum-detail"],
+    ["PORTABILITY_PACKAGE_TOO_LARGE", "Profile package is too large.", "sidecar-package-too-large-detail"],
+    ["PORTABILITY_PACKAGE_READ_FAILED", "Profile package could not be read.", "sidecar-package-read-detail"],
+    ["PORTABILITY_PACKAGE_PAYLOAD_FAILED", "Profile package payload could not be restored.", "sidecar-package-payload-detail"],
+    ["PORTABILITY_PACKAGE_IMPORT_FAILED", "Profile package import failed.", "sidecar-package-import-detail"],
+  ])("preserves package import rejection code %s while stripping unsafe thrown context", async (code, message, detailRef) => {
+    mockInvoke.mockRejectedValueOnce(profilePackageCommandError(code, message, detailRef));
+
+    let thrown: unknown;
+    try {
+      await importProfilePackage("/tmp/import.tpkg");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({
+      code,
+      message,
+      recoverable: true,
+      detailRef,
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    expect(thrown).not.toHaveProperty("unsafeContext");
+    expect(thrown).not.toHaveProperty("rawDiagnostics");
+    expect(thrown).not.toHaveProperty("stack");
+    expect(JSON.stringify(thrown)).not.toMatch(UNSAFE_PROFILE_PACKAGE_PATTERN);
   });
 
   it.each([
