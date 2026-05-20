@@ -22,6 +22,11 @@ import type {
   CookiePortabilityWarning,
   CookieReplaceResult,
   CookieReplaceSnapshot,
+  ProfilePackageExportResult,
+  ProfilePackageExportSnapshot,
+  ProfilePackageImportResult,
+  ProfilePackageImportSnapshot,
+  ProfilePackageWarning,
   DiagnosticEntry,
   DiagnosticEvent,
   DiagnosticLegacyContext,
@@ -440,6 +445,129 @@ const FORBIDDEN_COOKIE_PORTABILITY_TEXT_MARKERS = [
   "wss://",
 ];
 
+const PROFILE_PACKAGE_FORMAT = "theprivator.profile-package";
+const PROFILE_PACKAGE_VERSION = 1;
+const MAX_PROFILE_PACKAGE_WARNINGS = 20;
+
+const PROFILE_PACKAGE_PAYLOAD_SKIP_WARNING_CODES = new Set([
+  "PACKAGE_EXPORT_DESTINATION_SKIPPED",
+  "PACKAGE_PAYLOAD_COOKIE_DB_SKIPPED",
+  "PACKAGE_PAYLOAD_RUNTIME_SKIPPED",
+  "PACKAGE_PAYLOAD_SPECIAL_SKIPPED",
+  "PACKAGE_PAYLOAD_UNREADABLE_SKIPPED",
+]);
+
+const FORBIDDEN_PROFILE_PACKAGE_FIELD_TOKENS = new Set([
+  "appdata",
+  "appdatadir",
+  "appdataroot",
+  "approot",
+  "args",
+  "argv",
+  "auth",
+  "authorization",
+  "authcredentials",
+  "bearer",
+  "cdp",
+  "cdpendpoint",
+  "command",
+  "content",
+  "cookie",
+  "cookiedb",
+  "cookiedbpath",
+  "cookiedomain",
+  "cookiename",
+  "cookievalue",
+  "credentials",
+  "debug",
+  "debugendpoint",
+  "debugport",
+  "destinationpath",
+  "devtools",
+  "devtoolsactiveport",
+  "diagnostics",
+  "domain",
+  "endpoint",
+  "env",
+  "environment",
+  "encryptedvalue",
+  "hostkey",
+  "launchargs",
+  "manifest",
+  "member",
+  "members",
+  "name",
+  "packagefiles",
+  "packagemember",
+  "packagemembers",
+  "password",
+  "path",
+  "profiledir",
+  "profilepath",
+  "raw",
+  "rawcontent",
+  "rawdiagnostics",
+  "rawmanifest",
+  "root",
+  "selectedpath",
+  "sourcepath",
+  "stderr",
+  "stdout",
+  "store",
+  "storeroot",
+  "token",
+  "userdata",
+  "userdatadir",
+  "username",
+  "value",
+  "websocket",
+  "websocketdebuggerurl",
+  "websocketurl",
+]);
+
+const FORBIDDEN_PROFILE_PACKAGE_TEXT_MARKERS = [
+  "--remote-debugging-port",
+  "--user-data-dir",
+  "authorization:",
+  "authorization=",
+  "authcredentials",
+  "bearer ",
+  "cdp://",
+  "cookie domain",
+  "cookie name",
+  "cookie value",
+  "debug endpoint",
+  "devtoolsactiveport",
+  "encrypted_value",
+  "host_key",
+  "launch args",
+  "launchargs",
+  "manifest.json",
+  "package member",
+  "profile dir",
+  "profile-store/",
+  "raw diagnostics",
+  "raw manifest",
+  "rawdiagnostics",
+  "selected path",
+  "source path",
+  "stack trace",
+  "stderr",
+  "stdout",
+  "store_root",
+  "storeroot",
+  "theprivator-cookies.json",
+  "token=",
+  "traceback",
+  "user data",
+  "userdata",
+  "userdatadir",
+  "user-data-dir",
+  "value=",
+  "ws://",
+  "wss://",
+];
+
 let detailCounter = 0;
 
 export async function getSidecarHealth(): Promise<SidecarHealthSnapshot> {
@@ -623,6 +751,41 @@ export async function replaceProfileCookies(
       sourcePath: safeSourcePath,
     });
     return parseCookieReplaceEnvelope(envelope, new Date().toISOString(), safeProfileId);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function exportProfilePackage(
+  profileId: string,
+  destinationPath: string,
+): Promise<ProfilePackageExportSnapshot> {
+  try {
+    const safeProfileId = requireProfileClientId(profileId, "profileId");
+    const safeDestinationPath = requireDialogPathString(destinationPath, "destinationPath");
+    const envelope = await invoke<unknown>("profile_package_export", {
+      profileId: safeProfileId,
+      destinationPath: safeDestinationPath,
+    });
+    return parseProfilePackageExportEnvelope(envelope, new Date().toISOString(), safeProfileId);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function importProfilePackage(sourcePath: string): Promise<ProfilePackageImportSnapshot> {
+  try {
+    const safeSourcePath = requireDialogPathString(sourcePath, "sourcePath");
+    const envelope = await invoke<unknown>("profile_package_import", {
+      sourcePath: safeSourcePath,
+    });
+    return parseProfilePackageImportEnvelope(envelope, new Date().toISOString());
   } catch (error) {
     if (isSidecarClientError(error)) {
       throw error;
@@ -1118,6 +1281,38 @@ function parseCookieReplaceEnvelope(value: unknown, receivedAt: string, requeste
   };
 }
 
+function parseProfilePackageExportEnvelope(
+  value: unknown,
+  receivedAt: string,
+  requestedProfileId: string,
+): ProfilePackageExportSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfilePackageExportResult(envelope.result, requestedProfileId);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseProfilePackageImportEnvelope(value: unknown, receivedAt: string): ProfilePackageImportSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfilePackageImportResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseIdentityAuditPlanEnvelope(value: unknown, receivedAt: string): IdentityAuditPlanSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityAuditPlanResult(envelope.result);
@@ -1601,6 +1796,190 @@ function parseCookieReplaceResult(value: unknown, requestedProfileId: string): C
     warningCount,
     warnings,
   };
+}
+
+function parseProfilePackageExportResult(value: unknown, requestedProfileId: string): ProfilePackageExportResult {
+  const record = requireRecord(value, "The sidecar profile package export result must be an object.");
+  assertNoForbiddenProfilePackageFields(record, "profilePackageExport");
+  requireExactProfilePackageKeys(
+    record,
+    [
+      "packageVersion",
+      "format",
+      "operation",
+      "profileId",
+      "profileName",
+      "cookieCount",
+      "skippedCookieCount",
+      "payloadFileCount",
+      "payloadByteCount",
+      "warningCount",
+      "warnings",
+    ],
+    "profilePackageExport",
+  );
+  const packageVersion = requireProfilePackageVersion(record.packageVersion, "packageVersion");
+  requireProfilePackageFormat(record.format, "format");
+  const operation = requireProfilePackageOperation(record.operation, "operation", "export");
+  const profileId = requireProfileClientId(record.profileId, "profileId");
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar profile package export result did not match the requested profileId.");
+  }
+  const profileName = requireProfilePackageSafeText(record.profileName, "profileName", { maxLength: 160 });
+  const portableSessionCount = requireNonNegativeProfilePackageInteger(record.cookieCount, "cookieCount");
+  requireNonNegativeProfilePackageInteger(record.skippedCookieCount, "skippedCookieCount");
+  const payloadFileCount = requireNonNegativeProfilePackageInteger(record.payloadFileCount, "payloadFileCount");
+  const payloadBytes = requireNonNegativeProfilePackageInteger(record.payloadByteCount, "payloadByteCount");
+  const warningCount = requireNonNegativeProfilePackageInteger(record.warningCount, "warningCount");
+  const warnings = parseProfilePackageWarnings(record.warnings, warningCount, "warnings");
+  const payloadSkippedCount = countProfilePackagePayloadSkips(warnings);
+
+  return {
+    portabilityVersion: 1,
+    packageVersion,
+    operation,
+    profileId,
+    profileName,
+    portableSessionCount,
+    payloadFileCount,
+    payloadBytes,
+    payloadSkippedCount,
+    warningCount,
+    warnings,
+  };
+}
+
+function parseProfilePackageImportResult(value: unknown): ProfilePackageImportResult {
+  const record = requireRecord(value, "The sidecar profile package import result must be an object.");
+  const publicRecord = withoutProfilePackageInternalFields(record);
+  assertNoForbiddenProfilePackageFields(publicRecord, "profilePackageImport");
+  requireExactProfilePackageKeys(
+    record,
+    [
+      "packageVersion",
+      "format",
+      "operation",
+      "profileId",
+      "profileName",
+      "nameConflictResolved",
+      "profile",
+      "cookieCount",
+      "importedCookieCount",
+      "replacedCookieCount",
+      "payloadFileCount",
+      "payloadByteCount",
+      "warningCount",
+      "warnings",
+    ],
+    "profilePackageImport",
+  );
+  const packageVersion = requireProfilePackageVersion(record.packageVersion, "packageVersion");
+  requireProfilePackageFormat(record.format, "format");
+  const operation = requireProfilePackageOperation(record.operation, "operation", "import");
+  const importedProfileId = requireProfileClientId(record.profileId, "profileId");
+  const importedProfileName = requireProfilePackageSafeText(record.profileName, "profileName", { maxLength: 160 });
+  parseProfilePackageInternalProfileReference(record.profile, importedProfileId, importedProfileName);
+  const nameConflictResolved = requireBoolean(record.nameConflictResolved, "nameConflictResolved");
+  const portableSessionCount = requireNonNegativeProfilePackageInteger(record.cookieCount, "cookieCount");
+  const importedCookieCount = requireNonNegativeProfilePackageInteger(record.importedCookieCount, "importedCookieCount");
+  const replacedCookieCount = requireNonNegativeProfilePackageInteger(record.replacedCookieCount, "replacedCookieCount");
+  const payloadFileCount = requireNonNegativeProfilePackageInteger(record.payloadFileCount, "payloadFileCount");
+  const payloadBytes = requireNonNegativeProfilePackageInteger(record.payloadByteCount, "payloadByteCount");
+  const warningCount = requireNonNegativeProfilePackageInteger(record.warningCount, "warningCount");
+  const warnings = parseProfilePackageWarnings(record.warnings, warningCount, "warnings");
+  const payloadSkippedCount = countProfilePackagePayloadSkips(warnings);
+
+  if (importedCookieCount > portableSessionCount) {
+    throw makeProtocolError("The sidecar profile package import result imported more portable sessions than the package reported.");
+  }
+  if (replacedCookieCount > importedCookieCount) {
+    throw makeProtocolError("The sidecar profile package import result replaced more sessions than it imported.");
+  }
+
+  return {
+    portabilityVersion: 1,
+    packageVersion,
+    operation,
+    importedProfileId,
+    importedProfileName,
+    nameConflictResolved,
+    portableSessionCount,
+    payloadFileCount,
+    payloadBytes,
+    payloadSkippedCount,
+    warningCount,
+    warnings,
+  };
+}
+
+function parseProfilePackageWarnings(
+  value: unknown,
+  expectedWarningCount: number,
+  field: string,
+): ProfilePackageWarning[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be an array.`);
+  }
+  if (value.length > MAX_PROFILE_PACKAGE_WARNINGS) {
+    throw makeProtocolError(`The sidecar profile package field ${field} exceeded the bounded warning count.`);
+  }
+  if (value.length !== expectedWarningCount) {
+    throw makeProtocolError(`The sidecar profile package field ${field} length must match warningCount.`);
+  }
+  const seenCodes = new Set<string>();
+  return value.map((item, index) => parseProfilePackageWarning(item, `${field}[${index}]`, seenCodes));
+}
+
+function parseProfilePackageWarning(
+  value: unknown,
+  field: string,
+  seenCodes: Set<string>,
+): ProfilePackageWarning {
+  const record = requireRecord(value, `The sidecar profile package field ${field} must be an object.`);
+  assertNoForbiddenProfilePackageFields(record, field);
+  requireExactProfilePackageKeys(record, ["code", "message", "count"], field);
+  const code = requireDiagnosticErrorCode(record.code, `${field}.code`);
+  if (seenCodes.has(code)) {
+    throw makeProtocolError(`The sidecar profile package field ${field}.code must be unique.`);
+  }
+  seenCodes.add(code);
+  return {
+    code,
+    message: requireProfilePackageSafeText(record.message, `${field}.message`, { maxLength: 256 }),
+    count: requirePositiveProfilePackageInteger(record.count, `${field}.count`),
+  };
+}
+
+function countProfilePackagePayloadSkips(warnings: ProfilePackageWarning[]): number {
+  let total = 0;
+  for (const warning of warnings) {
+    if (!PROFILE_PACKAGE_PAYLOAD_SKIP_WARNING_CODES.has(warning.code)) {
+      continue;
+    }
+    total += warning.count;
+    if (!Number.isSafeInteger(total)) {
+      throw makeProtocolError("The sidecar profile package payload skipped count exceeded safe integer bounds.");
+    }
+  }
+  return total;
+}
+
+function parseProfilePackageInternalProfileReference(
+  value: unknown,
+  expectedProfileId: string,
+  expectedProfileName: string,
+): void {
+  const record = requireRecord(value, "The sidecar profile package import profile reference must be an object.");
+  const profileId = requireProfileClientId(record.id, "profile.id");
+  const profileName = requireProfilePackageSafeText(record.name, "profile.name", { maxLength: 160 });
+  if (profileId !== expectedProfileId || profileName !== expectedProfileName) {
+    throw makeProtocolError("The sidecar profile package import profile reference did not match the aggregate result.");
+  }
+}
+
+function withoutProfilePackageInternalFields(record: Record<string, unknown>): Record<string, unknown> {
+  const { profile: _profile, ...publicRecord } = record;
+  return publicRecord;
 }
 
 function parseCookiePortabilityWarnings(
@@ -2948,9 +3327,102 @@ function requireProfileClientId(value: unknown, field: string): string {
 function requireDialogPathString(value: unknown, field: string): string {
   const path = requireString(value, field);
   if (!path.trim() || path.length > 4096 || containsControlCharacters(path) || path.includes("\0")) {
-    throw makeProtocolError(`The sidecar cookie portability field ${field} must be a bounded non-empty dialog path string.`);
+    throw makeProtocolError(`The sidecar portability field ${field} must be a bounded non-empty dialog path string.`);
   }
   return path;
+}
+
+function requireProfilePackageVersion(value: unknown, field: string): 1 {
+  return requireLiteralNumber(value, field, PROFILE_PACKAGE_VERSION);
+}
+
+function requireProfilePackageFormat(value: unknown, field: string): typeof PROFILE_PACKAGE_FORMAT {
+  if (value !== PROFILE_PACKAGE_FORMAT) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be the supported package format.`);
+  }
+  return PROFILE_PACKAGE_FORMAT;
+}
+
+function requireProfilePackageOperation<T extends "export" | "import">(
+  value: unknown,
+  field: string,
+  expected: T,
+): T {
+  if (value !== expected) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be ${expected}.`);
+  }
+  return expected;
+}
+
+function requireExactProfilePackageKeys(record: Record<string, unknown>, keys: string[], field: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      throw makeProtocolError(`The sidecar profile package field ${field} contains unknown fields.`);
+    }
+  }
+  for (const key of keys) {
+    if (!(key in record)) {
+      throw makeProtocolError(`The sidecar profile package field ${field} is missing required fields.`);
+    }
+  }
+}
+
+function assertNoForbiddenProfilePackageFields(value: unknown, field: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenProfilePackageFields(item, `${field}[${index}]`));
+    return;
+  }
+  if (!isRecord(value)) {
+    if (typeof value === "string" && containsUnsafeProfilePackageText(value)) {
+      throw makeProtocolError(`The sidecar profile package field ${field} must not expose selected paths, package members, manifests, cookies, credentials, runtime roots, diagnostics, debug endpoints, or launch details.`);
+    }
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_PROFILE_PACKAGE_FIELD_TOKENS.has(fieldToken(key))) {
+      throw makeProtocolError(`The sidecar profile package field ${field}.${key} must not expose selected paths, package members, manifests, cookies, credentials, runtime roots, diagnostics, debug endpoints, or launch details.`);
+    }
+    assertNoForbiddenProfilePackageFields(item, `${field}.${key}`);
+  }
+}
+
+function requireProfilePackageSafeText(value: unknown, field: string, options: { maxLength: number }): string {
+  const text = requireNonBlankString(value, field);
+  if (text.length > options.maxLength || containsControlCharacters(text) || containsUnsafeProfilePackageText(text)) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be safe UI copy.`);
+  }
+  return text;
+}
+
+function containsUnsafeProfilePackageText(value: string): boolean {
+  const lowered = value.toLowerCase();
+  if (FORBIDDEN_PROFILE_PACKAGE_TEXT_MARKERS.some((marker) => lowered.includes(marker.toLowerCase()))) {
+    return true;
+  }
+  if (/\b(?:file|ws|wss):\/\//i.test(value)) {
+    return true;
+  }
+  if (/(?:^|\s)(?:\/[A-Za-z0-9._-]+){2,}/.test(value) || /(?:^|\s)[A-Za-z]:[\\/][^\s]+/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function requireNonNegativeProfilePackageInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be a non-negative safe integer.`);
+  }
+  return number;
+}
+
+function requirePositiveProfilePackageInteger(value: unknown, field: string): number {
+  const number = requireNumber(value, field);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw makeProtocolError(`The sidecar profile package field ${field} must be a positive safe integer.`);
+  }
+  return number;
 }
 
 function requireCookieExportFormat(value: unknown, field: string): CookieExportFormat {

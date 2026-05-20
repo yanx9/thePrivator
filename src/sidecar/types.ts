@@ -241,6 +241,59 @@ export interface CookieReplaceSnapshot extends CookieReplaceResult {
   receivedAt: string;
 }
 
+export type ProfilePackageOperation = "export" | "import";
+
+export interface ProfilePackageWarning {
+  code: string;
+  message: string;
+  count: number;
+}
+
+export interface ProfilePackageExportResult {
+  portabilityVersion: 1;
+  packageVersion: 1;
+  operation: Extract<ProfilePackageOperation, "export">;
+  profileId: string;
+  profileName: string;
+  portableSessionCount: number;
+  payloadFileCount: number;
+  payloadBytes: number;
+  payloadSkippedCount: number;
+  warningCount: number;
+  warnings: ProfilePackageWarning[];
+}
+
+export interface ProfilePackageExportSnapshot extends ProfilePackageExportResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ProfilePackageImportResult {
+  portabilityVersion: 1;
+  packageVersion: 1;
+  operation: Extract<ProfilePackageOperation, "import">;
+  importedProfileId: string;
+  importedProfileName: string;
+  nameConflictResolved: boolean;
+  portableSessionCount: number;
+  payloadFileCount: number;
+  payloadBytes: number;
+  payloadSkippedCount: number;
+  warningCount: number;
+  warnings: ProfilePackageWarning[];
+}
+
+export interface ProfilePackageImportSnapshot extends ProfilePackageImportResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export type ProxyCheckRouteProofStatus = "not-run" | "proved";
 export type ProxyCheckRouteProofBasis = "direct-profile" | "sidecar-managed-local-fixture";
 export type ProxyCheckProofScope = "not-applicable" | "local-fixture";

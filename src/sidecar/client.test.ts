@@ -7,11 +7,13 @@ import {
   createProfile,
   deleteProfile,
   exportProfileCookies,
+  exportProfilePackage,
   getAutomationApiStatus,
   getChromiumStatus,
   getIdentityAuditPlan,
   getSidecarHealth,
   importLegacyProfiles,
+  importProfilePackage,
   launchChromiumProfile,
   listIdentityPresets,
   listProfiles,
@@ -39,6 +41,8 @@ const mockInvoke = vi.mocked(invoke);
 
 const PROXY_CHECK_PROFILE_ID = "11111111-1111-1111-1111-111111111111";
 const COOKIE_PROFILE_ID = "22222222-2222-2222-2222-222222222222";
+const PACKAGE_PROFILE_ID = "33333333-3333-3333-3333-333333333333";
+const IMPORTED_PACKAGE_PROFILE_ID = "44444444-4444-4444-4444-444444444444";
 
 function cookieWarning(overrides: Record<string, unknown> = {}) {
   return {
@@ -91,6 +95,83 @@ function cookieEnvelope(result: unknown, overrides: Record<string, unknown> = {}
 function tooManyCookieWarnings() {
   return Array.from({ length: 21 }, (_item, index) =>
     cookieWarning({ code: `COOKIE_ROW_UNSUPPORTED_${index}`, message: `Safe warning ${index}.`, count: 1 }),
+  );
+}
+
+function profilePackageWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "PACKAGE_PAYLOAD_RUNTIME_SKIPPED",
+    message: "Volatile Chromium runtime files were skipped from the package.",
+    count: 2,
+    ...overrides,
+  };
+}
+
+function profilePackageExportResult(overrides: Record<string, unknown> = {}) {
+  return {
+    packageVersion: 1,
+    format: "theprivator.profile-package",
+    operation: "export",
+    profileId: PACKAGE_PROFILE_ID,
+    profileName: "Research",
+    cookieCount: 3,
+    skippedCookieCount: 1,
+    payloadFileCount: 4,
+    payloadByteCount: 8192,
+    warningCount: 1,
+    warnings: [profilePackageWarning()],
+    ...overrides,
+  };
+}
+
+function profilePackageImportProfile(overrides: Record<string, unknown> = {}) {
+  return {
+    id: IMPORTED_PACKAGE_PROFILE_ID,
+    name: "Research Copy",
+    storage: {
+      profileDir: `profile-store/profiles/${IMPORTED_PACKAGE_PROFILE_ID}`,
+      userDataDir: `profile-store/profiles/${IMPORTED_PACKAGE_PROFILE_ID}/user-data`,
+    },
+    ...overrides,
+  };
+}
+
+function profilePackageImportResult(overrides: Record<string, unknown> = {}) {
+  const profile = overrides.profile ?? profilePackageImportProfile();
+  const profileId = typeof overrides.profileId === "string" ? overrides.profileId : IMPORTED_PACKAGE_PROFILE_ID;
+  const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research Copy";
+  return {
+    packageVersion: 1,
+    format: "theprivator.profile-package",
+    operation: "import",
+    profileId,
+    profileName,
+    nameConflictResolved: true,
+    profile,
+    cookieCount: 3,
+    importedCookieCount: 3,
+    replacedCookieCount: 0,
+    payloadFileCount: 4,
+    payloadByteCount: 8192,
+    warningCount: 1,
+    warnings: [profilePackageWarning()],
+    ...overrides,
+  };
+}
+
+function profilePackageEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-package-1",
+    protocolVersion: "1.0.0",
+    durationMs: 12.25,
+    result,
+    ...overrides,
+  };
+}
+
+function tooManyProfilePackageWarnings() {
+  return Array.from({ length: 21 }, (_item, index) =>
+    profilePackageWarning({ code: `PACKAGE_SAFE_WARNING_${index}`, message: `Safe package warning ${index}.`, count: 1 }),
   );
 }
 
@@ -1450,6 +1531,247 @@ describe("sidecar client", () => {
     await expect(replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")).rejects.toMatchObject({
       code: SIDECAR_PROTOCOL_ERROR,
       detailRef: "bridge-cookie-protocol-detail",
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it("exports and imports profile packages through fixed commands with metadata-only snapshots", async () => {
+    const exportDestination = "/selected/private/research.tpkg";
+    const importSource = "/selected/private/research.tpkg";
+    mockInvoke
+      .mockResolvedValueOnce(profilePackageEnvelope(profilePackageExportResult()))
+      .mockResolvedValueOnce(profilePackageEnvelope(profilePackageImportResult({ warningCount: 0, warnings: [] })));
+
+    const exported = await exportProfilePackage(PACKAGE_PROFILE_ID, exportDestination);
+    const imported = await importProfilePackage(importSource);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "profile_package_export", {
+      profileId: PACKAGE_PROFILE_ID,
+      destinationPath: exportDestination,
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "profile_package_import", {
+      sourcePath: importSource,
+    });
+    for (const [command, params] of mockInvoke.mock.calls) {
+      expect(command).toMatch(/^profile_package_(export|import)$/);
+      expect(JSON.stringify(params)).not.toMatch(/storeRoot|method|portability\.profile_package|manifest|payload|cookie/i);
+    }
+    expect(exported).toMatchObject({
+      portabilityVersion: 1,
+      packageVersion: 1,
+      operation: "export",
+      profileId: PACKAGE_PROFILE_ID,
+      profileName: "Research",
+      portableSessionCount: 3,
+      payloadFileCount: 4,
+      payloadBytes: 8192,
+      payloadSkippedCount: 2,
+      warningCount: 1,
+      warnings: [profilePackageWarning()],
+      requestId: "bridge-package-1",
+      protocolVersion: "1.0.0",
+      bridgeDurationMs: 12.25,
+    });
+    expect(imported).toMatchObject({
+      portabilityVersion: 1,
+      packageVersion: 1,
+      operation: "import",
+      importedProfileId: IMPORTED_PACKAGE_PROFILE_ID,
+      importedProfileName: "Research Copy",
+      nameConflictResolved: true,
+      portableSessionCount: 3,
+      payloadFileCount: 4,
+      payloadBytes: 8192,
+      payloadSkippedCount: 0,
+      warningCount: 0,
+      warnings: [],
+    });
+    expect(exported).not.toHaveProperty("format");
+    expect(imported).not.toHaveProperty("profile");
+    expect(imported).not.toHaveProperty("format");
+    expect(JSON.stringify({ exported, imported })).not.toMatch(/\/selected\/private|profile-store|profileDir|userDataDir|manifest\.json|theprivator-cookies\.json|payload\/|cookieCount|payloadByteCount|skippedCookieCount|importedCookieCount|replacedCookieCount/i);
+  });
+
+  it.each([
+    ["zero-count package export", () => profilePackageEnvelope(profilePackageExportResult({ cookieCount: 0, skippedCookieCount: 0, payloadFileCount: 0, payloadByteCount: 0, warningCount: 0, warnings: [] })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/empty.tpkg")],
+    ["zero-count package import", () => profilePackageEnvelope(profilePackageImportResult({ cookieCount: 0, importedCookieCount: 0, replacedCookieCount: 0, payloadFileCount: 0, payloadByteCount: 0, warningCount: 0, warnings: [] })), () => importProfilePackage("/tmp/empty.tpkg")],
+    ["conflict-resolved import", () => profilePackageEnvelope(profilePackageImportResult({ nameConflictResolved: true, profileName: "Research Copy 2", profile: profilePackageImportProfile({ name: "Research Copy 2" }) })), () => importProfilePackage("/tmp/conflict.tpkg")],
+    ["bounded package warnings", () => profilePackageEnvelope(profilePackageExportResult({ warningCount: 2, warnings: [profilePackageWarning({ count: 4 }), profilePackageWarning({ code: "PACKAGE_EXPORT_DESTINATION_SKIPPED", message: "The selected package destination was excluded from the payload snapshot.", count: 1 })] })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/warnings.tpkg")],
+  ] as Array<[string, () => unknown, () => Promise<unknown>]>)("accepts profile package boundary conditions: %s", async (_caseName, envelopeFactory, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelopeFactory());
+
+    await expect(callClient()).resolves.toMatchObject({
+      portabilityVersion: 1,
+      packageVersion: 1,
+    });
+  });
+
+  it.each([
+    ["blank export profile id", () => exportProfilePackage(" ", "/tmp/export.tpkg")],
+    ["path-like export profile id", () => exportProfilePackage("profile/../secret", "/tmp/export.tpkg")],
+    ["blank export destination", () => exportProfilePackage(PACKAGE_PROFILE_ID, " ")],
+    ["blank import source", () => importProfilePackage("")],
+  ])("rejects malformed package wrapper inputs before invoking Tauri: %s", async (_caseName, callClient) => {
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 2 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["wrong package format", () => profilePackageEnvelope(profilePackageExportResult({ format: "zip" })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["missing payload count", () => profilePackageEnvelope(profilePackageExportResult({ payloadFileCount: undefined })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["negative payload bytes", () => profilePackageEnvelope(profilePackageExportResult({ payloadByteCount: -1 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["non-integer warning count", () => profilePackageEnvelope(profilePackageExportResult({ warningCount: 1.5 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["unsafe integer count", () => profilePackageEnvelope(profilePackageExportResult({ payloadFileCount: Number.MAX_SAFE_INTEGER + 1 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["mismatched export profile id", () => profilePackageEnvelope(profilePackageExportResult({ profileId: PROXY_CHECK_PROFILE_ID })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["wrong export operation", () => profilePackageEnvelope(profilePackageExportResult({ operation: "import" })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["wrong import operation", () => profilePackageEnvelope(profilePackageImportResult({ operation: "export" })), () => importProfilePackage("/tmp/import.tpkg")],
+    ["warning count mismatch", () => profilePackageEnvelope(profilePackageExportResult({ warningCount: 0 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["too many warnings", () => profilePackageEnvelope(profilePackageExportResult({ warningCount: 21, warnings: tooManyProfilePackageWarnings() })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["duplicate warning codes", () => profilePackageEnvelope(profilePackageExportResult({ warningCount: 2, warnings: [profilePackageWarning(), profilePackageWarning()] })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["zero warning item count", () => profilePackageEnvelope(profilePackageExportResult({ warnings: [profilePackageWarning({ count: 0 })] })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["imported sessions exceed portable sessions", () => profilePackageEnvelope(profilePackageImportResult({ cookieCount: 1, importedCookieCount: 2 })), () => importProfilePackage("/tmp/import.tpkg")],
+    ["replaced sessions exceed imported sessions", () => profilePackageEnvelope(profilePackageImportResult({ importedCookieCount: 1, replacedCookieCount: 2 })), () => importProfilePackage("/tmp/import.tpkg")],
+    ["import profile reference mismatch", () => profilePackageEnvelope(profilePackageImportResult({ profile: profilePackageImportProfile({ id: PACKAGE_PROFILE_ID }) })), () => importProfilePackage("/tmp/import.tpkg")],
+  ] as Array<[string, () => unknown, () => Promise<unknown>]>)("maps malformed profile package payloads to protocol errors: %s", async (_caseName, envelopeFactory, callClient) => {
+    mockInvoke.mockResolvedValueOnce(envelopeFactory());
+
+    await expect(callClient()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it.each([
+    ["selected destination path", { destinationPath: "/selected/private/research.tpkg" }],
+    ["selected source path", { sourcePath: "/selected/private/research.tpkg" }],
+    ["store root", { storeRoot: "/app/data/root" }],
+    ["app root", { appRoot: "/Applications/ThePrivator.app" }],
+    ["user-data dir", { userDataDir: "profile-store/profiles/abc/user-data" }],
+    ["profile dir", { profileDir: "profile-store/profiles/abc" }],
+    ["package members", { members: ["manifest.json", "payload/Default/Preferences"] }],
+    ["raw manifest", { rawManifest: { format: "theprivator.profile-package" } }],
+    ["cookie value", { cookieValue: "session-cookie-secret" }],
+    ["cookie domain", { cookieDomain: "private.example.invalid" }],
+    ["cookie name", { cookieName: "sid" }],
+    ["credentials", { credentials: { username: "proxy-user", password: "proxy-pass" } }],
+    ["debug endpoint", { debugEndpoint: "ws://127.0.0.1:9222/devtools/browser/abc" }],
+    ["launch args", { launchArgs: ["--user-data-dir=/private/profile"] }],
+    ["raw diagnostics", { stdout: "raw stdout" }],
+  ])("rejects unsafe profile package result field before UI state sees it: %s", async (_caseName, extraFields) => {
+    mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageExportResult(extraFields)));
+
+    await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it.each([
+    ["unsafe warning field", [profilePackageWarning({ member: "payload/Default/Preferences" })]],
+    ["absolute path in warning text", [profilePackageWarning({ message: "Profile package skipped /Users/alice/private/Default/Preferences." })]],
+    ["manifest member in warning text", [profilePackageWarning({ message: "Skipped manifest.json from payload." })]],
+    ["cookie detail in warning text", [profilePackageWarning({ message: "Cookie value sid=secret was skipped." })]],
+    ["debug endpoint in warning text", [profilePackageWarning({ message: "See ws://127.0.0.1:9222/devtools/browser/abc." })]],
+    ["raw diagnostics in warning text", [profilePackageWarning({ message: "See raw diagnostics stderr for details." })]],
+  ])("rejects unsafe profile package warnings: %s", async (_caseName, warnings) => {
+    mockInvoke.mockResolvedValueOnce(profilePackageEnvelope(profilePackageExportResult({ warnings, warningCount: warnings.length })));
+
+    await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it("preserves typed profile package sidecar, bridge, and protocol errors", async () => {
+    mockInvoke
+      .mockRejectedValueOnce({
+        code: "PORTABILITY_PROFILE_BUSY",
+        message: "Stop this profile before exporting a profile package.",
+        recoverable: true,
+        detailRef: "sidecar-package-busy-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "PORTABILITY_PACKAGE_INVALID",
+        message: "Profile package is invalid or unsupported.",
+        recoverable: true,
+        detailRef: "sidecar-package-invalid-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "PORTABILITY_PACKAGE_CHECKSUM_MISMATCH",
+        message: "Profile package checksum verification failed.",
+        recoverable: true,
+        detailRef: "sidecar-package-checksum-detail",
+      })
+      .mockRejectedValueOnce({
+        code: "SIDECAR_TIMEOUT",
+        message: "The Python sidecar did not respond before the bridge timeout.",
+        recoverable: true,
+        detailRef: "bridge-package-timeout-detail",
+      })
+      .mockRejectedValueOnce({
+        code: SIDECAR_PROTOCOL_ERROR,
+        message: "The Python sidecar returned malformed JSON.",
+        recoverable: true,
+        detailRef: "bridge-package-protocol-detail",
+      });
+
+    await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: "PORTABILITY_PROFILE_BUSY",
+      message: "Stop this profile before exporting a profile package.",
+      recoverable: true,
+      detailRef: "sidecar-package-busy-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(importProfilePackage("/tmp/import.tpkg")).rejects.toMatchObject({
+      code: "PORTABILITY_PACKAGE_INVALID",
+      detailRef: "sidecar-package-invalid-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(importProfilePackage("/tmp/import.tpkg")).rejects.toMatchObject({
+      code: "PORTABILITY_PACKAGE_CHECKSUM_MISMATCH",
+      detailRef: "sidecar-package-checksum-detail",
+      source: "sidecar",
+      phase: "recoverable-error",
+    });
+    await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: "SIDECAR_TIMEOUT",
+      detailRef: "bridge-package-timeout-detail",
+      source: "bridge",
+      phase: "bridge-error",
+    });
+    await expect(importProfilePackage("/tmp/import.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      detailRef: "bridge-package-protocol-detail",
+      source: "protocol",
+      phase: "bridge-error",
+    });
+  });
+
+  it.each([
+    ["missing request id", () => profilePackageEnvelope(profilePackageExportResult(), { requestId: undefined })],
+    ["unsupported bridge protocol", () => profilePackageEnvelope(profilePackageExportResult(), { protocolVersion: "2.0.0" })],
+    ["non-object result", () => profilePackageEnvelope(null)],
+    ["unknown result field", () => profilePackageEnvelope(profilePackageExportResult({ harmlessExtra: true }))],
+  ])("maps malformed profile package envelopes to protocol errors: %s", async (_caseName, envelopeFactory) => {
+    mockInvoke.mockResolvedValueOnce(envelopeFactory());
+
+    await expect(exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
       source: "protocol",
       phase: "bridge-error",
     });
