@@ -10,7 +10,7 @@ import sqlite3
 import stat
 import zipfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -30,6 +30,7 @@ from theprivator_sidecar.profiles import ProfileStore, STORE_VERSION, utc_now_is
 from theprivator_sidecar.protocol import (
     PORTABILITY_PACKAGE_CHECKSUM_MISMATCH,
     PORTABILITY_PACKAGE_INVALID,
+    PORTABILITY_PACKAGE_PAYLOAD_FAILED,
     PORTABILITY_PACKAGE_TOO_LARGE,
     PORTABILITY_PACKAGE_UNSUPPORTED_VERSION,
     PORTABILITY_PROFILE_BUSY,
@@ -232,12 +233,46 @@ def minimal_manifest(**overrides: Any) -> dict[str, Any]:
     return manifest
 
 
-def write_package(path: Path, manifest: Mapping[str, Any], *, extra_members: Mapping[str, bytes] | None = None) -> None:
+def write_package(
+    path: Path,
+    manifest: Mapping[str, Any],
+    *,
+    extra_members: Mapping[str, bytes] | None = None,
+    extra_member_infos: Sequence[tuple[zipfile.ZipInfo, bytes]] | None = None,
+) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_MEMBER, json.dumps(manifest, sort_keys=True).encode("utf-8"))
         archive.writestr(COOKIE_MEMBER, minimal_cookie_payload())
         for name, content in (extra_members or {}).items():
             archive.writestr(name, content)
+        for info, content in extra_member_infos or ():
+            archive.writestr(info, content)
+
+
+def manifest_with_payload(relative_path: str, content: bytes = b"portable-payload") -> tuple[dict[str, Any], str]:
+    member = f"{PAYLOAD_PREFIX}{relative_path}"
+    return (
+        minimal_manifest(
+            payload={
+                "prefix": PAYLOAD_PREFIX,
+                "fileCount": 1,
+                "byteCount": len(content),
+                "files": [
+                    {
+                        "path": relative_path,
+                        "member": member,
+                        "byteCount": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        member,
+    )
+
+
+def assert_no_profile_mutation(store_root: Path) -> None:
+    assert not (store_root / "profile-store" / "profiles.json").exists()
 
 
 def test_export_profile_package_writes_versioned_manifest_cookies_payload_and_redacted_result(tmp_path):
@@ -411,52 +446,254 @@ def test_import_rejects_missing_required_member_without_profile_mutation(tmp_pat
         import_profile_package(tmp_path / "store", package_path)
 
     assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
-    assert not (tmp_path / "store" / "profile-store" / "profiles.json").exists()
+    assert_no_profile_mutation(tmp_path / "store")
 
 
-@pytest.mark.parametrize("member_name", ["payload/../evil", "payload/C:/evil", "payload/bad\\evil"])
-def test_import_rejects_traversal_absolute_and_backslash_payload_members(tmp_path, member_name):
-    package_path = tmp_path / "bad-member.tpkg"
-    write_package(package_path, minimal_manifest(), extra_members={member_name: b"evil"})
+def test_import_rejects_non_zip_without_profile_mutation_or_raw_details(tmp_path):
+    package_path = tmp_path / "not-a-zip.tpkg"
+    package_path.write_text("not a zip with manifest.json or payload/secret", encoding="utf-8")
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    error = assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
+    assert "manifest.json" not in json.dumps(error.to_dict(), sort_keys=True)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+@pytest.mark.parametrize("duplicate_member", [MANIFEST_MEMBER, COOKIE_MEMBER])
+def test_import_rejects_duplicate_fixed_members_without_profile_mutation(tmp_path, duplicate_member):
+    package_path = tmp_path / "duplicate-member.tpkg"
+    with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(MANIFEST_MEMBER, json.dumps(minimal_manifest(), sort_keys=True).encode("utf-8"))
+        archive.writestr(COOKIE_MEMBER, minimal_cookie_payload())
+        archive.writestr(duplicate_member, b"duplicate")
 
     with pytest.raises(SidecarError) as exc_info:
         import_profile_package(tmp_path / "store", package_path)
 
     assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
-    assert not (tmp_path / "store" / "profile-store" / "profiles.json").exists()
+    assert_no_profile_mutation(tmp_path / "store")
 
 
-def test_import_rejects_symlink_payload_entries_before_profile_mutation(tmp_path):
-    payload = b"not followed"
-    member = f"{PAYLOAD_PREFIX}Default/Preferences"
-    manifest = minimal_manifest(
-        payload={
-            "prefix": PAYLOAD_PREFIX,
-            "fileCount": 1,
-            "byteCount": len(payload),
-            "files": [
-                {
-                    "path": "Default/Preferences",
-                    "member": member,
-                    "byteCount": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                }
-            ],
-        }
-    )
-    package_path = tmp_path / "symlink-payload.tpkg"
-    symlink_info = zipfile.ZipInfo(member)
-    symlink_info.external_attr = (stat.S_IFLNK | 0o777) << 16
-    with zipfile.ZipFile(package_path, "w") as archive:
-        archive.writestr(MANIFEST_MEMBER, json.dumps(manifest, sort_keys=True).encode("utf-8"))
-        archive.writestr(COOKIE_MEMBER, minimal_cookie_payload())
-        archive.writestr(symlink_info, payload)
+@pytest.mark.parametrize(
+    "extra_member",
+    ["metadata/rawDiagnostics.json", "payload-extra/file", "cookies/extra.json"],
+)
+def test_import_rejects_extra_archive_members_without_profile_mutation(tmp_path, extra_member):
+    package_path = tmp_path / "extra-member.tpkg"
+    write_package(package_path, minimal_manifest(), extra_members={extra_member: b"unsafe extra member"})
 
     with pytest.raises(SidecarError) as exc_info:
         import_profile_package(tmp_path / "store", package_path)
 
-    assert_sidecar_error(exc_info, "PORTABILITY_PACKAGE_PAYLOAD_FAILED")
-    assert not (tmp_path / "store" / "profile-store" / "profiles.json").exists()
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "../evil",
+        "/absolute",
+        "bad\\evil",
+        "Default/bad\x1fcontrol",
+        "Default/bad\x7fcontrol",
+        "CON/settings",
+        "NUL.txt",
+        "Default/file:ads",
+        "Default/trailing.",
+        "Default/trailing ",
+    ],
+)
+def test_import_rejects_unsafe_payload_paths_before_profile_mutation(tmp_path, relative_path):
+    payload = b"unsafe path payload"
+    manifest, member = manifest_with_payload(relative_path, payload)
+    package_path = tmp_path / "bad-member.tpkg"
+    write_package(package_path, manifest, extra_members={member: payload})
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda manifest: manifest.__setitem__("rawDiagnostics", {"stdout": "unsafe"}),
+        lambda manifest: manifest.__setitem__("createdAt", "2026-01-01T00:00:00+02:00"),
+        lambda manifest: manifest.__setitem__("profile", "not-an-object"),
+        lambda manifest: manifest["profile"].__setitem__("rawDiagnostics", "unsafe"),
+        lambda manifest: manifest["profile"].__setitem__(
+            "proxy",
+            {
+                "proxyVersion": PROXY_VERSION,
+                "mode": FIXED_SERVER_PROXY_MODE,
+                "protocol": "http",
+                "host": "proxy.example.invalid",
+                "port": 8080,
+                "credentials": {"username": PROXY_USER_SENTINEL, "password": PROXY_PASSWORD_SENTINEL},
+            },
+        ),
+        lambda manifest: manifest["profile"].__setitem__(
+            "proxy",
+            {"proxyVersion": PROXY_VERSION, "mode": "direct", "authToken": "unsafe-token"},
+        ),
+        lambda manifest: manifest["profile"].__setitem__(
+            "proxySummary",
+            {"proxyVersion": PROXY_VERSION, "mode": "direct", "credentialState": "configured", "summary": "unsafe"},
+        ),
+    ],
+)
+def test_import_rejects_unsafe_manifest_fields_before_profile_mutation(tmp_path, mutate):
+    manifest = minimal_manifest()
+    mutate(manifest)
+    package_path = tmp_path / "unsafe-manifest.tpkg"
+    write_package(package_path, manifest)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    error = assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_INVALID)
+    encoded = json.dumps(error.to_dict(), sort_keys=True)
+    assert PROXY_USER_SENTINEL not in encoded
+    assert PROXY_PASSWORD_SENTINEL not in encoded
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_import_rejects_cookie_manifest_over_s01_cap_before_reading_payload(tmp_path):
+    manifest = minimal_manifest()
+    manifest["cookies"]["byteCount"] = profile_package.cookies.MAX_IMPORT_BYTES + 1
+    manifest["cookies"]["sha256"] = "0" * 64
+    package_path = tmp_path / "oversized-cookie.tpkg"
+    write_package(package_path, manifest)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_TOO_LARGE)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    [
+        (lambda manifest: manifest["cookies"].__setitem__("byteCount", len(minimal_cookie_payload()) + 1), PORTABILITY_PACKAGE_CHECKSUM_MISMATCH),
+        (lambda manifest: manifest["cookies"].__setitem__("sha256", "0" * 64), PORTABILITY_PACKAGE_CHECKSUM_MISMATCH),
+        (lambda manifest: manifest["cookies"].__setitem__("cookieCount", 1), PORTABILITY_PACKAGE_INVALID),
+        (lambda manifest: manifest["payload"].__setitem__("byteCount", 99), PORTABILITY_PACKAGE_INVALID),
+    ],
+)
+def test_import_rejects_cookie_and_payload_manifest_mismatches(tmp_path, mutate, expected_code):
+    manifest = minimal_manifest()
+    mutate(manifest)
+    package_path = tmp_path / "mismatch.tpkg"
+    write_package(package_path, manifest)
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, expected_code)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_import_rejects_payload_member_byte_count_and_checksum_mismatches(tmp_path):
+    declared = b"declared payload"
+    actual = b"tampered payload"
+    manifest, member = manifest_with_payload("Default/Preferences", declared)
+    package_path = tmp_path / "payload-mismatch.tpkg"
+    write_package(package_path, manifest, extra_members={member: actual})
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_CHECKSUM_MISMATCH)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_import_rejects_too_many_archive_members_with_typed_too_large(tmp_path, monkeypatch):
+    monkeypatch.setattr(profile_package, "MAX_ARCHIVE_MEMBERS", 1)
+    package_path = tmp_path / "too-many.tpkg"
+    write_package(package_path, minimal_manifest())
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_TOO_LARGE)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_import_rejects_too_large_payload_member_count_before_profile_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(profile_package, "MAX_PAYLOAD_FILE_BYTES", 4)
+    payload = b"too large"
+    manifest, member = manifest_with_payload("Default/Preferences", payload)
+    package_path = tmp_path / "too-large-member.tpkg"
+    write_package(package_path, manifest, extra_members={member: payload})
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_TOO_LARGE)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_import_rejects_suspicious_compression_before_profile_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(profile_package, "MAX_MEMBER_COMPRESSION_RATIO", 1)
+    monkeypatch.setattr(profile_package, "MIN_SUSPICIOUS_COMPRESSED_BYTES", 1)
+    payload = b"A" * 4096
+    manifest, member = manifest_with_payload("Default/Preferences", payload)
+    package_path = tmp_path / "compressed.tpkg"
+    write_package(package_path, manifest, extra_members={member: payload})
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_TOO_LARGE)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR, stat.S_IFSOCK],
+)
+def test_import_rejects_special_payload_entries_before_profile_mutation(tmp_path, mode):
+    payload = b"not followed"
+    manifest, member = manifest_with_payload("Default/Preferences", payload)
+    package_path = tmp_path / "special-payload.tpkg"
+    special_info = zipfile.ZipInfo(member)
+    special_info.external_attr = (mode | 0o777) << 16
+    write_package(package_path, manifest, extra_member_infos=[(special_info, payload)])
+
+    with pytest.raises(SidecarError) as exc_info:
+        import_profile_package(tmp_path / "store", package_path)
+
+    assert_sidecar_error(exc_info, PORTABILITY_PACKAGE_PAYLOAD_FAILED)
+    assert_no_profile_mutation(tmp_path / "store")
+
+
+def test_export_skips_hardlinked_payload_files_with_aggregate_warning(tmp_path):
+    profile = create_profile_with_payload(tmp_path)
+    user_data_dir = tmp_path / profile["storage"]["userDataDir"]
+    hardlink_path = user_data_dir / "Default" / "Preferences.hardlink"
+    try:
+        os.link(user_data_dir / "Default" / "Preferences", hardlink_path)
+    except OSError as exc:
+        pytest.skip(f"hardlinks are not supported on this filesystem: {exc}")
+    package_path = tmp_path / "hardlink.tpkg"
+
+    result = export_profile_package(tmp_path, profile["id"], package_path)
+
+    special_warnings = [warning for warning in result["warnings"] if warning["code"] == "PACKAGE_PAYLOAD_SPECIAL_SKIPPED"]
+    assert special_warnings
+    assert special_warnings[0]["count"] >= 1
+    assert "Preferences" not in json.dumps(special_warnings, sort_keys=True)
+    manifest, members = read_package(package_path)
+    assert f"{PAYLOAD_PREFIX}Default/Preferences.hardlink" not in members
+    assert f"{PAYLOAD_PREFIX}Default/Preferences" not in members
+    assert manifest["payload"]["fileCount"] == result["payloadFileCount"]
+    assert_public_package_payload_safe(result, store_root=tmp_path)
 
 
 def test_export_rejects_running_profile_with_existing_stopped_guard(tmp_path):

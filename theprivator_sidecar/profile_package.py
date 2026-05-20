@@ -27,6 +27,7 @@ from .profiles import (
     MAX_PROFILE_NAME_LENGTH,
     ProfileRecord,
     ProfileStore,
+    is_utc_iso_timestamp,
     is_valid_profile_name,
     normalize_profile_identity,
     utc_now_iso,
@@ -44,7 +45,7 @@ from .protocol import (
     PORTABILITY_PACKAGE_WRITE_FAILED,
     SidecarError,
 )
-from .proxy import normalize_proxy_config, public_proxy_summary
+from .proxy import is_proxy_secret_key, normalize_proxy_config, public_proxy_summary
 
 PACKAGE_FORMAT = "theprivator.profile-package"
 PACKAGE_VERSION = 1
@@ -61,6 +62,37 @@ MAX_PAYLOAD_FILES = 9_000
 MAX_PAYLOAD_BYTES = 500 * 1024 * 1024
 MAX_PAYLOAD_FILE_BYTES = 128 * 1024 * 1024
 MAX_WARNING_OBJECTS = 20
+MAX_MEMBER_COMPRESSION_RATIO = 100
+MIN_SUSPICIOUS_COMPRESSED_BYTES = 1024
+
+_MANIFEST_FIELDS = frozenset({"format", "version", "createdAt", "profile", "cookies", "payload", "warnings"})
+_PROFILE_FIELDS = frozenset({"name", "identity", "proxy", "proxySummary"})
+_RESERVED_WINDOWS_PATH_SEGMENTS = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
 
 _RUNTIME_FILE_NAMES = {"DevToolsActivePort"}
 _RUNTIME_FILE_PREFIXES = ("Singleton",)
@@ -424,6 +456,9 @@ def _collect_payload_files(
             if not stat.S_ISREG(stat_result.st_mode):
                 warnings.add("PACKAGE_PAYLOAD_SPECIAL_SKIPPED")
                 continue
+            if getattr(stat_result, "st_nlink", 1) > 1:
+                warnings.add("PACKAGE_PAYLOAD_SPECIAL_SKIPPED")
+                continue
             relative_path = _safe_payload_relative_path(PurePosixPath(*parts, name).as_posix())
             if _is_cookie_database_payload_path(relative_path):
                 warnings.add("PACKAGE_PAYLOAD_COOKIE_DB_SKIPPED")
@@ -535,12 +570,18 @@ def _validate_archive_infos(infos: Sequence[zipfile.ZipInfo]) -> None:
     payload_count = 0
     for info in infos:
         _validate_member_name(info.filename)
+        _validate_member_compression(info)
         if info.is_dir():
             _raise_invalid_package()
         if _zip_info_is_symlink_or_special(info):
             raise PackageValidationError(
                 code=PORTABILITY_PACKAGE_PAYLOAD_FAILED,
                 message="Profile package payload is invalid.",
+            )
+        if info.filename == COOKIE_MEMBER and info.file_size > cookies.MAX_IMPORT_BYTES:
+            raise PackageValidationError(
+                code=PORTABILITY_PACKAGE_TOO_LARGE,
+                message="Profile package is too large.",
             )
         if info.filename.startswith(PAYLOAD_PREFIX):
             payload_count += 1
@@ -579,6 +620,8 @@ def _read_manifest(archive: zipfile.ZipFile, by_name: Mapping[str, zipfile.ZipIn
 def _validate_manifest(
     manifest: Mapping[str, Any]
 ) -> tuple[str, JsonObject, JsonObject, JsonObject, list[PayloadManifestEntry], list[JsonObject]]:
+    if frozenset(manifest.keys()) != _MANIFEST_FIELDS:
+        _raise_invalid_package()
     if manifest.get("format") != PACKAGE_FORMAT:
         _raise_invalid_package()
     version = manifest.get("version")
@@ -589,19 +632,24 @@ def _validate_manifest(
             code=PORTABILITY_PACKAGE_UNSUPPORTED_VERSION,
             message="Profile package version is not supported.",
         )
+    created_at = manifest.get("createdAt")
+    if not isinstance(created_at, str) or not is_utc_iso_timestamp(created_at):
+        _raise_invalid_package()
 
     profile = manifest.get("profile")
     if not isinstance(profile, Mapping):
         _raise_invalid_package()
-    allowed_profile_keys = {"name", "identity", "proxy", "proxySummary"}
-    if set(profile) - allowed_profile_keys:
+    if frozenset(profile.keys()) != _PROFILE_FIELDS:
         _raise_invalid_package()
     profile_name = profile.get("name")
     if not isinstance(profile_name, str) or not is_valid_profile_name(profile_name):
         _raise_invalid_package()
     try:
         identity = normalize_profile_identity(profile.get("identity"))
+        _reject_imported_proxy_secret_fields(profile.get("proxy"))
         proxy = _strip_proxy_credentials(profile.get("proxy"))
+        if profile.get("proxySummary") != public_proxy_summary(proxy):
+            _raise_invalid_package()
     except SidecarError as exc:
         raise PackageValidationError(
             code=PORTABILITY_PACKAGE_INVALID,
@@ -627,6 +675,11 @@ def _validate_cookie_manifest(raw: Any) -> JsonObject:
     if raw.get("version") != cookies.THEPRIVATOR_COOKIE_SCHEMA_VERSION:
         _raise_invalid_package()
     byte_count = _manifest_nonnegative_int(raw.get("byteCount"))
+    if byte_count > cookies.MAX_IMPORT_BYTES:
+        raise PackageValidationError(
+            code=PORTABILITY_PACKAGE_TOO_LARGE,
+            message="Profile package is too large.",
+        )
     cookie_count = _manifest_nonnegative_int(raw.get("cookieCount"))
     skipped_count = _manifest_nonnegative_int(raw.get("skippedCount"))
     sha256 = raw.get("sha256")
@@ -707,20 +760,27 @@ def _read_and_verify_cookie_member(
     if info is None:
         _raise_invalid_package()
     expected_bytes = int(cookie_meta["byteCount"])
+    if expected_bytes > cookies.MAX_IMPORT_BYTES or info.file_size > cookies.MAX_IMPORT_BYTES:
+        raise PackageValidationError(
+            code=PORTABILITY_PACKAGE_TOO_LARGE,
+            message="Profile package is too large.",
+        )
     if info.file_size != expected_bytes:
         raise PackageValidationError(
             code=PORTABILITY_PACKAGE_CHECKSUM_MISMATCH,
             message="Profile package checksum validation failed.",
         )
-    raw = _read_member_bytes(archive, info, max(expected_bytes, cookies.MAX_IMPORT_BYTES))
+    raw = _read_member_bytes(archive, info, expected_bytes)
     _assert_checksum(raw, str(cookie_meta["sha256"]))
     try:
-        cookies.parse_theprivator_cookie_payload_bytes(raw)
+        parsed = cookies.parse_theprivator_cookie_payload_bytes(raw)
     except SidecarError as exc:
         raise PackageValidationError(
             code=PORTABILITY_PACKAGE_INVALID,
             message="Profile package cookie payload is invalid.",
         ) from exc
+    if len(parsed.cookies) != int(cookie_meta["cookieCount"]):
+        _raise_invalid_package()
     return raw
 
 
@@ -933,15 +993,18 @@ def _selected_path(value: Union[str, Path], *, read: bool) -> Path:
 def _validate_member_name(name: Any) -> str:
     if not isinstance(name, str):
         _raise_invalid_package()
-    if name == "" or name.endswith("/") or name.startswith("/"):
+    if name == "" or name.endswith("/") or name.startswith("/") or "//" in name:
         _raise_invalid_package()
-    if "\\" in name or "\x00" in name or any(ord(character) < 32 for character in name):
+    if "\\" in name or "\x00" in name or any(ord(character) < 32 or ord(character) == 127 for character in name):
         _raise_invalid_package()
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or any(part in {"", "."} for part in path.parts):
         _raise_invalid_package()
     if PureWindowsPath(name).is_absolute() or (len(name) >= 2 and name[1] == ":"):
         _raise_invalid_package()
+    for segment in path.parts:
+        if _unsafe_member_segment(segment):
+            _raise_invalid_package()
     return path.as_posix()
 
 
@@ -975,6 +1038,45 @@ def _manifest_nonnegative_int(value: Any) -> int:
 
 def _is_sha256_hex(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _unsafe_member_segment(segment: str) -> bool:
+    if segment.endswith((" ", ".")):
+        return True
+    if ":" in segment:
+        return True
+    reserved_candidate = segment.split(".", 1)[0].upper()
+    return reserved_candidate in _RESERVED_WINDOWS_PATH_SEGMENTS
+
+
+def _reject_imported_proxy_secret_fields(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if is_proxy_secret_key(key):
+                _raise_invalid_package()
+            _reject_imported_proxy_secret_fields(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _reject_imported_proxy_secret_fields(nested)
+
+
+def _validate_member_compression(info: zipfile.ZipInfo) -> None:
+    file_size = int(info.file_size)
+    compress_size = int(info.compress_size)
+    if file_size <= 0:
+        return
+    if compress_size <= 0:
+        raise PackageValidationError(
+            code=PORTABILITY_PACKAGE_TOO_LARGE,
+            message="Profile package is too large.",
+        )
+    if compress_size < MIN_SUSPICIOUS_COMPRESSED_BYTES:
+        return
+    if file_size > compress_size * MAX_MEMBER_COMPRESSION_RATIO:
+        raise PackageValidationError(
+            code=PORTABILITY_PACKAGE_TOO_LARGE,
+            message="Profile package is too large.",
+        )
 
 
 def _assert_checksum(raw: bytes, expected: str) -> None:
