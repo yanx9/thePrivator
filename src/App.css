@@ -228,6 +228,7 @@ label {
 .proxy-summary-panel,
 .proxy-config-panel,
 .proxy-check-panel,
+.cookie-portability-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel,
@@ -958,6 +959,7 @@ p {
 .proxy-summary-panel,
 .proxy-config-panel,
 .proxy-check-panel,
+.cookie-portability-panel,
 .identity-summary-panel,
 .identity-audit-summary-panel,
 .identity-config-panel {
@@ -975,7 +977,8 @@ p {
   border-color: rgba(154, 178, 111, 0.34);
 }
 
-.proxy-check-panel {
+.proxy-check-panel,
+.cookie-portability-panel {
   border-color: rgba(240, 198, 109, 0.32);
 }
 
@@ -986,6 +989,7 @@ p {
 .proxy-summary-panel__header,
 .proxy-config-panel__header,
 .proxy-check-panel__header,
+.cookie-portability-panel__header,
 .identity-summary-panel__header,
 .identity-audit-summary-panel__header,
 .identity-config-panel__header,
@@ -1001,6 +1005,7 @@ p {
 .proxy-summary-panel h4,
 .proxy-config-panel h4,
 .proxy-check-panel h4,
+.cookie-portability-panel h4,
 .identity-summary-panel h4,
 .identity-audit-summary-panel h4,
 .identity-config-panel h4,
@@ -1012,6 +1017,11 @@ p {
 .proxy-summary-panel p,
 .proxy-config-panel p,
 .proxy-check-panel p,
+.cookie-portability-panel p,
+.cookie-portability-hint,
+.cookie-portability-warning p,
+.cookie-portability-error p,
+.cookie-portability-success p,
 .proxy-muted-copy,
 .proxy-field-hint,
 .identity-summary-panel p,
@@ -1035,6 +1045,7 @@ p {
 
 .proxy-config-panel,
 .proxy-check-panel,
+.cookie-portability-panel,
 .identity-config-panel {
   border-color: rgba(240, 198, 109, 0.32);
 }
@@ -1172,8 +1183,10 @@ p {
 
 .proxy-config-observability,
 .proxy-check-observability,
+.cookie-portability-observability,
 .proxy-status,
 .proxy-check-status,
+.cookie-portability-status,
 .proxy-draft-editor,
 .proxy-check-section,
 .proxy-mode-group,
@@ -1199,6 +1212,7 @@ p {
 
 .proxy-status,
 .proxy-check-status,
+.cookie-portability-status,
 .identity-status {
   border-color: rgba(240, 198, 109, 0.42);
   color: #ffe6a6;
@@ -1213,6 +1227,7 @@ p {
 
 .proxy-error-feedback,
 .proxy-check-error,
+.cookie-portability-error,
 .identity-error-feedback {
   border-color: rgba(230, 120, 95, 0.46);
   background:
@@ -1222,6 +1237,7 @@ p {
 
 .proxy-success-feedback,
 .proxy-check-success,
+.cookie-portability-success,
 .identity-success-feedback {
   border-color: rgba(154, 178, 111, 0.44);
   background:
@@ -1238,18 +1254,21 @@ p {
 
 .proxy-error-feedback > strong,
 .proxy-check-error > strong,
+.cookie-portability-error > strong,
 .identity-error-feedback > strong {
   color: #ffe0d7;
 }
 
 .proxy-success-feedback > strong,
 .proxy-check-success > strong,
+.cookie-portability-success > strong,
 .identity-success-feedback > strong {
   color: #def4b2;
 }
 
 .proxy-draft-editor,
 .proxy-check-results,
+.cookie-portability-warning-list,
 .proxy-check-page-list,
 .proxy-field,
 .proxy-endpoint-grid,
@@ -1260,9 +1279,42 @@ p {
 
 .proxy-check-section,
 .proxy-check-success,
-.proxy-check-error {
+.proxy-check-error,
+.cookie-portability-success,
+.cookie-portability-error,
+.cookie-portability-warning {
   display: grid;
   gap: 10px;
+}
+
+.cookie-portability-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cookie-portability-actions button {
+  width: 100%;
+}
+
+.cookie-portability-hint {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.cookie-portability-warning-list {
+  margin-top: 12px;
+}
+
+.cookie-portability-warning {
+  padding: 12px;
+  border: 1px solid rgba(240, 198, 109, 0.34);
+  border-radius: 16px;
+  background: rgba(240, 198, 109, 0.075);
+}
+
+.cookie-portability-warning strong {
+  color: #ffe6a6;
 }
 
 .proxy-check-empty {
@@ -1940,6 +1992,7 @@ p {
   .create-controls,
   .legacy-scan-controls,
   .legacy-import-panel__header,
+  .cookie-portability-panel__header,
   .identity-summary-panel__header,
   .identity-audit-summary-panel__header,
   .identity-config-panel__header,
@@ -1964,6 +2017,7 @@ p {
   .create-controls button,
   .legacy-scan-controls button,
   .legacy-import-actions button,
+  .cookie-portability-actions,
   .identity-preset-apply__controls button,
   .identity-audit-page-card__actions button,
   .identity-summary-panel__header button,
@@ -1978,6 +2032,7 @@ p {
 
   .profile-metadata,
   .automation-api-actions,
+  .cookie-portability-actions,
   .defaults-grid,
   .runtime-proof-grid,
   .identity-audit-page-card__actions,

@@ -1,6 +1,7 @@
 // @ts-expect-error Vite raw import keeps the source guard browser-build compatible without Node fs types.
 import appSourceText from "./App.tsx?raw";
 import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -10,7 +11,14 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+  save: vi.fn(),
+}));
+
 const mockInvoke = vi.mocked(invoke);
+const mockOpen = vi.mocked(open);
+const mockSave = vi.mocked(save);
 
 function healthEnvelope(overrides: Record<string, unknown> = {}) {
   return {
@@ -267,6 +275,54 @@ function proxyCheckEnvelope(result: unknown, overrides: Record<string, unknown> 
     requestId: "bridge-proxy-check-1",
     protocolVersion: "1.0.0",
     durationMs: 8.25,
+    result,
+    ...overrides,
+  };
+}
+
+function cookieWarning(overrides: Record<string, unknown> = {}) {
+  return {
+    code: "COOKIE_PORTABILITY_PARTIAL",
+    message: "Some cookies were skipped because they could not be represented safely in the selected format.",
+    count: 2,
+    ...overrides,
+  };
+}
+
+function cookieExportResult(overrides: Record<string, unknown> = {}) {
+  return {
+    portabilityVersion: 1,
+    profileId: "11111111-1111-1111-1111-111111111111",
+    operation: "export",
+    format: "netscape",
+    exportedCount: 3,
+    skippedCount: 0,
+    warningCount: 0,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function cookieReplaceResult(overrides: Record<string, unknown> = {}) {
+  return {
+    portabilityVersion: 1,
+    profileId: "11111111-1111-1111-1111-111111111111",
+    operation: "replace",
+    format: "theprivator-json",
+    importedCount: 5,
+    replacedCount: 4,
+    skippedCount: 1,
+    warningCount: 0,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function cookieEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: "bridge-cookie-1",
+    protocolVersion: "1.0.0",
+    durationMs: 9.5,
     result,
     ...overrides,
   };
@@ -702,6 +758,8 @@ function commandCalls(command: string) {
 describe("ThePrivator profile library UI", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+    mockOpen.mockReset();
+    mockSave.mockReset();
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: undefined,
@@ -3079,7 +3137,163 @@ describe("ThePrivator profile library UI", () => {
     await waitFor(() => expect(within(panel).getByRole("button", { name: /refresh api status/i })).toBeEnabled());
   });
 
-  it("does not add direct browser or Tauri filesystem bypasses for legacy import", () => {
+  it("treats cookie export dialog cancel as a no-op before any sidecar invoke", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce(null);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /cookie portability/i });
+    fireEvent.click(within(panel).getByRole("button", { name: /export netscape/i }));
+
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(panel).toHaveTextContent(/No cookie portability operation has run/i));
+    expect(mockSave).toHaveBeenCalledWith({
+      title: "Export cookies as Netscape cookies.txt",
+      filters: [{ name: "Netscape cookies.txt", extensions: ["txt"] }],
+    });
+    expect(commandCalls("profile_cookies_export")).toHaveLength(0);
+    expect(commandCalls("profile_cookies_replace")).toHaveLength(0);
+  });
+
+  it("exports and replaces profile cookies through native dialogs without rendering selected paths or cookie material", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const exportPath = "/tmp/theprivator-selected/cookies.txt";
+    const sourcePath = "/tmp/theprivator-selected/cookies.json";
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce(exportPath);
+    mockOpen.mockResolvedValueOnce(sourcePath);
+    mockInvoke
+      .mockResolvedValueOnce(cookieEnvelope(cookieExportResult({
+        exportedCount: 0,
+        skippedCount: 2,
+        warningCount: 1,
+        warnings: [cookieWarning()],
+      })))
+      .mockResolvedValueOnce(cookieEnvelope(cookieReplaceResult({
+        importedCount: 5,
+        replacedCount: 4,
+        skippedCount: 1,
+        warningCount: 1,
+        warnings: [cookieWarning({ code: "COOKIE_REPLACE_PARTIAL", count: 1 })],
+      }), { requestId: "bridge-cookie-replace-1" }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /cookie portability/i });
+
+    fireEvent.click(within(panel).getByRole("button", { name: /export netscape/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/Netscape cookies\.txt export completed/i));
+    expect(panel).toHaveTextContent(/Exported\s*0/i);
+    expect(panel).toHaveTextContent(/Skipped\s*2/i);
+    expect(panel).toHaveTextContent(/Warnings\s*1/i);
+    expect(panel).toHaveTextContent(/COOKIE_PORTABILITY_PARTIAL/i);
+    expect(panel).toHaveTextContent(/Request\s*bridge-cookie-1/i);
+    expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_export", {
+      profileId: profile.id,
+      destinationPath: exportPath,
+      format: "netscape",
+    });
+    expect(panel).not.toHaveTextContent(/theprivator-selected|cookies\.json|sessionid|example\.com|cookie-value-should-not-render/i);
+
+    fireEvent.click(within(panel).getByRole("button", { name: /replace cookies/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/ThePrivator JSON import replaced existing cookies/i));
+    expect(panel).toHaveTextContent(/Imported\s*5/i);
+    expect(panel).toHaveTextContent(/Replaced\s*4/i);
+    expect(panel).toHaveTextContent(/Skipped\s*1/i);
+    expect(panel).toHaveTextContent(/COOKIE_REPLACE_PARTIAL/i);
+    expect(panel).toHaveTextContent(/Request\s*bridge-cookie-replace-1/i);
+    expect(mockOpen).toHaveBeenCalledWith({
+      title: "Replace profile cookies from a cookie file",
+      multiple: false,
+      filters: [{ name: "Cookie files", extensions: ["txt", "json"] }],
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_replace", {
+      profileId: profile.id,
+      sourcePath,
+    });
+    expect(panel).not.toHaveTextContent(/theprivator-selected|cookies\.json|sessionid|example\.com|cookie-value-should-not-render/i);
+  });
+
+  it("disables cookie portability controls while the profile is running", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const running = chromiumRunningProfile({ profileId: profile.id, pid: 9191 });
+    mockStartup([profile], chromiumStatusResult({ profiles: [running] }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /cookie portability/i });
+    expect(within(panel).getByRole("button", { name: /export netscape/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /export theprivator json/i })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: /replace cookies/i })).toBeDisabled();
+    expect(panel).toHaveTextContent(/stopped-profile only/i);
+    expect(commandCalls("profile_cookies_export")).toHaveLength(0);
+    expect(commandCalls("profile_cookies_replace")).toHaveLength(0);
+  });
+
+  it("rejects malformed native dialog selections before cookie portability invokes", async () => {
+    const profile = profileRecord({ name: "Research" });
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce([] as unknown as string);
+    mockOpen.mockResolvedValueOnce("");
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /cookie portability/i });
+
+    fireEvent.click(within(panel).getByRole("button", { name: /export theprivator json/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/PORTABILITY_DIALOG_SELECTION_INVALID/i));
+    expect(panel).toHaveTextContent(/multiple file selections/i);
+    expect(commandCalls("profile_cookies_export")).toHaveLength(0);
+
+    fireEvent.click(within(panel).getByRole("button", { name: /replace cookies/i }));
+    await waitFor(() => expect(panel).toHaveTextContent(/invalid file selection/i));
+    expect(commandCalls("profile_cookies_replace")).toHaveLength(0);
+  });
+
+  it("renders typed cookie portability busy errors with diagnostic lookup and no unsafe context", async () => {
+    const profile = profileRecord({ name: "Research" });
+    const detailRef = "sidecar-cookie-busy-detail";
+    const selectedPath = "/tmp/theprivator-selected/cookies.txt";
+    mockStartup([profile]);
+    mockSave.mockResolvedValueOnce(selectedPath);
+    mockInvoke
+      .mockRejectedValueOnce({
+        ...profileError("PORTABILITY_PROFILE_BUSY", "Profile is running or lease-active; stop it before moving cookies.", detailRef),
+        unsafeContext: "example.com sessionid cookie-value-should-not-render /tmp/theprivator-selected/cookies.txt profile-store/profiles/user-data",
+      })
+      .mockResolvedValueOnce(diagnosticLookupResult(detailRef, {
+        entries: [diagnosticEntry(detailRef, { errorCode: "PORTABILITY_PROFILE_BUSY", method: "portability.cookies.export" })],
+      }));
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    const panel = within(card).getByRole("region", { name: /cookie portability/i });
+    fireEvent.click(within(panel).getByRole("button", { name: /export netscape/i }));
+
+    await waitFor(() => expect(panel).toHaveTextContent(/PORTABILITY_PROFILE_BUSY/i));
+    expect(panel).toHaveTextContent(/Profile is running or lease-active/i);
+    expect(panel).toHaveTextContent(/Sourcesidecar/i);
+    expect(panel).toHaveTextContent(/Recoverableyes/i);
+    expect(panel).toHaveTextContent(detailRef);
+    expect(panel).not.toHaveTextContent(/example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|profile-store\/profiles\/user-data/i);
+
+    fireEvent.click(within(panel).getByRole("button", { name: new RegExp(`lookup diagnostics for ${detailRef}`, "i") }));
+
+    const lookupPanel = await screen.findByLabelText(/diagnostic lookup/i);
+    expect(lookupPanel).toHaveTextContent(/PORTABILITY_PROFILE_BUSY/i);
+    expect(lookupPanel).toHaveTextContent(/portability\.cookies\.export/i);
+    expect(lookupPanel).toHaveTextContent(detailRef);
+    expect(lookupPanel).not.toHaveTextContent(/example\.com|sessionid|cookie-value-should-not-render|theprivator-selected|profile-store\/profiles\/user-data/i);
+  });
+
+  it("does not add direct browser or Tauri filesystem bypasses for legacy import and cookie portability", () => {
     const source = appSource();
 
     expect(source).toContain("scanLegacyProfiles");
@@ -3096,9 +3310,12 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("getAutomationApiStatus");
     expect(source).toContain("copyAutomationApiToken");
     expect(source).toContain("stopAutomationApi");
+    expect(source).toContain("exportProfileCookies");
+    expect(source).toContain("replaceProfileCookies");
+    expect(source).toContain("@tauri-apps/plugin-dialog");
     expect(source).not.toMatch(/value=\"pac\"|value='pac'|value=\"system\"|value='system'|value=\"directFallback\"|value='directFallback'/);
     expect(source).not.toMatch(/PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/);
-    expect(source).not.toMatch(/@tauri-apps\/plugin-(dialog|fs|shell)/);
+    expect(source).not.toMatch(/@tauri-apps\/plugin-(fs|shell)/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
     expect(source).not.toMatch(/type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/);

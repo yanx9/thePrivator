@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   createIdentityDraftState,
   formatIdentityExpectedValueSummary,
@@ -32,6 +33,7 @@ import {
   copyAutomationApiToken,
   createProfile,
   deleteProfile,
+  exportProfileCookies,
   getAutomationApiStatus,
   getChromiumStatus,
   getIdentityAuditPlan,
@@ -47,6 +49,7 @@ import {
   stopAutomationApi,
   stopChromiumProfile,
   triggerSidecarDiagnosticFailure,
+  replaceProfileCookies,
   updateProfile,
   updateProfileIdentity,
   updateProfileProxy,
@@ -59,6 +62,10 @@ import type {
   ChromiumRunningProfileState,
   ChromiumStatusSnapshot,
   ChromiumStoppedProfileState,
+  CookieExportFormat,
+  CookieExportSnapshot,
+  CookiePortabilityWarning,
+  CookieReplaceSnapshot,
   DiagnosticEntry,
   DiagnosticLookupResult,
   LegacyImportOutcome,
@@ -80,6 +87,7 @@ import type {
   ProxyCheckSnapshot,
   ProxyProtocol,
   SidecarClientError,
+  SidecarErrorSource,
   SidecarHealthSnapshot,
   SidecarUiPhase,
 } from "./sidecar/types";
@@ -279,12 +287,59 @@ type ProxyCheckRuntimeGuard = {
   reason: string | null;
 };
 
+type CookiePortabilityPhase =
+  | "idle"
+  | "choosing-file"
+  | "exporting"
+  | "replacing"
+  | "success"
+  | Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+type CookiePortabilityAction = "export-netscape" | "export-theprivator-json" | "replace";
+
+type CookiePortabilityError = {
+  profileId: string;
+  action: CookiePortabilityAction;
+  error: SidecarClientError;
+  occurredAt: string;
+};
+
+type CookiePortabilitySuccess = {
+  profileId: string;
+  action: CookiePortabilityAction;
+  snapshot: CookieExportSnapshot | CookieReplaceSnapshot;
+  occurredAt: string;
+};
+
+type CookiePortabilityPanelState = {
+  phase: CookiePortabilityPhase;
+  currentAction: CookiePortabilityAction | null;
+  lastSuccess: CookiePortabilitySuccess | null;
+  warnings: CookiePortabilityWarning[];
+  error: CookiePortabilityError | null;
+};
+
+type CookiePortabilityStateByProfile = Record<string, CookiePortabilityPanelState>;
+
+type CookiePortabilityRuntimeGuard = {
+  isKnown: boolean;
+  disabledReason: string | null;
+};
+
 const INITIAL_PROXY_CHECK_PANEL_STATE: ProxyCheckPanelState = {
   phase: "idle",
   currentAction: null,
   snapshot: null,
   error: null,
   requestedAt: null,
+};
+
+const INITIAL_COOKIE_PORTABILITY_PANEL_STATE: CookiePortabilityPanelState = {
+  phase: "idle",
+  currentAction: null,
+  lastSuccess: null,
+  warnings: [],
+  error: null,
 };
 
 type LegacySelectionState = Record<string, boolean>;
@@ -481,6 +536,27 @@ const PROXY_CHECK_ACTION_LABELS: Record<ProxyCheckAction, string> = {
   "saved-proof": "Run saved proxy proof",
 };
 
+const COOKIE_PORTABILITY_PHASE_LABELS: Record<CookiePortabilityPhase, string> = {
+  idle: "No cookie portability operation has run",
+  "choosing-file": "Waiting for native dialog selection",
+  exporting: "Exporting cookies through the sidecar",
+  replacing: "Replacing cookies through the sidecar",
+  success: "Cookie portability operation completed",
+  "recoverable-error": "Recoverable cookie portability error",
+  "bridge-error": "Cookie portability bridge error",
+};
+
+const COOKIE_PORTABILITY_ACTION_LABELS: Record<CookiePortabilityAction, string> = {
+  "export-netscape": "Export Netscape cookies.txt",
+  "export-theprivator-json": "Export ThePrivator JSON",
+  replace: "Replace cookies",
+};
+
+const COOKIE_EXPORT_FORMAT_LABELS: Record<CookieExportFormat, string> = {
+  netscape: "Netscape cookies.txt",
+  "theprivator-json": "ThePrivator JSON",
+};
+
 const EMPTY_DETAIL_REF = "Waiting for first sidecar response";
 const CHROMIUM_STATUS_POLL_MS = 2800;
 
@@ -543,6 +619,7 @@ export function App() {
   const [proxyConfigError, setProxyConfigError] = useState<ProxyConfigError | null>(null);
   const [proxyConfigSuccess, setProxyConfigSuccess] = useState<ProxyConfigSuccess | null>(null);
   const [proxyCheckByProfile, setProxyCheckByProfile] = useState<ProxyCheckStateByProfile>({});
+  const [cookiePortabilityByProfile, setCookiePortabilityByProfile] = useState<CookiePortabilityStateByProfile>({});
 
   const healthInFlightRef = useRef(false);
   const automationApiActionInFlightRef = useRef(false);
@@ -555,6 +632,8 @@ export function App() {
   const proxyConfigRequestIdRef = useRef(0);
   const proxyCheckRequestIdRef = useRef(0);
   const proxyCheckRequestByProfileRef = useRef<Record<string, number>>({});
+  const cookiePortabilityRequestIdRef = useRef(0);
+  const cookiePortabilityRequestByProfileRef = useRef<Record<string, number>>({});
   const chromiumRuntimeByProfileRef = useRef<Record<string, ChromiumRunningProfileState>>({});
   const chromiumMutationRef = useRef<ChromiumLifecycleMutation>(null);
   const profileIdsRef = useRef<Set<string>>(new Set());
@@ -567,9 +646,26 @@ export function App() {
         delete proxyCheckRequestByProfileRef.current[profileId];
       }
     });
+    Object.keys(cookiePortabilityRequestByProfileRef.current).forEach((profileId) => {
+      if (!nextProfileIds.has(profileId)) {
+        delete cookiePortabilityRequestByProfileRef.current[profileId];
+      }
+    });
     setProxyCheckByProfile((current) => {
       let changed = false;
       const next: ProxyCheckStateByProfile = {};
+      Object.entries(current).forEach(([profileId, state]) => {
+        if (nextProfileIds.has(profileId)) {
+          next[profileId] = state;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+    setCookiePortabilityByProfile((current) => {
+      let changed = false;
+      const next: CookiePortabilityStateByProfile = {};
       Object.entries(current).forEach(([profileId, state]) => {
         if (nextProfileIds.has(profileId)) {
           next[profileId] = state;
@@ -1361,6 +1457,274 @@ export function App() {
       return next;
     });
   }, []);
+
+  const getCookiePortabilityDisabledReason = useCallback(
+    (profile: ProfileRecord, options: { ignoreActiveOperation?: boolean } = {}): string | null => {
+      const lifecycleMutation = chromiumMutationRef.current;
+      const currentState = cookiePortabilityByProfile[profile.id];
+
+      if (chromiumPhase !== "ready") {
+        return `Chromium lifecycle status is ${chromiumPhase}; cookie portability fails closed until status refresh confirms the profile is stopped.`;
+      }
+      if (isProfileLoading || mutationPhase !== "idle") {
+        return "Profile loading or mutation is in progress; wait before moving cookies.";
+      }
+      if (chromiumRuntimeByProfileRef.current[profile.id]) {
+        return "Cookie portability is stopped-profile only. Stop Chromium before exporting or replacing cookies.";
+      }
+      if (lifecycleMutation !== null) {
+        return `Chromium is ${lifecycleMutation.phase}; cookie portability fails closed until the lifecycle action settles.`;
+      }
+      if (!options.ignoreActiveOperation && (currentState?.phase === "choosing-file" || currentState?.phase === "exporting" || currentState?.phase === "replacing")) {
+        return "A cookie portability operation is already running for this profile.";
+      }
+
+      return null;
+    },
+    [chromiumPhase, cookiePortabilityByProfile, isProfileLoading, mutationPhase],
+  );
+
+  const recordCookiePortabilityError = useCallback((profileId: string, action: CookiePortabilityAction, error: SidecarClientError) => {
+    setCookiePortabilityByProfile((current) => {
+      const previous = current[profileId] ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+      return {
+        ...current,
+        [profileId]: {
+          ...previous,
+          phase: error.phase,
+          currentAction: null,
+          error: {
+            profileId,
+            action,
+            error,
+            occurredAt: new Date().toISOString(),
+          },
+        },
+      };
+    });
+  }, []);
+
+  const finishCookiePortabilityCancel = useCallback((profileId: string) => {
+    setCookiePortabilityByProfile((current) => {
+      const previous = current[profileId] ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+      return {
+        ...current,
+        [profileId]: {
+          ...previous,
+          phase: previous.lastSuccess ? "success" : "idle",
+          currentAction: null,
+          error: null,
+        },
+      };
+    });
+  }, []);
+
+  const startCookiePortabilityAction = useCallback((profileId: string, action: CookiePortabilityAction) => {
+    setCookiePortabilityByProfile((current) => {
+      const previous = current[profileId] ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+      return {
+        ...current,
+        [profileId]: {
+          ...previous,
+          phase: "choosing-file",
+          currentAction: action,
+          error: null,
+        },
+      };
+    });
+  }, []);
+
+  const runProfileCookieExport = useCallback(
+    async (profile: ProfileRecord, action: Extract<CookiePortabilityAction, "export-netscape" | "export-theprivator-json">, format: CookieExportFormat) => {
+      const disabledReason = getCookiePortabilityDisabledReason(profile);
+      if (disabledReason) {
+        recordCookiePortabilityError(profile.id, action, makeCookiePortabilityUiError("PORTABILITY_UI_BUSY", disabledReason));
+        return;
+      }
+
+      const requestId = cookiePortabilityRequestIdRef.current + 1;
+      cookiePortabilityRequestIdRef.current = requestId;
+      cookiePortabilityRequestByProfileRef.current[profile.id] = requestId;
+      startCookiePortabilityAction(profile.id, action);
+
+      try {
+        const destinationPath = await save({
+          title: format === "netscape" ? "Export cookies as Netscape cookies.txt" : "Export cookies as ThePrivator JSON",
+          filters: [
+            {
+              name: COOKIE_EXPORT_FORMAT_LABELS[format],
+              extensions: [format === "netscape" ? "txt" : "json"],
+            },
+          ],
+        });
+
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        const safeDestinationPath = parseDialogPathSelection(destinationPath, "save");
+        if (safeDestinationPath === null) {
+          finishCookiePortabilityCancel(profile.id);
+          return;
+        }
+
+        const secondDisabledReason = getCookiePortabilityDisabledReason(profile, { ignoreActiveOperation: true });
+        if (secondDisabledReason) {
+          recordCookiePortabilityError(profile.id, action, makeCookiePortabilityUiError("PORTABILITY_UI_BUSY", secondDisabledReason));
+          return;
+        }
+
+        setCookiePortabilityByProfile((current) => {
+          const previous = current[profile.id] ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+          return {
+            ...current,
+            [profile.id]: {
+              ...previous,
+              phase: "exporting",
+              currentAction: action,
+              error: null,
+            },
+          };
+        });
+
+        const snapshot = await exportProfileCookies(profile.id, safeDestinationPath, format);
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        setCookiePortabilityByProfile((current) => ({
+          ...current,
+          [profile.id]: {
+            phase: "success",
+            currentAction: null,
+            lastSuccess: {
+              profileId: profile.id,
+              action,
+              snapshot,
+              occurredAt: new Date().toISOString(),
+            },
+            warnings: snapshot.warnings,
+            error: null,
+          },
+        }));
+      } catch (error) {
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+        const clientError = error instanceof DialogSelectionError
+          ? error.toClientError()
+          : isSafeUiError(error)
+            ? error
+            : makeCookiePortabilityDialogError();
+        recordCookiePortabilityError(profile.id, action, clientError);
+      }
+    },
+    [finishCookiePortabilityCancel, getCookiePortabilityDisabledReason, recordCookiePortabilityError, startCookiePortabilityAction],
+  );
+
+  const handleExportNetscapeCookies = useCallback(
+    (profile: ProfileRecord) => {
+      void runProfileCookieExport(profile, "export-netscape", "netscape");
+    },
+    [runProfileCookieExport],
+  );
+
+  const handleExportThePrivatorCookies = useCallback(
+    (profile: ProfileRecord) => {
+      void runProfileCookieExport(profile, "export-theprivator-json", "theprivator-json");
+    },
+    [runProfileCookieExport],
+  );
+
+  const handleReplaceProfileCookies = useCallback(
+    async (profile: ProfileRecord) => {
+      const action: CookiePortabilityAction = "replace";
+      const disabledReason = getCookiePortabilityDisabledReason(profile);
+      if (disabledReason) {
+        recordCookiePortabilityError(profile.id, action, makeCookiePortabilityUiError("PORTABILITY_UI_BUSY", disabledReason));
+        return;
+      }
+
+      const requestId = cookiePortabilityRequestIdRef.current + 1;
+      cookiePortabilityRequestIdRef.current = requestId;
+      cookiePortabilityRequestByProfileRef.current[profile.id] = requestId;
+      startCookiePortabilityAction(profile.id, action);
+
+      try {
+        const sourcePath = await open({
+          title: "Replace profile cookies from a cookie file",
+          multiple: false,
+          filters: [
+            {
+              name: "Cookie files",
+              extensions: ["txt", "json"],
+            },
+          ],
+        });
+
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        const safeSourcePath = parseDialogPathSelection(sourcePath, "open");
+        if (safeSourcePath === null) {
+          finishCookiePortabilityCancel(profile.id);
+          return;
+        }
+
+        const secondDisabledReason = getCookiePortabilityDisabledReason(profile, { ignoreActiveOperation: true });
+        if (secondDisabledReason) {
+          recordCookiePortabilityError(profile.id, action, makeCookiePortabilityUiError("PORTABILITY_UI_BUSY", secondDisabledReason));
+          return;
+        }
+
+        setCookiePortabilityByProfile((current) => {
+          const previous = current[profile.id] ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+          return {
+            ...current,
+            [profile.id]: {
+              ...previous,
+              phase: "replacing",
+              currentAction: action,
+              error: null,
+            },
+          };
+        });
+
+        const snapshot = await replaceProfileCookies(profile.id, safeSourcePath);
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+
+        setCookiePortabilityByProfile((current) => ({
+          ...current,
+          [profile.id]: {
+            phase: "success",
+            currentAction: null,
+            lastSuccess: {
+              profileId: profile.id,
+              action,
+              snapshot,
+              occurredAt: new Date().toISOString(),
+            },
+            warnings: snapshot.warnings,
+            error: null,
+          },
+        }));
+      } catch (error) {
+        if (cookiePortabilityRequestByProfileRef.current[profile.id] !== requestId || !profileIdsRef.current.has(profile.id)) {
+          return;
+        }
+        const clientError = error instanceof DialogSelectionError
+          ? error.toClientError()
+          : isSafeUiError(error)
+            ? error
+            : makeCookiePortabilityDialogError();
+        recordCookiePortabilityError(profile.id, action, clientError);
+      }
+    },
+    [finishCookiePortabilityCancel, getCookiePortabilityDisabledReason, recordCookiePortabilityError, startCookiePortabilityAction],
+  );
 
   const closeProxyConfig = useCallback(() => {
     proxyConfigRequestIdRef.current += 1;
@@ -2181,6 +2545,11 @@ export function App() {
                     success: proxyConfigSuccess?.profileId === profile.id ? proxyConfigSuccess : null,
                   }}
                   proxyCheckState={proxyCheckByProfile[profile.id] ?? null}
+                  cookiePortabilityState={cookiePortabilityByProfile[profile.id] ?? null}
+                  cookiePortabilityRuntimeGuard={{
+                    isKnown: chromiumPhase === "ready",
+                    disabledReason: chromiumPhase === "ready" ? null : `Chromium lifecycle status is ${chromiumPhase}; cookie portability fails closed until status refresh confirms the profile is stopped.`,
+                  }}
                   proxyCheckRuntimeGuard={{
                     isKnown: chromiumPhase === "ready",
                     reason: chromiumPhase === "ready" ? null : `Chromium runtime status is ${chromiumPhase}; saved proxy proof fails closed until status refresh confirms no conflicting browser is running.`,
@@ -2198,6 +2567,8 @@ export function App() {
                   onDeleteRequest={setDeleteCandidate}
                   onDiagnosticLookup={runDiagnosticLookup}
                   onEditNameChange={(name) => setEditing({ id: profile.id, name })}
+                  onExportNetscapeCookies={handleExportNetscapeCookies}
+                  onExportThePrivatorCookies={handleExportThePrivatorCookies}
                   onIdentityApplyPreset={handleApplyIdentityPreset}
                   onIdentityAuditClose={closeIdentityAuditPanel}
                   onIdentityAuditOpen={loadIdentityAuditPlan}
@@ -2228,6 +2599,7 @@ export function App() {
                     setEditing({ id: profile.id, name: profile.name });
                   }}
                   onRenameSubmit={handleRenameSubmit}
+                  onReplaceProfileCookies={handleReplaceProfileCookies}
                   onStop={handleStopProfile}
                 />
               ))}
@@ -2855,6 +3227,8 @@ function ProfileCard({
   proxyConfigState,
   proxyCheckRuntimeGuard,
   proxyCheckState,
+  cookiePortabilityRuntimeGuard,
+  cookiePortabilityState,
   isLifecycleActionBusy,
   isProfileBusy,
   lifecycleError,
@@ -2865,6 +3239,8 @@ function ProfileCard({
   onDeleteRequest,
   onDiagnosticLookup,
   onEditNameChange,
+  onExportNetscapeCookies,
+  onExportThePrivatorCookies,
   onIdentityApplyPreset,
   onIdentityAuditClose,
   onIdentityAuditOpen,
@@ -2892,6 +3268,7 @@ function ProfileCard({
   onRenameCancel,
   onRenameRequest,
   onRenameSubmit,
+  onReplaceProfileCookies,
   onStop,
   profile,
   reconciledState,
@@ -2905,6 +3282,8 @@ function ProfileCard({
   proxyConfigState: ProxyConfigPanelState;
   proxyCheckRuntimeGuard: ProxyCheckRuntimeGuard;
   proxyCheckState: ProxyCheckPanelState | null;
+  cookiePortabilityRuntimeGuard: CookiePortabilityRuntimeGuard;
+  cookiePortabilityState: CookiePortabilityPanelState | null;
   isLifecycleActionBusy: boolean;
   isProfileBusy: boolean;
   lifecycleError: ChromiumLifecycleError | null;
@@ -2915,6 +3294,8 @@ function ProfileCard({
   onDeleteRequest: (profile: ProfileRecord) => void;
   onDiagnosticLookup: (detailRef: string) => void;
   onEditNameChange: (name: string) => void;
+  onExportNetscapeCookies: (profile: ProfileRecord) => void;
+  onExportThePrivatorCookies: (profile: ProfileRecord) => void;
   onIdentityApplyPreset: (profile: ProfileRecord, presetId: string) => void;
   onIdentityAuditClose: () => void;
   onIdentityAuditOpen: (profile: ProfileRecord) => void;
@@ -2942,6 +3323,7 @@ function ProfileCard({
   onRenameCancel: () => void;
   onRenameRequest: () => void;
   onRenameSubmit: (event: FormEvent<HTMLFormElement>, profile: ProfileRecord) => void;
+  onReplaceProfileCookies: (profile: ProfileRecord) => void;
   onStop: (profile: ProfileRecord) => void;
   profile: ProfileRecord;
   reconciledState: ChromiumStoppedProfileState | null;
@@ -2968,6 +3350,9 @@ function ProfileCard({
     : null;
   const proxyProofRuntimeProtectionReason = isRuntimeProtected
     ? `Saved proxy proof is disabled while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium and wait for lifecycle state to settle before proving routing against saved profile truth.`
+    : null;
+  const cookieRuntimeProtectionReason = isRuntimeProtected
+    ? `Cookie portability is stopped-profile only while Chromium is ${runtimeLabel.toLowerCase()}. Stop Chromium and wait for lifecycle state to settle before exporting or replacing cookies.`
     : null;
 
   const retryLifecycle = () => {
@@ -3061,6 +3446,20 @@ function ProfileCard({
         state={proxyCheckState}
         onDiagnosticLookup={onDiagnosticLookup}
         onRunProof={onProxyProofCheck}
+      />
+
+      <CookiePortabilityPanel
+        diagnosticLookupState={diagnosticLookupState}
+        isLifecycleActionBusy={isLifecycleActionBusy}
+        isProfileBusy={isProfileBusy}
+        profile={profile}
+        runtimeGuard={cookiePortabilityRuntimeGuard}
+        runtimeProtectionReason={cookieRuntimeProtectionReason}
+        state={cookiePortabilityState}
+        onDiagnosticLookup={onDiagnosticLookup}
+        onExportNetscape={onExportNetscapeCookies}
+        onExportThePrivator={onExportThePrivatorCookies}
+        onReplace={onReplaceProfileCookies}
       />
 
       <ProfileIdentityAuditSummary
@@ -3799,6 +4198,189 @@ function SavedProxyProofPanel({
           onDiagnosticLookup={onDiagnosticLookup}
         />
       ) : null}
+    </section>
+  );
+}
+
+function CookiePortabilityPanel({
+  diagnosticLookupState,
+  isLifecycleActionBusy,
+  isProfileBusy,
+  profile,
+  runtimeGuard,
+  runtimeProtectionReason,
+  state,
+  onDiagnosticLookup,
+  onExportNetscape,
+  onExportThePrivator,
+  onReplace,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  isLifecycleActionBusy: boolean;
+  isProfileBusy: boolean;
+  profile: ProfileRecord;
+  runtimeGuard: CookiePortabilityRuntimeGuard;
+  runtimeProtectionReason: string | null;
+  state: CookiePortabilityPanelState | null;
+  onDiagnosticLookup: (detailRef: string) => void;
+  onExportNetscape: (profile: ProfileRecord) => void;
+  onExportThePrivator: (profile: ProfileRecord) => void;
+  onReplace: (profile: ProfileRecord) => void;
+}) {
+  const currentState = state ?? INITIAL_COOKIE_PORTABILITY_PANEL_STATE;
+  const isChoosing = currentState.phase === "choosing-file";
+  const isExporting = currentState.phase === "exporting";
+  const isReplacing = currentState.phase === "replacing";
+  const isRunningOperation = isChoosing || isExporting || isReplacing;
+  const headingId = `cookie-portability-heading-${profile.id}`;
+  const actionHintId = `cookie-portability-action-hint-${profile.id}`;
+  const disabledReason = runtimeProtectionReason
+    ?? (!runtimeGuard.isKnown
+      ? runtimeGuard.disabledReason ?? "Chromium runtime status is unknown; cookie portability fails closed until status refresh confirms the profile is stopped."
+      : isProfileBusy
+        ? "Profile loading or mutation is in progress; wait before moving cookies."
+        : isLifecycleActionBusy
+          ? "A Chromium lifecycle action is in progress; cookie portability fails closed until runtime state settles."
+          : isRunningOperation
+            ? "A cookie portability operation is already running for this profile."
+            : null);
+  const canRunAction = disabledReason === null;
+  const currentActionLabel = currentState.currentAction ? COOKIE_PORTABILITY_ACTION_LABELS[currentState.currentAction] : "No active cookie portability action";
+
+  return (
+    <section className="cookie-portability-panel" aria-labelledby={headingId}>
+      <div className="cookie-portability-panel__header">
+        <div>
+          <p className="signal-label">Cookie portability</p>
+          <h4 id={headingId}>Cookie portability for stopped profiles</h4>
+          <p>
+            Use native dialogs to choose a destination or source file. The UI never reads files and never renders selected paths,
+            cookie domains, names, or values.
+          </p>
+        </div>
+        <span className="mini-phase" aria-label={`Cookie portability phase: ${currentState.phase}`}>
+          {currentState.phase}
+        </span>
+      </div>
+
+      <dl className="metric-list metric-list--inline cookie-portability-observability" aria-label={`${profile.name} cookie portability observability`}>
+        <Metric label="Cookie portability phase" value={`${currentState.phase} · ${COOKIE_PORTABILITY_PHASE_LABELS[currentState.phase]}`} />
+        <Metric label="Current action" value={currentActionLabel} />
+        <Metric label="Last operation" value={currentState.lastSuccess ? COOKIE_PORTABILITY_ACTION_LABELS[currentState.lastSuccess.action] : null} />
+        <Metric label="Last format" value={currentState.lastSuccess ? COOKIE_EXPORT_FORMAT_LABELS[currentState.lastSuccess.snapshot.format] : null} />
+        <Metric label="Warnings" value={currentState.warnings.length} />
+        <Metric label="Request" value={currentState.lastSuccess?.snapshot.requestId} />
+        <Metric label="Bridge duration" value={currentState.lastSuccess ? formatDuration(currentState.lastSuccess.snapshot.bridgeDurationMs) : undefined} />
+        <Metric label="detailRef" value={currentState.error?.error.detailRef} />
+      </dl>
+
+      {isRunningOperation ? (
+        <div className="cookie-portability-status" role="status" aria-live="polite" aria-atomic="true">
+          {isChoosing
+            ? "Waiting for the native dialog to return a single selected file path before any sidecar mutation starts."
+            : isExporting
+              ? "Exporting cookies through the fixed sidecar cookie export command…"
+              : "Replacing cookies through the fixed sidecar cookie replace command…"}
+        </div>
+      ) : null}
+
+      <div className="cookie-portability-actions">
+        <button type="button" className="button--secondary" disabled={!canRunAction} aria-describedby={actionHintId} onClick={() => onExportNetscape(profile)}>
+          {currentState.currentAction === "export-netscape" ? "Exporting Netscape…" : "Export Netscape"}
+        </button>
+        <button type="button" className="button--secondary" disabled={!canRunAction} aria-describedby={actionHintId} onClick={() => onExportThePrivator(profile)}>
+          {currentState.currentAction === "export-theprivator-json" ? "Exporting JSON…" : "Export ThePrivator JSON"}
+        </button>
+        <button type="button" disabled={!canRunAction} aria-describedby={actionHintId} onClick={() => onReplace(profile)}>
+          {currentState.currentAction === "replace" ? "Replacing cookies…" : "Replace cookies"}
+        </button>
+      </div>
+      <p id={actionHintId} className="cookie-portability-hint" role="status" aria-live="polite">
+        {disabledReason
+          ?? "Available because this profile is stopped and no profile or lifecycle mutation is active. Dialog cancel is a no-op."}
+      </p>
+
+      {currentState.lastSuccess ? <CookiePortabilitySuccessFeedback state={currentState.lastSuccess} /> : null}
+
+      {currentState.error ? (
+        <CookiePortabilityErrorFeedback
+          diagnosticLookupState={diagnosticLookupState}
+          state={currentState.error}
+          onDiagnosticLookup={onDiagnosticLookup}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function CookiePortabilitySuccessFeedback({ state }: { state: CookiePortabilitySuccess }) {
+  const snapshot = state.snapshot;
+  const isExport = snapshot.operation === "export";
+  const heading = isExport ? `${COOKIE_EXPORT_FORMAT_LABELS[snapshot.format]} export completed.` : `${COOKIE_EXPORT_FORMAT_LABELS[snapshot.format]} import replaced existing cookies.`;
+  const copy = isExport
+    ? "The sidecar wrote the selected destination without returning the path or cookie contents to the UI."
+    : "The sidecar replaced profile cookies from the selected source without returning the path or cookie contents to the UI.";
+
+  return (
+    <section className="cookie-portability-success" role="status" aria-live="polite" aria-atomic="true">
+      <strong>{heading}</strong>
+      <p>{copy}</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Operation" value={formatLiteral(snapshot.operation)} />
+        <Metric label="Format" value={COOKIE_EXPORT_FORMAT_LABELS[snapshot.format]} />
+        <Metric label="Exported" value={isExport ? snapshot.exportedCount : undefined} />
+        <Metric label="Imported" value={!isExport ? snapshot.importedCount : undefined} />
+        <Metric label="Replaced" value={!isExport ? snapshot.replacedCount : undefined} />
+        <Metric label="Skipped" value={snapshot.skippedCount} />
+        <Metric label="Warnings" value={snapshot.warningCount} />
+        <Metric label="Request" value={snapshot.requestId} />
+        <Metric label="Bridge duration" value={formatDuration(snapshot.bridgeDurationMs)} />
+        <Metric label="Received" value={formatProfileTimestamp(snapshot.receivedAt)} />
+        <Metric label="Recorded" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      {snapshot.warnings.length ? <CookiePortabilityWarningList warnings={snapshot.warnings} /> : null}
+    </section>
+  );
+}
+
+function CookiePortabilityWarningList({ warnings }: { warnings: CookiePortabilityWarning[] }) {
+  return (
+    <div className="cookie-portability-warning-list" role="list" aria-label="Cookie portability warnings">
+      {warnings.map((warning) => (
+        <article key={warning.code} className="cookie-portability-warning" role="listitem">
+          <strong>{warning.code}</strong>
+          <p>{warning.message}</p>
+          <dl className="metric-list metric-list--inline">
+            <Metric label="Count" value={warning.count} />
+          </dl>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function CookiePortabilityErrorFeedback({
+  diagnosticLookupState,
+  state,
+  onDiagnosticLookup,
+}: {
+  diagnosticLookupState: DiagnosticLookupState;
+  state: CookiePortabilityError;
+  onDiagnosticLookup: (detailRef: string) => void;
+}) {
+  return (
+    <section className="cookie-portability-error" role="alert" aria-live="assertive" aria-atomic="true">
+      <strong>{COOKIE_PORTABILITY_ACTION_LABELS[state.action]} failed safely.</strong>
+      <p>{state.error.message}</p>
+      <p className="cookie-portability-hint">Previous successful metadata remains visible, and no selected path or cookie content is rendered.</p>
+      <dl className="metric-list metric-list--inline">
+        <Metric label="Code" value={state.error.code} />
+        <Metric label="Source" value={state.error.source} />
+        <Metric label="Recoverable" value={state.error.recoverable ? "yes" : "no"} />
+        <Metric label="detailRef" value={state.error.detailRef} />
+        <Metric label="Occurred" value={formatProfileTimestamp(state.occurredAt)} />
+      </dl>
+      <DiagnosticReference detailRef={state.error.detailRef} state={diagnosticLookupState} onLookup={onDiagnosticLookup} />
     </section>
   );
 }
@@ -5400,6 +5982,75 @@ function formatReconciliation(value: ChromiumStoppedProfileState | null): string
   }
 
   return `${value.profileId} ${value.termination} at ${formatProfileTimestamp(value.stoppedAt)}`;
+}
+
+class DialogSelectionError extends Error {
+  readonly code: string;
+  readonly source: SidecarErrorSource;
+  readonly phase: Extract<SidecarUiPhase, "recoverable-error" | "bridge-error">;
+
+  constructor(code: string, message: string, source: SidecarErrorSource = "ui", phase: Extract<SidecarUiPhase, "recoverable-error" | "bridge-error"> = "recoverable-error") {
+    super(message);
+    this.name = "DialogSelectionError";
+    this.code = code;
+    this.source = source;
+    this.phase = phase;
+  }
+
+  toClientError(): SidecarClientError {
+    return {
+      code: this.code,
+      message: this.message,
+      recoverable: true,
+      detailRef: `ui-portability-${this.code.toLowerCase().replace(/_/g, "-")}`,
+      source: this.source,
+      phase: this.phase,
+    };
+  }
+}
+
+function parseDialogPathSelection(value: unknown, dialogKind: "open" | "save"): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    throw new DialogSelectionError(
+      "PORTABILITY_DIALOG_SELECTION_INVALID",
+      `Native ${dialogKind} dialog returned multiple file selections; no cookie command was started.`,
+    );
+  }
+
+  throw new DialogSelectionError(
+    "PORTABILITY_DIALOG_SELECTION_INVALID",
+    `Native ${dialogKind} dialog returned an invalid file selection; no cookie command was started.`,
+  );
+}
+
+function makeCookiePortabilityUiError(code: string, message: string): SidecarClientError {
+  return {
+    code,
+    message,
+    recoverable: true,
+    detailRef: `ui-portability-${code.toLowerCase().replace(/_/g, "-")}`,
+    source: "ui",
+    phase: "recoverable-error",
+  };
+}
+
+function makeCookiePortabilityDialogError(): SidecarClientError {
+  return {
+    code: "PORTABILITY_DIALOG_FAILED",
+    message: "Native file dialog failed before any cookie command started.",
+    recoverable: true,
+    detailRef: "ui-portability-dialog-failed",
+    source: "bridge",
+    phase: "bridge-error",
+  };
 }
 
 function formatLegacyUserDataStatus(value: LegacyScanCandidate["userData"]["status"]): string {
