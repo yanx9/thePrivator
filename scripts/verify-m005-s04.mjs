@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { accessSync, closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter as hostPathDelimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -53,6 +53,7 @@ const REDACTED_VALUE = "<redacted>";
 const FRESHNESS_SKEW_MS = 1_500;
 const LINUX_WEBDRIVER_TOOL_CLASSES = Object.freeze(["tauri-driver", "WebKitWebDriver", "Chromium"]);
 const WAYLAND_TYPE_TOOL = "wtype";
+const HYPRLAND_CONTROL_TOOL = "hyprctl";
 const WAYLAND_CLIPBOARD_TOOLS = Object.freeze(["wl-copy", "wl-paste"]);
 const X11_TYPE_TOOL = "xdotool";
 const X11_CLIPBOARD_TOOLS = Object.freeze(["xclip", "xsel"]);
@@ -1366,30 +1367,112 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+function failNativeDialogTool(command, result, context, phase) {
+  const failure = formatM005S04CommandFailure(command, result, context, phase);
+  fail("M005/S04 native dialog automation command failed.", { ...failure, phase, markerClass: "native_dialog_tool_failed" });
+}
+
+function timeoutError() {
+  const error = new Error("native dialog tool timed out");
+  error.code = "ETIMEDOUT";
+  return error;
+}
+
 function runNativeDialogTool(command, args = [], { input = "", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS, context = createM005S04PublicScanContext(), phase = "native-dialog" } = {}) {
   const result = spawnSync(executable(command), args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 512 * 1024 });
-  if (result.error || result.status !== 0) {
-    const failure = formatM005S04CommandFailure(command, result, context, phase);
-    fail("M005/S04 native dialog automation command failed.", { ...failure, phase, markerClass: "native_dialog_tool_failed" });
-  }
+  if (result.error || result.status !== 0) failNativeDialogTool(command, result, context, phase);
   return { commandClass: commandClassFromLabel(command), exitCode: result.status ?? 0 };
 }
 
-export async function driveM005S04NativeDialogSelection({ dialog, targetPath, extension, strategyPlan, settleMs = DEFAULT_NATIVE_DIALOG_SETTLE_MS } = {}, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) })) {
+export function findM005S04HyprlandDialogAddress(clients, dialogTitle) {
+  if (!Array.isArray(clients) || typeof dialogTitle !== "string" || dialogTitle.length === 0) return null;
+  const match = clients.find((client) => client?.class === "theprivator" && client?.title === dialogTitle && typeof client?.address === "string" && client.address.startsWith("0x"));
+  return match?.address ?? null;
+}
+
+async function focusM005S04HyprlandDialog(dialogTitle, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = 5_000, pollMs = 100 } = {}) {
+  if (typeof dialogTitle !== "string" || dialogTitle.length === 0) return { focus: "not-requested" };
+  if (!process.env.HYPRLAND_INSTANCE_SIGNATURE || !defaultCommandExists(HYPRLAND_CONTROL_TOOL)) return { focus: "not-applicable" };
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const clientsResult = spawnSync(executable(HYPRLAND_CONTROL_TOOL), ["clients", "-j"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 2_000, maxBuffer: 512 * 1024 });
+    if (clientsResult.error || clientsResult.status !== 0) failNativeDialogTool(HYPRLAND_CONTROL_TOOL, clientsResult, context, phase);
+    let clients;
+    try {
+      clients = JSON.parse(clientsResult.stdout || "[]");
+    } catch {
+      fail("M005/S04 Hyprland dialog focus inventory was malformed.", { phase, markerClass: "native_dialog_focus_malformed", outputSuppressed: true });
+    }
+    const address = findM005S04HyprlandDialogAddress(clients, dialogTitle);
+    if (address) {
+      const selector = `address:${address}`;
+      runNativeDialogTool(HYPRLAND_CONTROL_TOOL, ["dispatch", `hl.dsp.focus({ window = ${JSON.stringify(selector)} })`], { context, phase, timeoutMs: 2_000 });
+      return { focus: "hyprland-dialog", selector: "address" };
+    }
+    await sleep(pollMs);
+  }
+  fail("M005/S04 native dialog window was not found before selection automation.", { phase, markerClass: "native_dialog_focus_missing", dialog: dialogTitle, outputSuppressed: true });
+}
+
+export function runM005S04WaylandClipboardLoad(input, { timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS, settleMs = 100, context = createM005S04PublicScanContext(), phase = "native-dialog", spawnClipboardProcess = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawnClipboardProcess(executable("wl-copy"), ["--paste-once"], { stdio: ["pipe", "ignore", "ignore"], detached: true });
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const rejectWithFailure = (result) => finish(() => {
+      try {
+        failNativeDialogTool("wl-copy", result, context, phase);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill?.("SIGTERM");
+      } catch {
+        // Best-effort bounded cleanup only; public evidence remains redacted by failNativeDialogTool.
+      }
+      rejectWithFailure({ error: timeoutError(), status: null, signal: "SIGTERM" });
+    }, timeoutMs);
+    child.once?.("error", (error) => rejectWithFailure({ error, status: null }));
+    child.once?.("exit", (code, signal) => {
+      if (!settled && code !== 0) rejectWithFailure({ status: typeof code === "number" ? code : null, signal: signal ?? null });
+    });
+    child.stdin?.once?.("error", (error) => rejectWithFailure({ error, status: null }));
+    child.stdin?.end?.(input, "utf8", () => {
+      setTimeout(() => finish(() => {
+        child.unref?.();
+        resolve({ commandClass: commandClassFromLabel("wl-copy"), exitCode: 0, clipboardMode: "paste-once" });
+      }), settleMs);
+    });
+  });
+}
+
+export async function driveM005S04NativeDialogSelection({ dialog, targetPath, extension, strategyPlan, dialogTitle, settleMs = DEFAULT_NATIVE_DIALOG_SETTLE_MS } = {}, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) })) {
   assert(typeof targetPath === "string" && targetPath.length > 0, "M005/S04 native dialog selection requires a private target path.", { phase: "native-dialog", markerClass: "missing_selected_path" });
   const commandPlan = createNativeDialogCommandPlan({ dialog, extension, strategyPlan });
   assert(commandPlan.selected, "M005/S04 native dialog automation is unavailable for the current desktop session.", { phase: "native-dialog", markerClass: "missing_native_dialog_tool", strategy: commandPlan.strategy });
   await sleep(settleMs);
   const phase = `native-dialog.${commandPlan.dialog}.${commandPlan.extension}`;
   if (commandPlan.strategy === "wayland") {
+    const focus = await focusM005S04HyprlandDialog(dialogTitle, { context, phase });
+    if (focus.focus === "hyprland-dialog") await sleep(100);
     if (strategyPlan?.clipboard === "wl-clipboard") {
-      runNativeDialogTool("wl-copy", [], { input: targetPath, context, phase });
+      await runM005S04WaylandClipboardLoad(targetPath, { context, phase });
       runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
+      await sleep(150);
       runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"], { context, phase });
     } else {
       runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
+      await sleep(150);
       runNativeDialogTool(WAYLAND_TYPE_TOOL, [targetPath], { context, phase });
     }
+    await sleep(150);
     runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-P", "Return", "-p", "Return"], { context, phase });
   } else if (commandPlan.strategy === "x11") {
     if (strategyPlan?.clipboard === "xsel") runNativeDialogTool("xsel", ["--clipboard", "--input"], { input: targetPath, context, phase });
@@ -1550,7 +1633,7 @@ export async function driveM005S04PackageExportViaUi(driver, runtime, { packageP
   assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package export requires a private .tpkg destination.", { phase: "ui.package-export", markerClass: "missing_package_path" });
   const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Export ThePrivator package", runtime, { step: "m005-package-export-click" });
   const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-export", "package_export_click_failed");
-  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: packagePath, extension: "tpkg", strategyPlan }, context);
+  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: packagePath, extension: "tpkg", strategyPlan, dialogTitle: "Export ThePrivator package" }, context);
   await waitForVisibleText(driver, "ThePrivator package export completed.", runtime, { step: "m005-package-export-success" });
   await waitForVisibleText(driver, "The sidecar wrote the selected destination without returning the location or archive internals to the UI.", runtime, { step: "m005-package-export-redaction-copy" });
   const successText = await readM005S04PackageExportSuccessText(driver, runtime.smokeContext.smokeProfileName);
@@ -1567,7 +1650,7 @@ export async function driveM005S04PackageImportViaUi(driver, runtime, { packageP
   assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package import requires a private .tpkg source.", { phase: "ui.package-import", markerClass: "missing_package_path" });
   const button = await waitForM005S04GlobalButton(driver, "Import ThePrivator package", runtime, { step: "m005-package-import-click" });
   const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-import", "package_import_click_failed");
-  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan }, context);
+  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan, dialogTitle: "Import ThePrivator package" }, context);
   await waitForVisibleText(driver, "ThePrivator package import completed.", runtime, { step: "m005-package-import-success" });
   await waitForVisibleText(driver, "The sidecar imported a stopped copied profile and returned only safe aggregate metadata to the UI.", runtime, { step: "m005-package-import-redaction-copy" });
   const restored = assertM005S04CopiedProfileRestored({ profileStorePath: runtime.profileStore.profileStorePath, appDataRoot: runtime.profileStore.appDataRoot, sourceProfile: runtime.profileStore.profile, expectedCookieRows: runtime.fixtures?.currentCookies ?? runtime.fixtures?.sourceCookies ?? [], expectedPayloadRelativePaths: runtime.fixtures?.expectedPayloadRelativePaths ?? ["Default/Preferences"] }, context);
@@ -1586,7 +1669,7 @@ export async function driveM005S04CookieExportViaUi(driver, runtime, { exportPat
   assert(typeof exportPath === "string" && exportPath.endsWith(".json"), "M005/S04 cookie export requires a private JSON destination.", { phase: "ui.cookie-export", markerClass: "missing_selected_path" });
   const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Export ThePrivator JSON", runtime, { step: "m005-cookie-export-click" });
   const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.cookie-export", "cookie_export_click_failed");
-  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: exportPath, extension: "json", strategyPlan }, context);
+  const dialog = await driveNativeDialogSelection({ dialog: "save", targetPath: exportPath, extension: "json", strategyPlan, dialogTitle: "Export cookies as ThePrivator JSON" }, context);
   await waitForVisibleText(driver, "ThePrivator JSON export completed.", runtime, { step: "m005-cookie-export-success" });
   await waitForVisibleText(driver, "The sidecar wrote the selected destination without returning the path or cookie contents to the UI.", runtime, { step: "m005-cookie-export-redaction-copy" });
   const successText = await readM005S04CookieSuccessText(driver, runtime.smokeContext.smokeProfileName, "ThePrivator JSON export completed.");
@@ -1605,7 +1688,7 @@ export async function driveM005S04CookieReplaceViaUi(driver, runtime, { importPa
   assert(typeof importPath === "string" && importPath.endsWith(".json"), "M005/S04 cookie replace requires a private JSON source.", { phase: "ui.cookie-replace", markerClass: "missing_selected_path" });
   const button = await waitForProfileButton(driver, runtime.smokeContext.smokeProfileName, "Replace cookies", runtime, { step: "m005-cookie-replace-click" });
   const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.cookie-replace", "cookie_replace_click_failed");
-  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: importPath, extension: "json", strategyPlan }, context);
+  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: importPath, extension: "json", strategyPlan, dialogTitle: "Replace profile cookies from a cookie file" }, context);
   await waitForVisibleText(driver, "ThePrivator JSON import replaced existing cookies.", runtime, { step: "m005-cookie-replace-success" });
   await waitForVisibleText(driver, "The sidecar replaced profile cookies from the selected source without returning the path or cookie contents to the UI.", runtime, { step: "m005-cookie-replace-redaction-copy" });
   const successText = await readM005S04CookieSuccessText(driver, runtime.smokeContext.smokeProfileName, "ThePrivator JSON import replaced existing cookies.");

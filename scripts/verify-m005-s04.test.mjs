@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,6 +31,7 @@ import {
   describeNativeDialogSelection,
   discoverM005S04SourceProfile,
   findM005S04ForbiddenPublicMarker,
+  findM005S04HyprlandDialogAddress,
   formatM005S04CommandFailure,
   inspectM005S04CookieDbRows,
   inspectM005S04CookieExportFile,
@@ -37,6 +39,7 @@ import {
   inspectM005S04PackageArchive,
   parseArgs,
   planNativeDialogAutomation,
+  runM005S04WaylandClipboardLoad,
   runPreflightOnlyVerification,
   writeM005S04CookieImportFixtures,
   writeM005S04PayloadFixtures,
@@ -246,7 +249,7 @@ describe("verify-m005-s04 source guardrails", () => {
 });
 
 describe("verify-m005-s04 native dialog preflight", () => {
-  it("plans Wayland automation with redacted save/open dialog summaries", () => {
+  it("plans Wayland clipboard selection with redacted save/open dialog summaries", () => {
     const commandExists = (name) => ["wtype", "wl-copy", "wl-paste"].includes(name);
     const plan = planNativeDialogAutomation({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-1", PATH: "/mock/bin" }, commandExists });
     expect(plan).toMatchObject({ strategy: "wayland", status: "available", clipboard: "wl-clipboard", missing: [] });
@@ -259,6 +262,36 @@ describe("verify-m005-s04 native dialog preflight", () => {
     const x11Plan = planNativeDialogAutomation({ platform: "linux", env: { DISPLAY: ":1", PATH: "/mock/bin" }, commandExists: (name) => ["xdotool", "xclip"].includes(name) });
     expect(x11Plan).toMatchObject({ strategy: "x11", status: "available", clipboard: "xclip" });
     expect(() => assertNativeDialogAutomationPreflight({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-1", PATH: "/mock/bin" }, commandExists: () => false, strict: true })).toThrow(VerifyFailure);
+  });
+
+  it("matches Hyprland native dialog windows by exact safe title and address", () => {
+    const clients = [
+      { class: "theprivator", title: "ThePrivator", address: "0x1" },
+      { class: "theprivator", title: "Export cookies as ThePrivator JSON", address: "0xabc" },
+      { class: "other", title: "Export cookies as ThePrivator JSON", address: "0xdef" },
+    ];
+    expect(findM005S04HyprlandDialogAddress(clients, "Export cookies as ThePrivator JSON")).toBe("0xabc");
+    expect(findM005S04HyprlandDialogAddress(clients, "Import ThePrivator package")).toBeNull();
+  });
+
+  it("loads Wayland clipboard through detached paste-once process without inheriting output streams", async () => {
+    const child = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = vi.fn((value, encoding, callback) => {
+      expect(value).toBe("/private/theprivator-smoke/cookies.json");
+      expect(encoding).toBe("utf8");
+      setImmediate(callback);
+    });
+    child.kill = vi.fn();
+    child.unref = vi.fn();
+    const spawnClipboardProcess = vi.fn(() => child);
+    const context = createM005S04PublicScanContext({ selectedPaths: ["/private/theprivator-smoke/cookies.json"] });
+
+    await expect(runM005S04WaylandClipboardLoad("/private/theprivator-smoke/cookies.json", { context, phase: "native-dialog.save.json", timeoutMs: 100, settleMs: 0, spawnClipboardProcess })).resolves.toMatchObject({ clipboardMode: "paste-once", exitCode: 0 });
+
+    expect(spawnClipboardProcess).toHaveBeenCalledWith(expect.stringMatching(/wl-copy$/), ["--paste-once"], { stdio: ["pipe", "ignore", "ignore"], detached: true });
+    expect(child.unref).toHaveBeenCalled();
+    expect(child.kill).not.toHaveBeenCalled();
   });
 
   it("summarizes native selections by dialog kind and extension without selected paths", () => {
