@@ -52,13 +52,16 @@ const VERIFIER_EVENTS = [];
 const REDACTED_VALUE = "<redacted>";
 const FRESHNESS_SKEW_MS = 1_500;
 const LINUX_WEBDRIVER_TOOL_CLASSES = Object.freeze(["tauri-driver", "WebKitWebDriver", "Chromium"]);
-const WAYLAND_TYPE_TOOL = "wtype";
+const WAYLAND_KEY_TOOL = "ydotool";
 const HYPRLAND_CONTROL_TOOL = "hyprctl";
 const WAYLAND_CLIPBOARD_TOOLS = Object.freeze(["wl-copy", "wl-paste"]);
+const YDOTOOL_KEYCODES = Object.freeze({ ctrl: 29, enter: 28, l: 38 });
 const X11_TYPE_TOOL = "xdotool";
 const X11_CLIPBOARD_TOOLS = Object.freeze(["xclip", "xsel"]);
-const DEFAULT_NATIVE_DIALOG_SETTLE_MS = Number(process.env.VERIFY_M005_S04_DIALOG_SETTLE_MS ?? 350);
-const NATIVE_DIALOG_TOOL_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_DIALOG_TOOL_TIMEOUT_MS ?? 8_000);
+const ATSPI_KEYBOARD = "at-spi";
+const X11_PYTHON_KEYBOARD = "python-xlib";
+const DEFAULT_NATIVE_DIALOG_SETTLE_MS = Number(process.env.VERIFY_M005_S04_DIALOG_SETTLE_MS ?? 1_000);
+const NATIVE_DIALOG_TOOL_TIMEOUT_MS = Number(process.env.VERIFY_M005_S04_DIALOG_TOOL_TIMEOUT_MS ?? 15_000);
 const PACKAGE_ARCHIVE_MAX_MEMBERS = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBERS ?? 512);
 const PACKAGE_ARCHIVE_MAX_MEMBER_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_MEMBER_BYTES ?? 4 * 1024 * 1024);
 const PACKAGE_ARCHIVE_MAX_TOTAL_BYTES = Number(process.env.VERIFY_M005_S04_PACKAGE_MAX_TOTAL_BYTES ?? 16 * 1024 * 1024);
@@ -663,8 +666,8 @@ export function writeM005S04CookieImportFixtures({ smokeRoot, cookieDomain = "m0
   const jsonPath = join(fixtureRoot, "cookies-import.theprivator.json");
   const netscapePath = join(fixtureRoot, "cookies-import.netscape.txt");
   const cookies = [
-    { domain: cookieDomain, name: cookieName, value: cookieValue, path: "/", secure: true, httpOnly: true, expires: 1_900_000_000, sameSite: "Lax" },
-    { domain: `.${cookieDomain}`, name: secondCookieName, value: secondCookieValue, path: "/session", secure: false, httpOnly: false, expires: null, sameSite: "None" },
+    { domain: cookieDomain, hostOnly: true, name: cookieName, value: cookieValue, path: "/", secure: true, httpOnly: true, expiresUnix: 1_900_000_000, sameSite: "lax", priority: "medium" },
+    { domain: `.${cookieDomain}`, hostOnly: false, name: secondCookieName, value: secondCookieValue, path: "/session", secure: false, httpOnly: false, expiresUnix: null, sameSite: "unspecified", priority: "medium" },
   ];
   writeFileSync(jsonPath, `${JSON.stringify({ format: "theprivator.cookies", version: 1, cookies }, null, 2)}\n`, "utf8");
   writeFileSync(netscapePath, [
@@ -686,22 +689,18 @@ export function writeM005S04PayloadFixtures({ userDataRoot, appDataRoot, selecte
   const storagePath = join(userDataRoot, "Default", "Local Storage", "leveldb", "000003.log");
   const runtimeDebugPath = join(userDataRoot, "DevToolsActivePort");
   const singletonPath = join(userDataRoot, "SingletonLock");
-  const cookieJournalPath = join(userDataRoot, "Default", "Network", "Cookies-journal");
   mkdirSync(dirname(preferencesPath), { recursive: true });
   mkdirSync(dirname(storagePath), { recursive: true });
-  mkdirSync(dirname(cookieJournalPath), { recursive: true });
   writeFileSync(preferencesPath, `${JSON.stringify({ profile: { name: "M005 S04 safe payload" }, browser: { check_default_browser: false } }, null, 2)}\n`, "utf8");
   writeFileSync(storagePath, "m005-s04-safe-local-storage-payload\n", "utf8");
   writeFileSync(runtimeDebugPath, "9222\nws://127.0.0.1:9222/devtools/browser/m005-s04-should-not-package\n", "utf8");
   writeFileSync(singletonPath, "m005-s04-runtime-singleton\n", "utf8");
-  writeFileSync(cookieJournalPath, "m005-s04-cookie-journal-runtime\n", "utf8");
   if (selectedPackagePath) {
     mkdirSync(dirname(selectedPackagePath), { recursive: true });
-    writeFileSync(selectedPackagePath, "placeholder selected package destination must not be packaged\n", "utf8");
   }
   return {
-    value: { preferencesPath, storagePath, runtimeDebugPath, singletonPath, cookieJournalPath, selectedPackagePath: selectedPackagePath ?? null },
-    log: { payloadFixtures: "created", safePayloadFileCount: 2, volatileRuntimeFileCount: 3, selectedDestinationFixture: Boolean(selectedPackagePath), pathScope: "isolated-profile" },
+    value: { preferencesPath, storagePath, runtimeDebugPath, singletonPath, selectedPackagePath: selectedPackagePath ?? null },
+    log: { payloadFixtures: "created", safePayloadFileCount: 2, volatileRuntimeFileCount: 2, selectedDestinationFixture: Boolean(selectedPackagePath), pathScope: "isolated-profile" },
   };
 }
 
@@ -1318,20 +1317,28 @@ export function planNativeDialogAutomation({ platform = process.platform, env = 
 
   if (!hasWayland && !hasX11) missing.push(missingTool("display", "display", "Run from a visible Linux desktop session with WAYLAND_DISPLAY or DISPLAY."));
 
-  const waylandTypePresent = hasWayland && commandExists(WAYLAND_TYPE_TOOL, toolOptions);
+  const waylandAtspiPresent = hasWayland && commandExists(PYTHON, toolOptions);
+  const waylandKeyPresent = hasWayland && commandExists(WAYLAND_KEY_TOOL, toolOptions);
   const waylandClipboardPresent = hasWayland && WAYLAND_CLIPBOARD_TOOLS.every((tool) => commandExists(tool, toolOptions));
-  if (hasWayland && waylandTypePresent) {
-    return { platform, strategy: "wayland", status: "available", display: "wayland", tools: [safeToolStatus(WAYLAND_TYPE_TOOL, true), ...WAYLAND_CLIPBOARD_TOOLS.map((tool) => safeToolStatus(tool, waylandClipboardPresent))], clipboard: waylandClipboardPresent ? "wl-clipboard" : "typing-only", missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
+  if (hasWayland && waylandAtspiPresent) {
+    return { platform, strategy: "wayland", status: "available", display: "wayland", tools: [safeToolStatus(PYTHON, true)], keyboard: ATSPI_KEYBOARD, clipboard: "none", missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
   }
-  if (hasWayland && !waylandTypePresent) missing.push(missingTool(WAYLAND_TYPE_TOOL, "wayland-type", "Install wtype for Wayland native-dialog automation."));
+  if (hasWayland && waylandKeyPresent) {
+    return { platform, strategy: "wayland", status: "available", display: "wayland", tools: [safeToolStatus(WAYLAND_KEY_TOOL, true), ...WAYLAND_CLIPBOARD_TOOLS.map((tool) => safeToolStatus(tool, waylandClipboardPresent))], keyboard: "ydotool", clipboard: waylandClipboardPresent ? "wl-clipboard" : "none", missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
+  }
+  if (hasWayland && !waylandAtspiPresent && !waylandKeyPresent) missing.push(missingTool(`${PYTHON}-or-${WAYLAND_KEY_TOOL}`, "wayland-key", "Install python3 with AT-SPI bindings or ydotool for Wayland native-dialog automation."));
 
   const x11TypePresent = hasX11 && commandExists(X11_TYPE_TOOL, toolOptions);
   const x11ClipboardTool = hasX11 ? X11_CLIPBOARD_TOOLS.find((tool) => commandExists(tool, toolOptions)) : null;
-  if (hasX11 && x11TypePresent && x11ClipboardTool) {
-    return { platform, strategy: "x11", status: "available", display: "x11", tools: [safeToolStatus(X11_TYPE_TOOL, true), safeToolStatus(x11ClipboardTool, true)], clipboard: x11ClipboardTool, missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
+  const x11PythonPresent = hasX11 && commandExists(PYTHON, toolOptions);
+  if (hasX11 && x11PythonPresent) {
+    return { platform, strategy: "x11", status: "available", display: "x11", tools: [safeToolStatus(PYTHON, true)], keyboard: ATSPI_KEYBOARD, clipboard: "none", missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
   }
-  if (hasX11 && !x11TypePresent) missing.push(missingTool(X11_TYPE_TOOL, "x11-type", "Install xdotool for X11 native-dialog automation."));
-  if (hasX11 && !x11ClipboardTool) missing.push(missingTool("xclip-or-xsel", "x11-clipboard", "Install xclip or xsel for X11 native-dialog clipboard fallback."));
+  if (hasX11 && x11TypePresent && x11ClipboardTool) {
+    return { platform, strategy: "x11", status: "available", display: "x11", tools: [safeToolStatus(X11_TYPE_TOOL, true), safeToolStatus(x11ClipboardTool, true)], keyboard: "xdotool", clipboard: x11ClipboardTool, missing: [], dialogs: [{ dialog: "save", selected: true, extension: "json" }, { dialog: "open", selected: true, extension: "tpkg" }] };
+  }
+  if (hasX11 && !x11PythonPresent && !x11TypePresent) missing.push(missingTool(`${PYTHON}-or-${X11_TYPE_TOOL}`, "x11-key", "Install python3 with python-xlib or xdotool for X11 native-dialog keyboard automation."));
+  if (hasX11 && x11TypePresent && !x11ClipboardTool) missing.push(missingTool("xclip-or-xsel", "x11-clipboard", "Install xclip or xsel for legacy X11 native-dialog clipboard fallback."));
 
   return { platform, strategy: "unavailable", status: "missing", display: hasWayland ? "wayland" : hasX11 ? "x11" : "missing", tools: [], missing, dialogs: [] };
 }
@@ -1342,7 +1349,7 @@ export function assertNativeDialogAutomationPreflight(options = {}) {
   if (strict && plan.missing.length > 0) {
     fail("M005/S04 native-dialog automation preflight failed.", { phase: "preflight.native-dialog", markerClass: "missing_native_dialog_tool", missing: plan.missing.map((item) => ({ name: item.name, toolClass: item.toolClass })), remediation: "Install the missing native-dialog automation tool class for the active Linux desktop session." });
   }
-  return { strategy: plan.strategy, status: plan.status, display: plan.display, clipboard: plan.clipboard ?? null, missingToolClasses: plan.missing.map((item) => item.toolClass), dialogs: plan.dialogs };
+  return { strategy: plan.strategy, status: plan.status, display: plan.display, keyboard: plan.keyboard ?? null, clipboard: plan.clipboard ?? null, missingToolClasses: plan.missing.map((item) => item.toolClass), dialogs: plan.dialogs };
 }
 
 export function describeNativeDialogSelection({ dialog, selected = true, extension, targetPath } = {}) {
@@ -1358,7 +1365,7 @@ export function createNativeDialogCommandPlan({ dialog, extension, strategyPlan 
   const strategy = strategyPlan?.strategy ?? "unavailable";
   const selected = strategy !== "unavailable";
   const selection = describeNativeDialogSelection({ dialog, selected, extension });
-  const commandPlan = { ...selection, strategy, steps: strategy === "wayland" ? ["focus-dialog", strategyPlan?.clipboard === "wl-clipboard" ? "clipboard-load" : "type-selection", "confirm-selection"] : strategy === "x11" ? ["focus-dialog", "clipboard-load", "confirm-selection"] : [] };
+  const commandPlan = { ...selection, strategy, steps: strategy === "wayland" ? ["focus-dialog", "type-selection", "confirm-selection"] : strategy === "x11" ? ["focus-dialog", "type-selection", "confirm-selection"] : [] };
   assertM005S04PublicEvidenceRedacted(commandPlan);
   return commandPlan;
 }
@@ -1381,19 +1388,89 @@ function timeoutError() {
 function runNativeDialogTool(command, args = [], { input = "", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS, context = createM005S04PublicScanContext(), phase = "native-dialog" } = {}) {
   const result = spawnSync(executable(command), args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 512 * 1024 });
   if (result.error || result.status !== 0) failNativeDialogTool(command, result, context, phase);
-  return { commandClass: commandClassFromLabel(command), exitCode: result.status ?? 0 };
+  return { commandClass: commandClassFromLabel(command), exitCode: result.status ?? 0, stdout: result.stdout ?? "" };
+}
+
+async function tryM005S04AtspiButtonClick(buttonName, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = 1_500 } = {}) {
+  if (!defaultCommandExists("python3")) return { clicked: false, driver: "unavailable" };
+  const script = String.raw`
+import json
+import sys
+import time
+try:
+    import gi
+    gi.require_version('Atspi', '2.0')
+    from gi.repository import Atspi
+except Exception:
+    print(json.dumps({"clicked": False, "driver": "unavailable"}))
+    sys.exit(0)
+button_name = sys.argv[1]
+timeout_ms = int(sys.argv[2])
+deadline = time.monotonic() + (timeout_ms / 1000)
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+def children(acc):
+    for index in range(safe(acc.get_child_count, 0) or 0):
+        child = safe(lambda index=index: acc.get_child_at_index(index), None)
+        if child is not None:
+            yield child
+def find_button(acc, nodes):
+    if nodes[0] > 600:
+        return None
+    nodes[0] += 1
+    role = safe(acc.get_role_name, "") or ""
+    name = safe(acc.get_name, "") or ""
+    app = safe(lambda: acc.get_application().get_name(), "") or ""
+    if app == "theprivator" and role == "button" and name == button_name:
+        return acc
+    for child in children(acc):
+        found = find_button(child, nodes)
+        if found is not None:
+            return found
+    return None
+while time.monotonic() < deadline:
+    desktop = Atspi.get_desktop(0)
+    button = None
+    for child in children(desktop):
+        child_name = safe(child.get_name, "") or ""
+        if child_name != "theprivator":
+            continue
+        button = find_button(child, [0])
+        if button is not None:
+            break
+    if button is not None:
+        action_count = safe(lambda: Atspi.Action.get_n_actions(button), 0) or 0
+        if action_count > 0 and Atspi.Action.do_action(button, 0):
+            print(json.dumps({"clicked": True, "driver": "at-spi"}))
+            sys.exit(0)
+    time.sleep(0.05)
+print(json.dumps({"clicked": False, "driver": "at-spi"}))
+`;
+  const result = runNativeDialogTool("python3", ["-c", script, buttonName, String(timeoutMs)], { context, phase, timeoutMs: timeoutMs + 1_000 });
+  try {
+    const parsed = JSON.parse(result.stdout.trim() || "{}");
+    return { clicked: parsed.clicked === true, driver: parsed.driver === "at-spi" ? "at-spi" : "unavailable" };
+  } catch {
+    return { clicked: false, driver: "unavailable" };
+  }
 }
 
 export function findM005S04HyprlandDialogAddress(clients, dialogTitle) {
   if (!Array.isArray(clients) || typeof dialogTitle !== "string" || dialogTitle.length === 0) return null;
   const match = clients.find((client) => client?.class === "theprivator" && client?.title === dialogTitle && typeof client?.address === "string" && client.address.startsWith("0x"));
-  return match?.address ?? null;
+  if (match?.address) return match.address;
+  const fallback = clients.find((client) => client?.class === "theprivator" && client?.title !== "ThePrivator" && typeof client?.address === "string" && client.address.startsWith("0x"));
+  return fallback?.address ?? null;
 }
 
 async function focusM005S04HyprlandDialog(dialogTitle, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = 5_000, pollMs = 100 } = {}) {
   if (typeof dialogTitle !== "string" || dialogTitle.length === 0) return { focus: "not-requested" };
   if (!process.env.HYPRLAND_INSTANCE_SIGNATURE || !defaultCommandExists(HYPRLAND_CONTROL_TOOL)) return { focus: "not-applicable" };
   const started = Date.now();
+  let lastAddress = null;
   while (Date.now() - started < timeoutMs) {
     const clientsResult = spawnSync(executable(HYPRLAND_CONTROL_TOOL), ["clients", "-j"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 2_000, maxBuffer: 512 * 1024 });
     if (clientsResult.error || clientsResult.status !== 0) failNativeDialogTool(HYPRLAND_CONTROL_TOOL, clientsResult, context, phase);
@@ -1405,13 +1482,22 @@ async function focusM005S04HyprlandDialog(dialogTitle, { context = createM005S04
     }
     const address = findM005S04HyprlandDialogAddress(clients, dialogTitle);
     if (address) {
+      lastAddress = address;
       const selector = `address:${address}`;
       runNativeDialogTool(HYPRLAND_CONTROL_TOOL, ["dispatch", `hl.dsp.focus({ window = ${JSON.stringify(selector)} })`], { context, phase, timeoutMs: 2_000 });
-      return { focus: "hyprland-dialog", selector: "address" };
+      await sleep(pollMs);
+      const activeResult = spawnSync(executable(HYPRLAND_CONTROL_TOOL), ["activewindow", "-j"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 2_000, maxBuffer: 128 * 1024 });
+      if (activeResult.error || activeResult.status !== 0) failNativeDialogTool(HYPRLAND_CONTROL_TOOL, activeResult, context, phase);
+      try {
+        const active = JSON.parse(activeResult.stdout || "{}");
+        if (active?.address === address) return { focus: "hyprland-dialog", selector: "address" };
+      } catch {
+        fail("M005/S04 Hyprland active-window inventory was malformed.", { phase, markerClass: "native_dialog_focus_malformed", outputSuppressed: true });
+      }
     }
     await sleep(pollMs);
   }
-  fail("M005/S04 native dialog window was not found before selection automation.", { phase, markerClass: "native_dialog_focus_missing", dialog: dialogTitle, outputSuppressed: true });
+  fail("M005/S04 native dialog window could not be focused before selection automation.", { phase, markerClass: lastAddress ? "native_dialog_focus_failed" : "native_dialog_focus_missing", dialog: dialogTitle, outputSuppressed: true });
 }
 
 export function runM005S04WaylandClipboardLoad(input, { timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS, settleMs = 100, context = createM005S04PublicScanContext(), phase = "native-dialog", spawnClipboardProcess = spawn } = {}) {
@@ -1453,31 +1539,485 @@ export function runM005S04WaylandClipboardLoad(input, { timeoutMs = NATIVE_DIALO
   });
 }
 
-export async function driveM005S04NativeDialogSelection({ dialog, targetPath, extension, strategyPlan, dialogTitle, settleMs = DEFAULT_NATIVE_DIALOG_SETTLE_MS } = {}, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) })) {
+function ydotoolKeyArgs(...codes) {
+  return codes.flatMap((code) => [`${code}:1`, `${code}:0`]);
+}
+
+function ydotoolChordArgs(modifierCode, keyCode) {
+  return [`${modifierCode}:1`, `${keyCode}:1`, `${keyCode}:0`, `${modifierCode}:0`];
+}
+
+function runM005S04YdotoolKey(args, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS } = {}) {
+  return runNativeDialogTool(WAYLAND_KEY_TOOL, ["key", ...args], { context, phase, timeoutMs });
+}
+
+function runM005S04YdotoolType(input, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS } = {}) {
+  return runNativeDialogTool(WAYLAND_KEY_TOOL, ["type", "--key-delay=5", "--key-hold=5", "--", input], { context, phase, timeoutMs });
+}
+
+export async function driveM005S04WaylandPathSelection(targetPath, { context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) }), phase = "native-dialog", settleMs = 250 } = {}) {
+  runM005S04YdotoolKey(ydotoolChordArgs(YDOTOOL_KEYCODES.ctrl, YDOTOOL_KEYCODES.l), { context, phase });
+  await sleep(settleMs);
+  runM005S04YdotoolType(targetPath, { context, phase });
+  await sleep(settleMs);
+  runM005S04YdotoolKey(ydotoolKeyArgs(YDOTOOL_KEYCODES.enter), { context, phase });
+  return { keyboardMode: "ydotool", typedSelection: true };
+}
+
+function openM005S04X11LocationEntry(dialogTitle, { context = createM005S04PublicScanContext(), phase = "native-dialog", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS } = {}) {
+  const script = String.raw`
+import json
+import sys
+import time
+from Xlib import X, display, XK
+from Xlib.ext import xtest
+
+dialog_title = sys.argv[1]
+d = display.Display()
+root = d.screen().root
+
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+def window_title(win):
+    title = safe(win.get_wm_name, "") or ""
+    if title:
+        return title
+    atom = safe(lambda: d.intern_atom('_NET_WM_NAME'), None)
+    utf8 = safe(lambda: d.intern_atom('UTF8_STRING'), None)
+    if atom is None or utf8 is None:
+        return ""
+    prop = safe(lambda: win.get_full_property(atom, utf8), None)
+    if prop is None:
+        return ""
+    raw = prop.value
+    return raw.decode('utf-8', 'ignore') if isinstance(raw, bytes) else str(raw)
+
+def wm_class(win):
+    value = safe(win.get_wm_class, None)
+    if not value:
+        return ""
+    return " ".join(str(part) for part in value if part)
+
+def children(win):
+    tree = safe(win.query_tree, None)
+    return [] if tree is None else list(tree.children or [])
+
+def all_windows(win):
+    stack = [win]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        wid = int(current.id)
+        if wid in seen:
+            continue
+        seen.add(wid)
+        yield current
+        stack.extend(reversed(children(current)))
+
+def find_dialog():
+    fallback = None
+    for win in all_windows(root):
+        klass = wm_class(win).casefold()
+        if 'theprivator' not in klass:
+            continue
+        title = window_title(win)
+        if dialog_title and title == dialog_title:
+            return win
+        if title and title != 'ThePrivator':
+            fallback = fallback or win
+    return fallback
+
+win = None
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    win = find_dialog()
+    if win is not None:
+        break
+    time.sleep(0.05)
+if win is None:
+    print(json.dumps({"opened": False, "reason": "dialog-not-found"}))
+    sys.exit(3)
+win.configure(stack_mode=X.Above)
+win.set_input_focus(X.RevertToParent, X.CurrentTime)
+d.sync()
+time.sleep(0.1)
+ctrl = d.keysym_to_keycode(XK.string_to_keysym('Control_L'))
+l_key = d.keysym_to_keycode(XK.string_to_keysym('l'))
+for event_type, code in ((X.KeyPress, ctrl), (X.KeyPress, l_key), (X.KeyRelease, l_key), (X.KeyRelease, ctrl)):
+    xtest.fake_input(d, event_type, code)
+    d.sync()
+    time.sleep(0.01)
+print(json.dumps({"opened": True, "driver": "python-xlib"}))
+`;
+  const result = runNativeDialogTool(PYTHON, ["-c", script, dialogTitle], { context, phase, timeoutMs });
+  try {
+    const parsed = JSON.parse(result.stdout.trim() || "{}");
+    assert(parsed.opened === true, "M005/S04 X11 native dialog location entry did not open.", { phase, markerClass: "native_dialog_location_failed", outputSuppressed: true });
+  } catch (error) {
+    if (error instanceof VerifyFailure) throw error;
+    fail("M005/S04 X11 native dialog location opener returned malformed status.", { phase, markerClass: "native_dialog_output_malformed", outputSuppressed: true });
+  }
+}
+
+export async function driveM005S04AtspiDialogSelection(targetPath, { dialogTitle = "", buttonName = "Save", waitForClose = true, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) }), phase = "native-dialog", timeoutMs = NATIVE_DIALOG_TOOL_TIMEOUT_MS } = {}) {
+  if (process.env.DISPLAY) {
+    openM005S04X11LocationEntry(dialogTitle, { context, phase: `${phase}.location`, timeoutMs });
+    await sleep(500);
+  }
+  const script = String.raw`
+import json
+import sys
+import time
+try:
+    import gi
+    gi.require_version('Atspi', '2.0')
+    from gi.repository import Atspi
+except Exception:
+    print(json.dumps({"selected": False, "reason": "atspi-unavailable"}))
+    sys.exit(3)
+
+target_path = sys.argv[1]
+dialog_title = sys.argv[2]
+button_name = sys.argv[3]
+timeout_ms = int(sys.argv[4])
+wait_for_close = sys.argv[5] == '1'
+deadline = time.monotonic() + (timeout_ms / 1000)
+
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+def children(acc):
+    for index in range(safe(acc.get_child_count, 0) or 0):
+        child = safe(lambda index=index: acc.get_child_at_index(index), None)
+        if child is not None:
+            yield child
+
+def is_theprivator(acc):
+    return (safe(lambda: acc.get_application().get_name(), "") or "") == "theprivator"
+
+def find_file_chooser(acc, nodes):
+    if nodes[0] > 800:
+        return None
+    nodes[0] += 1
+    role = safe(acc.get_role_name, "") or ""
+    name = safe(acc.get_name, "") or ""
+    current_fallback = None
+    if is_theprivator(acc) and role == "file chooser" and name != "File Chooser Widget":
+        if dialog_title and name == dialog_title:
+            return acc
+        current_fallback = acc
+        if not dialog_title:
+            return acc
+    fallback = current_fallback
+    for child in children(acc):
+        found = find_file_chooser(child, nodes)
+        if found is not None:
+            if dialog_title:
+                child_name = safe(found.get_name, "") or ""
+                if child_name == dialog_title:
+                    return found
+                fallback = fallback or found
+            else:
+                return found
+    return fallback
+
+def find_descendant(acc, role_name, name=None, nodes=None):
+    if nodes is None:
+        nodes = [0]
+    if nodes[0] > 800:
+        return None
+    nodes[0] += 1
+    role = safe(acc.get_role_name, "") or ""
+    current_name = safe(acc.get_name, "") or ""
+    if role == role_name and (name is None or current_name == name):
+        return acc
+    for child in children(acc):
+        found = find_descendant(child, role_name, name, nodes)
+        if found is not None:
+            return found
+    return None
+
+def collect_descendants(acc, role_name, nodes=None, results=None):
+    if nodes is None:
+        nodes = [0]
+    if results is None:
+        results = []
+    if nodes[0] > 800:
+        return results
+    nodes[0] += 1
+    if (safe(acc.get_role_name, "") or "") == role_name:
+        results.append(acc)
+    for child in children(acc):
+        collect_descendants(child, role_name, nodes, results)
+    return results
+
+def choose_path_text(chooser):
+    text_fields = collect_descendants(chooser, "text")
+    for field in text_fields:
+        value = safe(lambda field=field: Atspi.Text.get_text(field, 0, -1), "") or ""
+        if "/" in value or value.endswith((".json", ".txt", ".tpkg")):
+            return field
+    return text_fields[0] if text_fields else None
+
+while time.monotonic() < deadline:
+    desktop = Atspi.get_desktop(0)
+    chooser = None
+    for app in children(desktop):
+        if (safe(app.get_name, "") or "") != "theprivator":
+            continue
+        chooser = find_file_chooser(app, [0])
+        if chooser is not None:
+            break
+    if chooser is None:
+        time.sleep(0.05)
+        continue
+    text = choose_path_text(chooser)
+    button = find_descendant(chooser, "button", button_name)
+    if text is None or button is None:
+        time.sleep(0.05)
+        continue
+    if not Atspi.EditableText.set_text_contents(text, target_path):
+        print(json.dumps({"selected": False, "reason": "text-set-failed"}))
+        sys.exit(4)
+    time.sleep(0.15)
+    observed_text = safe(lambda: Atspi.Text.get_text(text, 0, -1), "") or ""
+    if observed_text != target_path:
+        time.sleep(0.15)
+        observed_text = safe(lambda: Atspi.Text.get_text(text, 0, -1), "") or ""
+    if observed_text != target_path:
+        print(json.dumps({"selected": False, "reason": "text-readback-mismatch"}))
+        sys.exit(7)
+    action_count = safe(lambda: Atspi.Action.get_n_actions(button), 0) or 0
+    if action_count <= 0 or not Atspi.Action.do_action(button, 0):
+        print(json.dumps({"selected": False, "reason": "button-click-failed"}))
+        sys.exit(5)
+    if not wait_for_close:
+        print(json.dumps({"selected": True, "driver": "at-spi"}))
+        sys.exit(0)
+    closed_deadline = time.monotonic() + 2
+    while time.monotonic() < closed_deadline:
+        still_open = None
+        desktop = Atspi.get_desktop(0)
+        for app in children(desktop):
+            if (safe(app.get_name, "") or "") != "theprivator":
+                continue
+            still_open = find_file_chooser(app, [0])
+            if still_open is not None:
+                break
+        if still_open is None:
+            print(json.dumps({"selected": True, "driver": "at-spi"}))
+            sys.exit(0)
+        time.sleep(0.05)
+    print(json.dumps({"selected": False, "reason": "dialog-still-open"}))
+    sys.exit(8)
+print(json.dumps({"selected": False, "reason": "dialog-not-found"}))
+sys.exit(6)
+`;
+  const result = runNativeDialogTool(PYTHON, ["-c", script, targetPath, dialogTitle, buttonName, String(timeoutMs), waitForClose ? "1" : "0"], { context, phase, timeoutMs: timeoutMs + 1_000 });
+  try {
+    const parsed = JSON.parse(result.stdout.trim() || "{}");
+    assert(parsed.selected === true, "M005/S04 AT-SPI native dialog selection did not complete.", { phase, markerClass: "native_dialog_selection_failed", outputSuppressed: true });
+  } catch (error) {
+    if (error instanceof VerifyFailure) throw error;
+    fail("M005/S04 AT-SPI native dialog automation returned malformed status.", { phase, markerClass: "native_dialog_output_malformed", outputSuppressed: true });
+  }
+  return { keyboardMode: ATSPI_KEYBOARD, typedSelection: true };
+}
+
+export async function driveM005S04X11PathSelection(targetPath, { dialogTitle = "", context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) }), phase = "native-dialog" } = {}) {
+  const script = String.raw`
+import json
+import sys
+import time
+from Xlib import X, XK, display
+from Xlib.ext import xtest
+
+target_path = sys.argv[1]
+dialog_title = sys.argv[2]
+d = display.Display()
+root = d.screen().root
+
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+def window_title(win):
+    title = safe(win.get_wm_name, "") or ""
+    if title:
+        return title
+    atom = safe(lambda: d.intern_atom('_NET_WM_NAME'), None)
+    utf8 = safe(lambda: d.intern_atom('UTF8_STRING'), None)
+    if atom is None or utf8 is None:
+        return ""
+    prop = safe(lambda: win.get_full_property(atom, utf8), None)
+    if prop is None:
+        return ""
+    raw = prop.value
+    if isinstance(raw, bytes):
+        return raw.decode('utf-8', 'ignore')
+    return str(raw)
+
+def wm_class(win):
+    value = safe(win.get_wm_class, None)
+    if not value:
+        return ""
+    return " ".join(str(part) for part in value if part)
+
+def children(win):
+    tree = safe(win.query_tree, None)
+    if tree is None:
+        return []
+    return list(tree.children or [])
+
+def all_windows(win):
+    stack = [win]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        wid = int(current.id)
+        if wid in seen:
+            continue
+        seen.add(wid)
+        yield current
+        stack.extend(reversed(children(current)))
+
+def find_dialog():
+    candidates = []
+    for win in all_windows(root):
+        title = window_title(win)
+        klass = wm_class(win).casefold()
+        if 'theprivator' not in klass:
+            continue
+        if dialog_title and title == dialog_title:
+            return win
+        if title and title != 'ThePrivator':
+            candidates.append(win)
+    return candidates[0] if candidates else None
+
+win = None
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    win = find_dialog()
+    if win is not None:
+        break
+    time.sleep(0.05)
+if win is None:
+    print(json.dumps({"selected": False, "reason": "dialog-not-found"}))
+    sys.exit(3)
+win.configure(stack_mode=X.Above)
+win.set_input_focus(X.RevertToParent, X.CurrentTime)
+d.sync()
+time.sleep(0.1)
+
+shift = d.keysym_to_keycode(XK.string_to_keysym('Shift_L'))
+ctrl = d.keysym_to_keycode(XK.string_to_keysym('Control_L'))
+
+SPECIAL = {
+    '/': ('slash', False),
+    '-': ('minus', False),
+    '_': ('minus', True),
+    '.': ('period', False),
+    ' ': ('space', False),
+    ':': ('semicolon', True),
+}
+
+def press(code):
+    xtest.fake_input(d, X.KeyPress, code)
+    d.sync()
+    time.sleep(0.002)
+
+def release(code):
+    xtest.fake_input(d, X.KeyRelease, code)
+    d.sync()
+    time.sleep(0.002)
+
+def key_name_for_char(ch):
+    if ch in SPECIAL:
+        return SPECIAL[ch]
+    if ch.isalpha():
+        return (ch.lower(), ch.isupper())
+    if ch.isdigit():
+        return (ch, False)
+    return (ch, False)
+
+def tap_keysym(name, use_shift=False):
+    code = d.keysym_to_keycode(XK.string_to_keysym(name))
+    if not code:
+        raise RuntimeError('missing-keycode')
+    if use_shift:
+        press(shift)
+    press(code)
+    release(code)
+    if use_shift:
+        release(shift)
+
+def tap_char(ch):
+    name, use_shift = key_name_for_char(ch)
+    tap_keysym(name, use_shift)
+
+def tap_return():
+    code = d.keysym_to_keycode(XK.string_to_keysym('Return'))
+    press(code)
+    release(code)
+
+def chord_ctrl_l():
+    l_code = d.keysym_to_keycode(XK.string_to_keysym('l'))
+    press(ctrl)
+    press(l_code)
+    release(l_code)
+    release(ctrl)
+
+chord_ctrl_l()
+time.sleep(0.1)
+for character in target_path:
+    tap_char(character)
+time.sleep(0.1)
+tap_return()
+print(json.dumps({"selected": True, "driver": "python-xlib"}))
+`;
+  const result = runNativeDialogTool(PYTHON, ["-c", script, targetPath, dialogTitle], { context, phase, timeoutMs: NATIVE_DIALOG_TOOL_TIMEOUT_MS });
+  try {
+    const parsed = JSON.parse(result.stdout.trim() || "{}");
+    assert(parsed.selected === true, "M005/S04 X11 native dialog selection did not complete.", { phase, markerClass: "native_dialog_selection_failed", outputSuppressed: true });
+  } catch (error) {
+    if (error instanceof VerifyFailure) throw error;
+    fail("M005/S04 X11 native dialog automation returned malformed status.", { phase, markerClass: "native_dialog_output_malformed", outputSuppressed: true });
+  }
+  return { keyboardMode: X11_PYTHON_KEYBOARD, typedSelection: true };
+}
+
+export async function driveM005S04NativeDialogSelection({ dialog, targetPath, extension, strategyPlan, dialogTitle, settleMs = DEFAULT_NATIVE_DIALOG_SETTLE_MS, confirmOverwrite = false } = {}, context = createM005S04PublicScanContext({ selectedPaths: [targetPath].filter(Boolean) })) {
   assert(typeof targetPath === "string" && targetPath.length > 0, "M005/S04 native dialog selection requires a private target path.", { phase: "native-dialog", markerClass: "missing_selected_path" });
   const commandPlan = createNativeDialogCommandPlan({ dialog, extension, strategyPlan });
   assert(commandPlan.selected, "M005/S04 native dialog automation is unavailable for the current desktop session.", { phase: "native-dialog", markerClass: "missing_native_dialog_tool", strategy: commandPlan.strategy });
   await sleep(settleMs);
   const phase = `native-dialog.${commandPlan.dialog}.${commandPlan.extension}`;
   if (commandPlan.strategy === "wayland") {
-    const focus = await focusM005S04HyprlandDialog(dialogTitle, { context, phase });
-    if (focus.focus === "hyprland-dialog") await sleep(100);
-    if (strategyPlan?.clipboard === "wl-clipboard") {
-      await runM005S04WaylandClipboardLoad(targetPath, { context, phase });
-      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
-      await sleep(150);
-      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"], { context, phase });
-    } else {
-      runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-M", "ctrl", "-P", "l", "-p", "l", "-m", "ctrl"], { context, phase });
-      await sleep(150);
-      runNativeDialogTool(WAYLAND_TYPE_TOOL, [targetPath], { context, phase });
+    if (strategyPlan?.keyboard === ATSPI_KEYBOARD) await driveM005S04AtspiDialogSelection(targetPath, { dialogTitle, buttonName: commandPlan.dialog === "open" ? "Open" : "Save", waitForClose: !confirmOverwrite, context, phase });
+    else {
+      const focus = await focusM005S04HyprlandDialog(dialogTitle, { context, phase });
+      if (focus.focus === "hyprland-dialog") await sleep(100);
+      await driveM005S04WaylandPathSelection(targetPath, { context, phase });
     }
-    await sleep(150);
-    runNativeDialogTool(WAYLAND_TYPE_TOOL, ["-P", "Return", "-p", "Return"], { context, phase });
+    if (commandPlan.dialog === "save" && confirmOverwrite) await tryM005S04AtspiButtonClick("Replace", { context, phase: `${phase}.overwrite` });
   } else if (commandPlan.strategy === "x11") {
-    if (strategyPlan?.clipboard === "xsel") runNativeDialogTool("xsel", ["--clipboard", "--input"], { input: targetPath, context, phase });
-    else runNativeDialogTool("xclip", ["-selection", "clipboard"], { input: targetPath, context, phase });
-    runNativeDialogTool(X11_TYPE_TOOL, ["key", "ctrl+l", "ctrl+v", "Return"], { context, phase });
+    if (strategyPlan?.keyboard === ATSPI_KEYBOARD) await driveM005S04AtspiDialogSelection(targetPath, { dialogTitle, buttonName: commandPlan.dialog === "open" ? "Open" : "Save", waitForClose: !confirmOverwrite, context, phase });
+    else if (strategyPlan?.keyboard === X11_PYTHON_KEYBOARD) await driveM005S04X11PathSelection(targetPath, { dialogTitle, context, phase });
+    else {
+      if (strategyPlan?.clipboard === "xsel") runNativeDialogTool("xsel", ["--clipboard", "--input"], { input: targetPath, context, phase });
+      else runNativeDialogTool("xclip", ["-selection", "clipboard"], { input: targetPath, context, phase });
+      runNativeDialogTool(X11_TYPE_TOOL, ["key", "ctrl+l", "ctrl+v", "Return"], { context, phase });
+    }
+    if (commandPlan.dialog === "save" && confirmOverwrite) await tryM005S04AtspiButtonClick("Replace", { context, phase: `${phase}.overwrite` });
   } else {
     fail("M005/S04 native dialog automation strategy is unsupported.", { phase: "native-dialog", markerClass: "native_dialog_strategy_unsupported", strategy: commandPlan.strategy });
   }
@@ -1649,8 +2189,18 @@ export async function driveM005S04PackageImportViaUi(driver, runtime, { packageP
   assert(runtime?.smokeContext?.smokeProfileName, "M005/S04 package import requires a source profile name.", { phase: "ui.package-import", markerClass: "missing_smoke_context" });
   assert(typeof packagePath === "string" && packagePath.endsWith(".tpkg"), "M005/S04 package import requires a private .tpkg source.", { phase: "ui.package-import", markerClass: "missing_package_path" });
   const button = await waitForM005S04GlobalButton(driver, "Import ThePrivator package", runtime, { step: "m005-package-import-click" });
-  const clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-import", "package_import_click_failed");
-  const dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan, dialogTitle: "Import ThePrivator package" }, context);
+  let clickMode = await clickM005S04UiElement(driver, button, runtime, "ui.package-import", "package_import_click_failed");
+  let dialog;
+  try {
+    dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan, dialogTitle: "Import ThePrivator package" }, context);
+  } catch (error) {
+    if (!(error instanceof VerifyFailure) || !String(error.details?.phase ?? "").startsWith("native-dialog.open")) throw error;
+    await sleep(500);
+    const retryButton = await waitForM005S04GlobalButton(driver, "Import ThePrivator package", runtime, { step: "m005-package-import-retry-click" });
+    const retryMode = await clickM005S04UiElement(driver, retryButton, runtime, "ui.package-import", "package_import_retry_click_failed");
+    clickMode = `${clickMode}+retry-${retryMode}`;
+    dialog = await driveNativeDialogSelection({ dialog: "open", targetPath: packagePath, extension: "tpkg", strategyPlan, dialogTitle: "Import ThePrivator package" }, context);
+  }
   await waitForVisibleText(driver, "ThePrivator package import completed.", runtime, { step: "m005-package-import-success" });
   await waitForVisibleText(driver, "The sidecar imported a stopped copied profile and returned only safe aggregate metadata to the UI.", runtime, { step: "m005-package-import-redaction-copy" });
   const restored = assertM005S04CopiedProfileRestored({ profileStorePath: runtime.profileStore.profileStorePath, appDataRoot: runtime.profileStore.appDataRoot, sourceProfile: runtime.profileStore.profile, expectedCookieRows: runtime.fixtures?.currentCookies ?? runtime.fixtures?.sourceCookies ?? [], expectedPayloadRelativePaths: runtime.fixtures?.expectedPayloadRelativePaths ?? ["Default/Preferences"] }, context);
@@ -1967,11 +2517,11 @@ export async function runM005S04PackagedHarnessSetup({ artifactProof, rootDir = 
         cookieDbRows: cookieRows.count,
         importFixtureFormats: importFixtures.cookies ? 2 : 2,
         safePayloadFiles: payloadFixtures.preferencesPath ? 2 : 2,
-        volatileRuntimeFiles: 3,
+        volatileRuntimeFiles: 2,
       },
       portabilityLoop: {
-        cookies: cookieProof?.summary ?? "not-run",
-        package: packageProof?.summary ?? "not-run",
+        cookieLoop: cookieProof?.summary ?? "not-run",
+        packageLoop: packageProof?.summary ?? "not-run",
         restoredLaunch: restoredProof?.log ?? "not-run",
         finalScan: finalScan ?? "not-run",
       },

@@ -1,5 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { closeWindow, minimizeWindow, startDragging, toggleMaximizeWindow } from "./windowControls";
 import {
   createIdentityDraftState,
   formatIdentityExpectedValueSummary,
@@ -2849,6 +2850,7 @@ export function App() {
 
   return (
     <main className="shell profile-shell" aria-labelledby="shell-heading">
+      <WindowChrome />
       <section className="hero-panel profile-hero" aria-label="ThePrivator Chromium profile lifecycle overview">
         <div className="hero-copy">
           <p className="kicker">M001 · S03 Chromium lifecycle</p>
@@ -3089,6 +3091,44 @@ export function App() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function WindowChrome() {
+  const handleDragStart = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || event.defaultPrevented) {
+      return;
+    }
+
+    void startDragging();
+  }, []);
+
+  return (
+    <header className="app-chrome" aria-label="ThePrivator window chrome">
+      <div
+        className="app-chrome__drag-region"
+        data-tauri-drag-region
+        aria-label="Window drag region"
+        onMouseDown={handleDragStart}
+      >
+        <span className="app-chrome__mark" aria-hidden="true">TP</span>
+        <div className="app-chrome__title">
+          <span>ThePrivator</span>
+          <small>Profile workspace</small>
+        </div>
+      </div>
+      <div className="app-chrome__window-controls" aria-label="Window controls">
+        <button type="button" className="app-chrome__control" aria-label="Minimize window" onClick={() => void minimizeWindow()}>
+          <span aria-hidden="true">−</span>
+        </button>
+        <button type="button" className="app-chrome__control" aria-label="Maximize or restore window" onClick={() => void toggleMaximizeWindow()}>
+          <span aria-hidden="true">□</span>
+        </button>
+        <button type="button" className="app-chrome__control app-chrome__control--close" aria-label="Close window" onClick={() => void closeWindow()}>
+          <span aria-hidden="true">×</span>
+        </button>
+      </div>
+    </header>
   );
 }
 

@@ -4,7 +4,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const windowControlsMock = vi.hoisted(() => ({
+  closeWindow: vi.fn(),
+  minimizeWindow: vi.fn(),
+  startDragging: vi.fn(),
+  toggleMaximizeWindow: vi.fn(),
+}));
+
 import { App } from "./App";
+import { closeWindow, minimizeWindow, startDragging, toggleMaximizeWindow } from "./windowControls";
 import { DIAGNOSTIC_RELATIVE_LOG_PATH } from "./sidecar/types";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -16,9 +25,15 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
 }));
 
+vi.mock("./windowControls", () => windowControlsMock);
+
 const mockInvoke = vi.mocked(invoke);
 const mockOpen = vi.mocked(open);
 const mockSave = vi.mocked(save);
+const mockStartDragging = vi.mocked(startDragging);
+const mockMinimizeWindow = vi.mocked(minimizeWindow);
+const mockToggleMaximizeWindow = vi.mocked(toggleMaximizeWindow);
+const mockCloseWindow = vi.mocked(closeWindow);
 
 function healthEnvelope(overrides: Record<string, unknown> = {}) {
   return {
@@ -821,10 +836,45 @@ describe("ThePrivator profile library UI", () => {
     mockInvoke.mockReset();
     mockOpen.mockReset();
     mockSave.mockReset();
+    mockStartDragging.mockReset();
+    mockMinimizeWindow.mockReset();
+    mockToggleMaximizeWindow.mockReset();
+    mockCloseWindow.mockReset();
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: undefined,
     });
+  });
+
+  it("renders accessible custom chrome controls wired to event-scoped window actions", async () => {
+    mockStartup([]);
+
+    render(<App />);
+    await screen.findByLabelText(/empty profile library/i);
+
+    const dragRegion = screen.getByLabelText(/window drag region/i);
+    expect(dragRegion).toHaveAttribute("data-tauri-drag-region");
+    fireEvent.mouseDown(dragRegion, { button: 0 });
+    expect(mockStartDragging).toHaveBeenCalledTimes(1);
+
+    const minimizeButton = screen.getByRole("button", { name: /minimize window/i });
+    const maximizeButton = screen.getByRole("button", { name: /maximize or restore window/i });
+    const closeButton = screen.getByRole("button", { name: /close window/i });
+    expect(minimizeButton).toBeEnabled();
+    expect(maximizeButton).toBeEnabled();
+    expect(closeButton).toBeEnabled();
+    expect(minimizeButton.closest("[data-tauri-drag-region]")).toBeNull();
+    expect(maximizeButton.closest("[data-tauri-drag-region]")).toBeNull();
+    expect(closeButton.closest("[data-tauri-drag-region]")).toBeNull();
+
+    fireEvent.click(minimizeButton);
+    fireEvent.click(maximizeButton);
+    fireEvent.click(closeButton);
+
+    expect(mockMinimizeWindow).toHaveBeenCalledTimes(1);
+    expect(mockToggleMaximizeWindow).toHaveBeenCalledTimes(1);
+    expect(mockCloseWindow).toHaveBeenCalledTimes(1);
+    expect(mockStartDragging).toHaveBeenCalledTimes(1);
   });
 
   it("starts health, profile list, and Chromium status without a startup waterfall and renders the empty-state CTA", async () => {
@@ -3679,10 +3729,16 @@ describe("ThePrivator profile library UI", () => {
     expect(source).toContain("replaceProfileCookies");
     expect(source).toContain("exportProfilePackage");
     expect(source).toContain("importProfilePackage");
+    expect(source).toContain("./windowControls");
+    expect(source).toContain("data-tauri-drag-region");
+    expect(source).toContain("onClick={() => void minimizeWindow()}");
+    expect(source).toContain("onClick={() => void toggleMaximizeWindow()}");
+    expect(source).toContain("onClick={() => void closeWindow()}");
     expect(source).toContain("@tauri-apps/plugin-dialog");
     expect(source).not.toMatch(/value=\"pac\"|value='pac'|value=\"system\"|value='system'|value=\"directFallback\"|value='directFallback'/);
     expect(source).not.toMatch(/PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/);
     expect(source).not.toMatch(/@tauri-apps\/plugin-(fs|shell)/);
+    expect(source).not.toMatch(/@tauri-apps\/api\/window/);
     expect(source).not.toMatch(/\binvoke\s*\(/);
     expect(source).not.toMatch(/showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/);
     expect(source).not.toMatch(/type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/);

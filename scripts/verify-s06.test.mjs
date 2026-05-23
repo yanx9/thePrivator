@@ -157,6 +157,14 @@ function seedTauriGuardrails(root, capabilityOverrides = {}) {
       beforeDevCommand: "npm run sidecar:build && npm run dev",
       beforeBuildCommand: "npm run build && npm run sidecar:build",
     },
+    app: {
+      windows: [
+        {
+          label: "main",
+          decorations: capabilityOverrides.decorations ?? false,
+        },
+      ],
+    },
     bundle: {
       targets: ["deb", "rpm"],
       externalBin: ["binaries/theprivator-sidecar"],
@@ -167,6 +175,13 @@ function seedTauriGuardrails(root, capabilityOverrides = {}) {
     windows: ["main"],
     permissions: [
       "core:default",
+      "core:window:default",
+      "core:window:allow-start-dragging",
+      "core:window:allow-minimize",
+      "core:window:allow-toggle-maximize",
+      "core:window:allow-close",
+      "dialog:allow-open",
+      "dialog:allow-save",
       {
         identifier: "shell:allow-spawn",
         allow: [
@@ -333,11 +348,47 @@ describe("verify-s06 guard helpers", () => {
     expect(assertTauriGuardrails({ rootDir: root, platform: "linux" })).toMatchObject({
       externalBin: "binaries/theprivator-sidecar",
       targets: ["deb", "rpm"],
-      permissions: ["core:default", "shell:allow-spawn"],
+      decorations: false,
+      permissions: [
+        "core:default",
+        "core:window:default",
+        "core:window:allow-start-dragging",
+        "core:window:allow-minimize",
+        "core:window:allow-toggle-maximize",
+        "core:window:allow-close",
+        "dialog:allow-open",
+        "dialog:allow-save",
+        "shell:allow-spawn",
+      ],
     });
 
-    seedTauriGuardrails(root, { permissions: ["fs:default"] });
+    for (const forbiddenPermission of [
+      "fs:default",
+      "shell:allow-open",
+      "shell:allow-execute",
+      "dialog:default",
+      "core:window:allow-create",
+      "core:window:allow-set-title",
+    ]) {
+      seedTauriGuardrails(root, { permissions: [forbiddenPermission] });
+      expect(() => assertTauriGuardrails({ rootDir: root, platform: "linux" }), forbiddenPermission).toThrow(/widened/i);
+    }
+
+    seedTauriGuardrails(root, {
+      permissions: [
+        {
+          identifier: "shell:allow-spawn",
+          allow: [
+            { name: "binaries/theprivator-sidecar", sidecar: true },
+            { name: "sh", sidecar: false },
+          ],
+        },
+      ],
+    });
     expect(() => assertTauriGuardrails({ rootDir: root, platform: "linux" })).toThrow(/widened/i);
+
+    seedTauriGuardrails(root, { decorations: true });
+    expect(() => assertTauriGuardrails({ rootDir: root, platform: "linux" })).toThrow(/frameless|decorations/i);
   });
 
   it("fails strict WebDriver preflight with actionable missing-prerequisite instructions", () => {

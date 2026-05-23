@@ -35,6 +35,18 @@ const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SIDECAR_NAME = "theprivator-sidecar";
 const APP_BINARY_NAME = "theprivator";
 const SIDECAR_EXTERNAL_BIN = "binaries/theprivator-sidecar";
+const ALLOWED_STRING_PERMISSIONS = Object.freeze([
+  "core:default",
+  "core:window:default",
+  "core:window:allow-start-dragging",
+  "core:window:allow-minimize",
+  "core:window:allow-toggle-maximize",
+  "core:window:allow-close",
+  "dialog:allow-open",
+  "dialog:allow-save",
+]);
+const ALLOWED_PERMISSION_IDS = Object.freeze([...ALLOWED_STRING_PERMISSIONS, "shell:allow-spawn"]);
+const ALLOWED_STRING_PERMISSION_SET = new Set(ALLOWED_STRING_PERMISSIONS);
 const VENV_PYTHON = process.platform === "win32"
   ? join(ROOT_DIR, ".venv", "Scripts", "python.exe")
   : join(ROOT_DIR, ".venv", "bin", "python");
@@ -1086,6 +1098,15 @@ export function assertTauriGuardrails(options = {}) {
       code: "S06_BEFORE_DEV_DRIFT",
     }, { rootDir });
 
+  const mainWindow = Array.isArray(tauriConfig.app?.windows)
+    ? tauriConfig.app.windows.find((windowConfig) => windowConfig?.label === "main") ?? tauriConfig.app.windows[0]
+    : null;
+  assert(mainWindow?.decorations === false,
+    "The main Tauri window must stay frameless for the custom chrome path.", {
+      code: "S06_WINDOW_DECORATIONS_DRIFT",
+      decorations: mainWindow?.decorations,
+    }, { rootDir });
+
   const permissions = capability.permissions;
   assert(Array.isArray(permissions), "Default capability permissions must be an array.", {
     code: "S06_CAPABILITY_MALFORMED",
@@ -1093,14 +1114,14 @@ export function assertTauriGuardrails(options = {}) {
 
   const permissionIds = [];
   for (const permission of permissions) {
-    if (permission === "core:default") {
+    if (typeof permission === "string" && ALLOWED_STRING_PERMISSION_SET.has(permission)) {
       permissionIds.push(permission);
       continue;
     }
     if (permission && typeof permission === "object" && permission.identifier === "shell:allow-spawn") {
       const allow = permission.allow;
       const allowedSidecars = Array.isArray(allow)
-        ? allow.filter((entry) => entry?.name === SIDECAR_EXTERNAL_BIN && entry?.sidecar === true)
+        ? allow.filter((entry) => entry?.name === SIDECAR_EXTERNAL_BIN && entry?.sidecar === true && Object.keys(entry).length === 2)
         : [];
       assert(Array.isArray(allow) && allow.length === 1 && allowedSidecars.length === 1,
         "Default capability widened shell:allow-spawn beyond the fixed sidecar.", {
@@ -1112,21 +1133,23 @@ export function assertTauriGuardrails(options = {}) {
     }
 
     const identifier = typeof permission === "string" ? permission : permission?.identifier;
-    fail("Default capability widened filesystem/shell authority for S06.", {
+    fail("Default capability widened filesystem/shell/dialog/window authority for S06.", {
       code: "S06_CAPABILITY_WIDENED",
       identifier: identifier ?? "unknown",
     }, { rootDir });
   }
 
-  assert(permissionIds.length === 2 && permissionIds.includes("core:default") && permissionIds.includes("shell:allow-spawn"),
-    "Default capability must contain only core:default and shell:allow-spawn.", {
+  assert(permissionIds.length === ALLOWED_PERMISSION_IDS.length && ALLOWED_PERMISSION_IDS.every((permissionId) => permissionIds.includes(permissionId)),
+    "Default capability must contain only the fixed core/dialog/window permissions and shell:allow-spawn.", {
       code: "S06_CAPABILITY_DRIFT",
       permissions: permissionIds,
+      expected: ALLOWED_PERMISSION_IDS,
     }, { rootDir });
 
   return {
     externalBin: SIDECAR_EXTERNAL_BIN,
     targets,
+    decorations: mainWindow.decorations,
     permissions: permissionIds,
   };
 }

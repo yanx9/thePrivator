@@ -249,29 +249,38 @@ describe("verify-m005-s04 source guardrails", () => {
 });
 
 describe("verify-m005-s04 native dialog preflight", () => {
-  it("plans Wayland clipboard selection with redacted save/open dialog summaries", () => {
-    const commandExists = (name) => ["wtype", "wl-copy", "wl-paste"].includes(name);
+  it("plans Wayland AT-SPI selection with redacted save/open dialog summaries", () => {
+    const commandExists = (name) => name === "python3";
     const plan = planNativeDialogAutomation({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-1", PATH: "/mock/bin" }, commandExists });
-    expect(plan).toMatchObject({ strategy: "wayland", status: "available", clipboard: "wl-clipboard", missing: [] });
+    expect(plan).toMatchObject({ strategy: "wayland", status: "available", keyboard: "at-spi", clipboard: "none", missing: [] });
     const commandPlan = createNativeDialogCommandPlan({ dialog: "save", extension: "json", strategyPlan: plan });
-    expect(commandPlan).toEqual({ dialog: "save", selected: true, extension: "json", strategy: "wayland", steps: ["focus-dialog", "clipboard-load", "confirm-selection"] });
+    expect(commandPlan).toEqual({ dialog: "save", selected: true, extension: "json", strategy: "wayland", steps: ["focus-dialog", "type-selection", "confirm-selection"] });
     expect(findM005S04ForbiddenPublicMarker(commandPlan)).toBeNull();
   });
 
+  it("falls back to Wayland ydotool when AT-SPI is unavailable", () => {
+    const commandExists = (name) => ["ydotool", "wl-copy", "wl-paste"].includes(name);
+    const plan = planNativeDialogAutomation({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-1", PATH: "/mock/bin" }, commandExists });
+    expect(plan).toMatchObject({ strategy: "wayland", status: "available", keyboard: "ydotool", clipboard: "wl-clipboard", missing: [] });
+  });
+
   it("falls back to X11 when Wayland is absent and fails closed for missing tools", () => {
+    const x11PythonPlan = planNativeDialogAutomation({ platform: "linux", env: { DISPLAY: ":1", PATH: "/mock/bin" }, commandExists: (name) => name === "python3" });
+    expect(x11PythonPlan).toMatchObject({ strategy: "x11", status: "available", keyboard: "at-spi", clipboard: "none" });
     const x11Plan = planNativeDialogAutomation({ platform: "linux", env: { DISPLAY: ":1", PATH: "/mock/bin" }, commandExists: (name) => ["xdotool", "xclip"].includes(name) });
-    expect(x11Plan).toMatchObject({ strategy: "x11", status: "available", clipboard: "xclip" });
+    expect(x11Plan).toMatchObject({ strategy: "x11", status: "available", keyboard: "xdotool", clipboard: "xclip" });
     expect(() => assertNativeDialogAutomationPreflight({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-1", PATH: "/mock/bin" }, commandExists: () => false, strict: true })).toThrow(VerifyFailure);
   });
 
-  it("matches Hyprland native dialog windows by exact safe title and address", () => {
+  it("matches Hyprland native dialog windows by exact safe title or non-main ThePrivator fallback address", () => {
     const clients = [
       { class: "theprivator", title: "ThePrivator", address: "0x1" },
       { class: "theprivator", title: "Export cookies as ThePrivator JSON", address: "0xabc" },
       { class: "other", title: "Export cookies as ThePrivator JSON", address: "0xdef" },
     ];
     expect(findM005S04HyprlandDialogAddress(clients, "Export cookies as ThePrivator JSON")).toBe("0xabc");
-    expect(findM005S04HyprlandDialogAddress(clients, "Import ThePrivator package")).toBeNull();
+    expect(findM005S04HyprlandDialogAddress(clients, "Import ThePrivator package")).toBe("0xabc");
+    expect(findM005S04HyprlandDialogAddress([{ class: "theprivator", title: "ThePrivator", address: "0x1" }], "Import ThePrivator package")).toBeNull();
   });
 
   it("loads Wayland clipboard through detached paste-once process without inheriting output streams", async () => {
@@ -432,11 +441,12 @@ describe("verify-m005-s04 fixture helpers", () => {
     const imports = writeM005S04CookieImportFixtures({ smokeRoot: smokeContext.smokeRoot }, context);
     const payload = writeM005S04PayloadFixtures({ appDataRoot, userDataRoot, selectedPackagePath: join(smokeContext.smokeRoot, "fixtures", "selected-output.tpkg") }, context);
     expect(readFileSync(imports.value.jsonPath, "utf8")).toContain("theprivator.cookies");
+    expect(readFileSync(imports.value.jsonPath, "utf8")).toContain("expiresUnix");
     expect(readFileSync(imports.value.netscapePath, "utf8")).toContain("Netscape HTTP Cookie File");
     expect(readFileSync(payload.value.preferencesPath, "utf8")).toContain("M005 S04 safe payload");
     expect(readFileSync(payload.value.runtimeDebugPath, "utf8")).toContain("devtools/browser");
     expect(imports.log).toMatchObject({ fixtureFormatCount: 2, cookieCount: 2, pathScope: "smoke-root" });
-    expect(payload.log).toMatchObject({ safePayloadFileCount: 2, volatileRuntimeFileCount: 3, selectedDestinationFixture: true });
+    expect(payload.log).toMatchObject({ safePayloadFileCount: 2, volatileRuntimeFileCount: 2, selectedDestinationFixture: true });
     expect(findM005S04ForbiddenPublicMarker([imports.log, payload.log], context)).toBeNull();
   });
 });

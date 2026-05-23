@@ -3033,7 +3033,16 @@ mod tests {
 
         assert_eq!(
             string_permissions,
-            vec!["core:default", "dialog:allow-open", "dialog:allow-save"]
+            vec![
+                "core:default",
+                "core:window:default",
+                "core:window:allow-start-dragging",
+                "core:window:allow-minimize",
+                "core:window:allow-toggle-maximize",
+                "core:window:allow-close",
+                "dialog:allow-open",
+                "dialog:allow-save",
+            ]
         );
 
         let spawn_permissions: Vec<&Value> = permissions
@@ -3060,6 +3069,9 @@ mod tests {
             "dialog:allow-ask",
             "dialog:allow-confirm",
             "dialog:allow-pick-folder",
+            "core:window:allow-create",
+            "core:window:allow-set-title",
+            "core:window:allow-set-size",
         ] {
             assert!(
                 !serialized.contains(forbidden),
