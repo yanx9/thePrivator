@@ -877,6 +877,67 @@ describe("ThePrivator profile library UI", () => {
     expect(mockStartDragging).toHaveBeenCalledTimes(1);
   });
 
+  it("renders a compact app frame with Profiles as the active primary destination", async () => {
+    mockStartup([]);
+
+    render(<App />);
+    await screen.findByLabelText(/empty profile library/i);
+
+    expect(screen.getByLabelText(/theprivator window chrome/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /skip to profiles workspace/i })).toHaveAttribute("href", "#profiles-workspace");
+
+    const primaryNav = screen.getByRole("navigation", { name: /primary workspace navigation/i });
+    const profilesDestination = within(primaryNav).getByRole("link", { name: /^profiles$/i });
+    expect(profilesDestination).toHaveAttribute("href", "#profiles-workspace");
+    expect(profilesDestination).toHaveAttribute("aria-current", "page");
+    expect(within(primaryNav).getByText(/^import$/i)).toHaveAttribute("aria-disabled", "true");
+    expect(within(primaryNav).getByText(/^automation$/i)).toHaveAttribute("aria-disabled", "true");
+    expect(within(primaryNav).queryByText(/diagnostic|observability|sidecar|automation api/i)).not.toBeInTheDocument();
+    expect(within(primaryNav).queryByRole("link", { name: /^import$/i })).not.toBeInTheDocument();
+    expect(within(primaryNav).queryByRole("link", { name: /^automation$/i })).not.toBeInTheDocument();
+
+    const profilesMain = screen.getByRole("main", { name: /profiles workspace/i });
+    expect(profilesMain).toHaveAttribute("id", "profiles-workspace");
+    expect(profilesMain).toContainElement(screen.getByRole("heading", { name: /^profiles$/i }));
+    const globalStatus = screen.getByLabelText(/global product status/i);
+    expect(globalStatus).toHaveTextContent(/0 profiles/i);
+    expect(globalStatus).toHaveTextContent(/App connectionReady/i);
+    expect(globalStatus).toHaveTextContent(/BrowsersReady · 0 running/i);
+    expect(globalStatus).toHaveTextContent(/AutomationNot checked/i);
+    expect(globalStatus).toHaveTextContent(/AttentionCreate a profile/i);
+    expect(globalStatus).not.toHaveTextContent(/detailRef|Diagnostic lookup|Profile observability|Bridge invoke|Runtime|Loopback URL|Status request|profile-store|tpapi|raw diagnostics|stack trace/i);
+    expect(within(profilesMain).getByRole("button", { name: /refresh profiles/i })).toBeEnabled();
+  });
+
+  it("keeps raw support references out of the compact global status", async () => {
+    mockInvoke.mockImplementation(((command: string) => {
+      if (command === "sidecar_health") {
+        return Promise.reject(profileError(
+          "SIDECAR_HEALTH_FAILED",
+          "raw diagnostics stdout stderr /tmp/theprivator proxy-pass-should-not-leak stack trace",
+          "sidecar-detail-ref-should-not-render",
+        ));
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(profileEnvelope(profileResult([])));
+      }
+      if (command === "chromium_status") {
+        return Promise.resolve(chromiumEnvelope(chromiumStatusResult()));
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    }) as typeof invoke);
+
+    render(<App />);
+    await screen.findByLabelText(/empty profile library/i);
+
+    const globalStatus = screen.getByLabelText(/global product status/i);
+    expect(globalStatus).toHaveTextContent(/Workspace has one item to review/i);
+    expect(globalStatus).toHaveTextContent(/App connectionNeeds support/i);
+    expect(globalStatus).toHaveTextContent(/AttentionApp connection needs support/i);
+    expect(globalStatus).toHaveTextContent(/Open Support to review app connection details/i);
+    expect(globalStatus).not.toHaveTextContent(/SIDECAR_HEALTH_FAILED|sidecar-detail-ref-should-not-render|raw diagnostics|stdout|stderr|theprivator|proxy-pass-should-not-leak|stack trace|detailRef/i);
+  });
+
   it("starts health, profile list, and Chromium status without a startup waterfall and renders the empty-state CTA", async () => {
     const health = deferred<unknown>();
     const profiles = deferred<unknown>();
@@ -896,7 +957,7 @@ describe("ThePrivator profile library UI", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /persistent profiles, transient browsers/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^profiles$/i })).toBeInTheDocument();
     expect(mockInvoke).toHaveBeenNthCalledWith(1, "sidecar_health");
     expect(mockInvoke).toHaveBeenNthCalledWith(2, "profiles_list");
     expect(mockInvoke).toHaveBeenNthCalledWith(3, "chromium_status");
@@ -2171,12 +2232,13 @@ describe("ThePrivator profile library UI", () => {
 
     render(<App />);
 
-    await screen.findByLabelText(/empty profile library/i);
-    const input = screen.getByLabelText(/profile name/i);
+    const profilesMain = screen.getByRole("main", { name: /profiles workspace/i });
+    await within(profilesMain).findByLabelText(/empty profile library/i);
+    const input = within(profilesMain).getByLabelText(/profile name/i);
     fireEvent.change(input, { target: { value: "Research" } });
-    fireEvent.click(screen.getByRole("button", { name: /^create profile$/i }));
+    fireEvent.click(within(profilesMain).getByRole("button", { name: /^create profile$/i }));
 
-    expect(await screen.findByRole("listitem", { name: /research/i })).toBeInTheDocument();
+    expect(await within(profilesMain).findByRole("listitem", { name: /research/i })).toBeInTheDocument();
     expect(input).toHaveValue("");
     expect(screen.getByLabelText(/profile operation feedback/i)).toHaveTextContent(/Last successful profile list contains 1 profile/i);
     expect(mockInvoke).toHaveBeenLastCalledWith("profiles_create", { name: "Research" });

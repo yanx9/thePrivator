@@ -1,5 +1,6 @@
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { buildGlobalStatusSummary, type GlobalStatusSummary } from "./globalStatus";
 import { closeWindow, minimizeWindow, startDragging, toggleMaximizeWindow } from "./windowControls";
 import {
   createIdentityDraftState,
@@ -2828,6 +2829,87 @@ export function App() {
   const isEmpty = !isProfileLoading && profileCount === 0;
   const profileTone = profilePhase === "ready" ? "ready" : profilePhase === "loading" ? "pending" : "error";
   const chromiumTone = chromiumPhase === "ready" ? "ready" : chromiumPhase === "loading" || chromiumPhase === "refreshing" || chromiumPhase === "launching" || chromiumPhase === "stopping" ? "pending" : "error";
+  const globalStatusSummary = useMemo(
+    () => buildGlobalStatusSummary({
+      health: {
+        phase: healthState.phase,
+        status: healthState.health?.health.status ?? null,
+      },
+      chromium: {
+        phase: chromiumPhase,
+        runningCount: chromiumRunningCount,
+      },
+      automationApi: {
+        phase: automationApiState.phase,
+        status: automationApiState.status?.status ?? null,
+        running: automationApiState.status?.running ?? null,
+      },
+      profiles: {
+        phase: profilePhase,
+        count: profileCount,
+      },
+      attentionCandidates: [
+        {
+          source: "sidecar",
+          phase: healthState.error?.phase ?? null,
+          code: healthState.error?.code ?? null,
+          detailRef: healthState.error?.detailRef ?? null,
+          occurredAt: healthState.lastCheckedAt,
+        },
+        {
+          source: "chromium",
+          phase: lastLifecycleError?.error.phase ?? null,
+          code: lastLifecycleError?.error.code ?? null,
+          detailRef: lastLifecycleError?.error.detailRef ?? null,
+          occurredAt: lastLifecycleError?.occurredAt ?? null,
+        },
+        {
+          source: "automation",
+          phase: automationApiState.error?.error.phase ?? automationApiState.status?.lastError?.phase ?? null,
+          code: automationApiState.error?.error.code ?? automationApiState.status?.lastError?.code ?? null,
+          detailRef: automationApiState.error?.error.detailRef ?? automationApiState.status?.lastError?.detailRef ?? null,
+          occurredAt: automationApiState.error?.occurredAt ?? automationApiState.status?.lastError?.at ?? null,
+        },
+        {
+          source: "profiles",
+          phase: profileError?.error.phase ?? null,
+          code: profileError?.error.code ?? null,
+          detailRef: profileError?.error.detailRef ?? null,
+          occurredAt: null,
+        },
+      ],
+    }),
+    [
+      automationApiState.error?.error.code,
+      automationApiState.error?.error.detailRef,
+      automationApiState.error?.error.phase,
+      automationApiState.error?.occurredAt,
+      automationApiState.phase,
+      automationApiState.status?.lastError?.at,
+      automationApiState.status?.lastError?.code,
+      automationApiState.status?.lastError?.detailRef,
+      automationApiState.status?.lastError?.phase,
+      automationApiState.status?.running,
+      automationApiState.status?.status,
+      chromiumPhase,
+      chromiumRunningCount,
+      healthState.error?.code,
+      healthState.error?.detailRef,
+      healthState.error?.phase,
+      healthState.health?.health.status,
+      healthState.lastCheckedAt,
+      healthState.phase,
+      lastLifecycleError?.error.code,
+      lastLifecycleError?.error.detailRef,
+      lastLifecycleError?.error.phase,
+      lastLifecycleError?.occurredAt,
+      profileCount,
+      profileError?.error.code,
+      profileError?.error.detailRef,
+      profileError?.error.phase,
+      profilePhase,
+    ],
+  );
   const legacySelectedCount = useMemo(
     () => legacyScanSnapshot?.candidates.filter((candidate) => legacySelectedById[candidate.legacyId]).length ?? 0,
     [legacyScanSnapshot, legacySelectedById],
@@ -2849,28 +2931,43 @@ export function App() {
   const packageImportDisabledReason = getPackageImportDisabledReason();
 
   return (
-    <main className="shell profile-shell" aria-labelledby="shell-heading">
+    <div className="shell app-frame profile-shell">
+      <a className="skip-link" href="#profiles-workspace">Skip to profiles workspace</a>
       <WindowChrome />
-      <section className="hero-panel profile-hero" aria-label="ThePrivator Chromium profile lifecycle overview">
-        <div className="hero-copy">
-          <p className="kicker">M001 · S03 Chromium lifecycle</p>
-          <h1 id="shell-heading">Persistent profiles, transient browsers.</h1>
-          <p className="hero-lede">
-            Launch and stop sidecar-owned Chromium processes for stored profiles without writing runtime truth into the
-            profile records. Running state comes from process bookkeeping and is reconciled by status refreshes.
-          </p>
-        </div>
 
-        <aside className={`phase-ribbon phase-ribbon--${profileTone}`} aria-label="Current profile phase">
-          <span className="pulse-dot" aria-hidden="true" />
-          <span className="phase-label">Profile phase</span>
-          <strong>{profilePhase}</strong>
-          <span>{PROFILE_PHASE_LABELS[profilePhase]}</span>
-          <span className="ribbon-count">{profileCount} stored profiles</span>
-        </aside>
-      </section>
+      <header className="app-frame__topbar" aria-label="Workspace navigation">
+        <nav className="primary-nav" aria-label="Primary workspace navigation">
+          <a className="primary-nav__item primary-nav__item--active" href="#profiles-workspace" aria-current="page">
+            Profiles
+          </a>
+          <span className="primary-nav__item primary-nav__item--future" aria-disabled="true">
+            Import
+          </span>
+          <span className="primary-nav__item primary-nav__item--future" aria-disabled="true">
+            Automation
+          </span>
+        </nav>
+        <GlobalStatusBar summary={globalStatusSummary} />
+      </header>
 
-      <section className="profile-workspace" aria-label="Profile library workspace">
+      <main id="profiles-workspace" className="profiles-main" aria-label="Profiles workspace" tabIndex={-1}>
+        <section className="workspace-toolbar profile-hero" aria-label="Profiles workspace overview">
+          <div className="hero-copy">
+            <p className="kicker">Profiles</p>
+            <h1 id="shell-heading">Profiles</h1>
+            <p className="hero-lede">Create, import, launch, and stop browser profiles.</p>
+          </div>
+
+          <aside className={`phase-ribbon phase-ribbon--${profileTone}`} aria-label="Current profile phase">
+            <span className="pulse-dot" aria-hidden="true" />
+            <span className="phase-label">Profile phase</span>
+            <strong>{profilePhase}</strong>
+            <span>{PROFILE_PHASE_LABELS[profilePhase]}</span>
+            <span className="ribbon-count">{profileCount} stored profiles</span>
+          </aside>
+        </section>
+
+        <section className="profile-workspace" aria-label="Profile library workspace">
         <section className="library-panel" aria-labelledby="library-heading">
           <div className="section-heading">
             <div>
@@ -3052,7 +3149,7 @@ export function App() {
           )}
         </section>
 
-        <aside className="system-column" aria-label="Diagnostics and observability">
+        <aside className="system-column workspace-utility-column" aria-label="Workspace utility panels">
           <SystemStatusPanel
             diagnosticLookupState={diagnosticLookupState}
             healthBusyAction={healthBusyAction}
@@ -3091,6 +3188,27 @@ export function App() {
         </aside>
       </section>
     </main>
+  </div>
+  );
+}
+
+function GlobalStatusBar({ summary }: { summary: GlobalStatusSummary }) {
+  return (
+    <section className={`global-status global-status--${summary.overallTone}`} aria-label="Global product status" aria-live="polite" aria-atomic="true">
+      <div className="global-status__headline">
+        <span className={`global-status__beacon global-status__beacon--${summary.overallTone}`} aria-hidden="true" />
+        <strong>{summary.statusLine}</strong>
+      </div>
+      <dl className="global-status__items">
+        {summary.items.map((item) => (
+          <div key={item.key} className={`global-status__item global-status__item--${item.tone}`}>
+            <dt>{item.label}</dt>
+            <dd>{item.value}</dd>
+            {item.supportActionHint ? <span className="global-status__hint">{item.supportActionHint}</span> : null}
+          </div>
+        ))}
+      </dl>
+    </section>
   );
 }
 
