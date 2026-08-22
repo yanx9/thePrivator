@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from theprivator_sidecar.profiles import STORE_VERSION
+
 from theprivator import __version__ as app_version
 from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
 
@@ -490,7 +492,7 @@ def test_profiles_proxy_update_persists_validated_proxy_and_returns_safe_profile
     assert direct_response["result"]["profile"]["proxy"]["mode"] == "direct"
     assert fixed_response["ok"] is True
     result = fixed_response["result"]
-    assert result["storeVersion"] == 3
+    assert result["storeVersion"] == STORE_VERSION
     assert result["count"] == 1
     assert result["profiles"] == [result["profile"]]
     public_proxy = result["profile"]["proxy"]
@@ -717,7 +719,7 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     create_diagnostic = parse_ndjson(create_proc.stderr)[0]
     assert create_proc.returncode == 0
     assert create_response["ok"] is True
-    assert create_response["result"]["storeVersion"] == 3
+    assert create_response["result"]["storeVersion"] == STORE_VERSION
     assert create_response["result"]["count"] == 1
     profile = create_response["result"]["profile"]
     assert profile["name"] == "Research"
@@ -777,7 +779,14 @@ def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocat
     )
     delete_response = parse_ndjson(delete_proc.stdout)[0]
     assert delete_response["ok"] is True
-    assert delete_response["result"] == {"storeVersion": 3, "profiles": [], "count": 0}
+    delete_result = delete_response["result"]
+    assert delete_result["storeVersion"] == STORE_VERSION
+    # Gone from the library, but the response still carries the profile it moved
+    # to the trash: the caller needs its id to offer an undo.
+    assert delete_result["profiles"] == []
+    assert delete_result["count"] == 0
+    assert delete_result["profile"]["id"] == profile["id"]
+    assert delete_result["profile"]["lifecycle"]["deletedAt"].endswith("Z")
 
 
 def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_diagnostics(tmp_path):
@@ -795,7 +804,7 @@ def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_d
     )
     create_response = parse_ndjson(create_proc.stdout)[0]
     assert create_response["ok"] is True
-    assert create_response["result"]["storeVersion"] == 3
+    assert create_response["result"]["storeVersion"] == STORE_VERSION
     profile = create_response["result"]["profile"]
     assert profile["identity"] == DEFAULT_REAL_IDENTITY
 

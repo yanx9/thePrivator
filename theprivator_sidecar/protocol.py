@@ -21,6 +21,13 @@ PROFILE_NOT_FOUND = "PROFILE_NOT_FOUND"
 PROFILE_STORE_UNAVAILABLE = "PROFILE_STORE_UNAVAILABLE"
 PROFILE_STORE_CORRUPT = "PROFILE_STORE_CORRUPT"
 PROFILE_STORE_WRITE_FAILED = "PROFILE_STORE_WRITE_FAILED"
+# A store written by a newer build. Distinct from CORRUPT on purpose: reporting
+# "your entire profile library is damaged" when the only problem is an out-of-date
+# app reads as total data loss, and once profiles sync between machines a single
+# early upgrade would show that on every other machine at once.
+PROFILE_STORE_VERSION_TOO_NEW = "PROFILE_STORE_VERSION_TOO_NEW"
+PROFILE_START_URL_INVALID = "PROFILE_START_URL_INVALID"
+PROFILE_ORGANIZATION_INVALID = "PROFILE_ORGANIZATION_INVALID"
 PROFILE_DELETE_FAILED = "PROFILE_DELETE_FAILED"
 LEGACY_ROOT_INVALID = "LEGACY_ROOT_INVALID"
 LEGACY_CONFIG_MISSING = "LEGACY_CONFIG_MISSING"

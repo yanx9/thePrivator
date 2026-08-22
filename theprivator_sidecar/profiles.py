@@ -12,12 +12,23 @@ import math
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Union
 
 from .identity import DEFAULT_REAL_IDENTITY, curated_preset, normalize_identity, warnings_for_identity
+from .profile_sections import (
+    default_launch,
+    default_lifecycle,
+    default_organization,
+    default_sync,
+    normalize_launch as normalize_profile_launch,
+    normalize_lifecycle,
+    normalize_organization,
+    normalize_sync,
+    start_urls_for_launch,
+)
 from .proxy import default_proxy_config, is_proxy_secret_key, normalize_proxy_config, public_proxy_summary
 from .protocol import (
     INVALID_REQUEST,
@@ -27,12 +38,15 @@ from .protocol import (
     PROFILE_NOT_FOUND,
     PROFILE_STORE_CORRUPT,
     PROFILE_STORE_UNAVAILABLE,
+    PROFILE_STORE_VERSION_TOO_NEW,
     PROFILE_STORE_WRITE_FAILED,
     JsonObject,
     SidecarError,
 )
 
-STORE_VERSION = 3
+STORE_VERSION = 4
+SUPPORTED_READ_STORE_VERSIONS = frozenset({1, 2, 3, STORE_VERSION})
+DEVICE_FILE = "device.json"
 STORE_DIR = "profile-store"
 PROFILES_DIR = "profiles"
 PROFILES_FILE = "profiles.json"
@@ -101,22 +115,32 @@ class ProfileRecord:
     identity: JsonObject
     proxy: JsonObject = field(default_factory=default_proxy_config)
     metadata: Optional[JsonObject] = None
+    organization: JsonObject = field(default_factory=default_organization)
+    launch: JsonObject = field(default_factory=default_launch)
+    lifecycle: JsonObject = field(default_factory=default_lifecycle)
+    sync: JsonObject = field(default_factory=lambda: default_sync(local_device_id()))
 
     @classmethod
     def create(cls, name: str, metadata: Optional[Mapping[str, Any]] = None) -> "ProfileRecord":
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
         proxy = default_proxy_config()
+        identity = default_identity()
+        launch = default_launch()
         return cls(
             id=profile_id,
             name=name,
             createdAt=now,
             updatedAt=now,
-            defaults=defaults_for_proxy(proxy),
+            defaults=derive_defaults(proxy=proxy, identity=identity, launch=launch),
             storage=storage_for_profile(profile_id),
-            identity=default_identity(),
+            identity=identity,
             proxy=proxy,
             metadata=normalize_profile_metadata(metadata),
+            organization=default_organization(),
+            launch=launch,
+            lifecycle=default_lifecycle(),
+            sync=default_sync(local_device_id()),
         )
 
     @classmethod
@@ -132,16 +156,22 @@ class ProfileRecord:
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
         normalized_proxy = normalize_proxy_config(proxy)
+        normalized_identity = normalize_profile_identity(identity)
+        launch = default_launch()
         return cls(
             id=profile_id,
             name=name,
             createdAt=now,
             updatedAt=now,
-            defaults=defaults_for_proxy(normalized_proxy),
+            defaults=derive_defaults(proxy=normalized_proxy, identity=normalized_identity, launch=launch),
             storage=storage_for_profile(profile_id),
-            identity=normalize_profile_identity(identity),
+            identity=normalized_identity,
             proxy=normalized_proxy,
             metadata=normalize_profile_metadata(metadata),
+            organization=default_organization(),
+            launch=launch,
+            lifecycle=default_lifecycle(),
+            sync=default_sync(local_device_id()),
         )
 
     @classmethod
@@ -158,10 +188,12 @@ class ProfileRecord:
             "storage",
             "metadata",
         }
-        if store_version in {2, STORE_VERSION}:
+        if store_version >= 2:
             allowed_fields.add("identity")
-        if store_version == STORE_VERSION:
+        if store_version >= 3:
             allowed_fields.add("proxy")
+        if store_version >= STORE_VERSION:
+            allowed_fields.update({"organization", "launch", "lifecycle", "sync"})
         if set(data) - allowed_fields:
             raise_corrupt_store()
 
@@ -190,7 +222,32 @@ class ProfileRecord:
             raise_corrupt_store()
 
         proxy = proxy_for_store_version(data, store_version)
-        if defaults != asdict(defaults_for_proxy(proxy)):
+
+        if store_version == 1:
+            identity = default_identity()
+        elif store_version >= 2:
+            identity = normalize_profile_identity(data.get("identity"))
+        else:
+            raise_corrupt_store()
+
+        # Sections a pre-v4 record never had; a migrated profile starts them at
+        # their inert defaults rather than inventing content.
+        launch = normalize_profile_launch(data.get("launch")) if store_version >= STORE_VERSION else default_launch()
+        organization = (
+            normalize_organization(data.get("organization")) if store_version >= STORE_VERSION else default_organization()
+        )
+        lifecycle = (
+            normalize_lifecycle(data.get("lifecycle")) if store_version >= STORE_VERSION else default_lifecycle()
+        )
+        sync = (
+            normalize_sync(data.get("sync"), device_id=local_device_id())
+            if store_version >= STORE_VERSION
+            else default_sync(local_device_id())
+        )
+
+        if defaults != asdict(
+            defaults_for_store_version(store_version, proxy=proxy, identity=identity, launch=launch)
+        ):
             raise_corrupt_store()
 
         expected_storage = asdict(storage_for_profile(profile_id))
@@ -201,66 +258,83 @@ class ProfileRecord:
         if PurePosixPath(expected_storage["userDataDir"]).is_absolute():
             raise_corrupt_store()
 
-        if store_version == 1:
-            identity = default_identity()
-        elif store_version in {2, STORE_VERSION}:
-            identity = normalize_profile_identity(data.get("identity"))
-        else:
-            raise_corrupt_store()
-
         return cls(
             id=profile_id,
             name=name,
             createdAt=created_at,
             updatedAt=updated_at,
-            defaults=defaults_for_proxy(proxy),
+            defaults=derive_defaults(proxy=proxy, identity=identity, launch=launch),
             storage=storage_for_profile(profile_id),
             identity=identity,
             proxy=proxy,
             metadata=metadata,
+            organization=organization,
+            launch=launch,
+            lifecycle=lifecycle,
+            sync=sync,
+        )
+
+    def _evolve(self, **changes: Any) -> "ProfileRecord":
+        """Return a mutated copy, always stamping updatedAt and bumping the revision.
+
+        This replaced three near-identical constructors that each re-listed every
+        field. With four more sections that was untenable, but the real reason is
+        sync: every one of them was a place to forget the revision bump, and a
+        missed bump makes a local edit invisible to the other machine. Routing
+        every mutation through one place makes forgetting structurally impossible.
+        """
+        proxy = normalize_proxy_config(changes.pop("proxy", self.proxy))
+        identity = normalize_profile_identity(changes.pop("identity", self.identity))
+        launch = normalize_profile_launch(changes.pop("launch", self.launch))
+        organization = normalize_organization(changes.pop("organization", self.organization))
+        lifecycle = normalize_lifecycle(changes.pop("lifecycle", self.lifecycle))
+        device_id = local_device_id()
+        sync = {
+            **normalize_sync(changes.pop("sync", self.sync), device_id=device_id),
+        }
+        sync["revision"] = int(sync["revision"]) + 1
+        sync["updatedBy"] = device_id
+
+        return replace(
+            self,
+            proxy=proxy,
+            identity=identity,
+            launch=launch,
+            organization=organization,
+            lifecycle=lifecycle,
+            sync=sync,
+            updatedAt=utc_now_iso(),
+            defaults=derive_defaults(proxy=proxy, identity=identity, launch=launch),
+            **changes,
         )
 
     def renamed(self, name: str) -> "ProfileRecord":
-        proxy = normalize_proxy_config(self.proxy)
-        return ProfileRecord(
-            id=self.id,
-            name=name,
-            createdAt=self.createdAt,
-            updatedAt=utc_now_iso(),
-            defaults=defaults_for_proxy(proxy),
-            storage=self.storage,
-            identity=self.identity,
-            proxy=proxy,
-            metadata=self.metadata,
-        )
+        return self._evolve(name=name)
 
     def with_identity(self, identity: Mapping[str, Any]) -> "ProfileRecord":
-        proxy = normalize_proxy_config(self.proxy)
-        return ProfileRecord(
-            id=self.id,
-            name=self.name,
-            createdAt=self.createdAt,
-            updatedAt=utc_now_iso(),
-            defaults=defaults_for_proxy(proxy),
-            storage=self.storage,
-            identity=normalize_profile_identity(identity),
-            proxy=proxy,
-            metadata=self.metadata,
-        )
+        return self._evolve(identity=identity)
 
     def with_proxy(self, proxy: Mapping[str, Any]) -> "ProfileRecord":
-        normalized_proxy = normalize_proxy_config(proxy)
-        return ProfileRecord(
-            id=self.id,
-            name=self.name,
-            createdAt=self.createdAt,
-            updatedAt=utc_now_iso(),
-            defaults=defaults_for_proxy(normalized_proxy),
-            storage=self.storage,
-            identity=self.identity,
-            proxy=normalized_proxy,
-            metadata=self.metadata,
-        )
+        return self._evolve(proxy=proxy)
+
+    def with_organization(self, organization: Mapping[str, Any]) -> "ProfileRecord":
+        return self._evolve(organization=organization)
+
+    def with_launch(self, launch: Mapping[str, Any]) -> "ProfileRecord":
+        return self._evolve(launch=launch)
+
+    def trashed(self) -> "ProfileRecord":
+        return self._evolve(lifecycle={**self.lifecycle, "deletedAt": utc_now_iso()})
+
+    def restored(self, *, name: Optional[str] = None) -> "ProfileRecord":
+        changes: dict[str, Any] = {"lifecycle": {**self.lifecycle, "deletedAt": None}}
+        if name is not None:
+            changes["name"] = name
+        return self._evolve(**changes)
+
+    @property
+    def is_trashed(self) -> bool:
+        return self.lifecycle.get("deletedAt") is not None
 
     def to_store_dict(self) -> JsonObject:
         """Return the private persisted shape, including raw proxy credentials."""
@@ -270,10 +344,14 @@ class ProfileRecord:
             "name": self.name,
             "createdAt": self.createdAt,
             "updatedAt": self.updatedAt,
-            "defaults": asdict(defaults_for_proxy(proxy)),
+            "defaults": asdict(derive_defaults(proxy=proxy, identity=self.identity, launch=self.launch)),
             "storage": asdict(self.storage),
             "identity": normalize_profile_identity(self.identity),
             "proxy": proxy,
+            "organization": normalize_organization(self.organization),
+            "launch": normalize_profile_launch(self.launch),
+            "lifecycle": normalize_lifecycle(self.lifecycle),
+            "sync": normalize_sync(self.sync, device_id=local_device_id()),
         }
         if self.metadata is not None:
             payload["metadata"] = normalize_profile_metadata(self.metadata)
@@ -287,10 +365,14 @@ class ProfileRecord:
             "name": self.name,
             "createdAt": self.createdAt,
             "updatedAt": self.updatedAt,
-            "defaults": asdict(defaults_for_proxy(proxy)),
+            "defaults": asdict(derive_defaults(proxy=proxy, identity=self.identity, launch=self.launch)),
             "storage": asdict(self.storage),
             "identity": normalize_profile_identity(self.identity),
             "proxy": public_proxy_summary(proxy),
+            "organization": normalize_organization(self.organization),
+            "launch": normalize_profile_launch(self.launch),
+            "lifecycle": normalize_lifecycle(self.lifecycle),
+            "sync": normalize_sync(self.sync, device_id=local_device_id()),
         }
         if self.metadata is not None:
             payload["metadata"] = normalize_profile_metadata(self.metadata)
@@ -311,9 +393,9 @@ class ProfileStore:
         self.store_file = self.store_dir / PROFILES_FILE
 
     def list(self) -> JsonObject:
-        """Return the current profile list and store metadata."""
+        """The profile library as the user sees it: everything except the trash."""
         profiles = self._read_profiles()
-        return self._collection_response(profiles)
+        return self._collection_response(self._live(profiles))
 
     def get(self, profile_id: str) -> ProfileRecord:
         """Load one profile record by id through the canonical store parser."""
@@ -430,7 +512,7 @@ class ProfileStore:
             [updated if profile.id == target.id else profile for profile in profiles]
         )
         self._write_profiles(updated_profiles)
-        return self._collection_response(updated_profiles, profile=updated)
+        return self._collection_response(self._live(updated_profiles), profile=updated)
 
     def apply_identity_preset(self, profile_id: str, preset_id: str) -> JsonObject:
         """Apply a curated identity preset to one profile and return warnings."""
@@ -442,7 +524,13 @@ class ProfileStore:
         return self.update_identity(profile_id, curated_preset(preset_id))
 
     def delete(self, profile_id: str) -> JsonObject:
-        """Delete only the profile record; browser user-data stays on disk."""
+        """Move a profile to the trash, keeping its record and user-data.
+
+        Deletion used to drop the record while deliberately leaving the browser
+        data on disk -- a half-measure that lost the profile but not its bytes.
+        The trash makes that caution the actual guarantee: nothing is removed
+        until purge, and the profile can come back with its sessions intact.
+        """
         if not isinstance(profile_id, str) or not profile_id.strip():
             raise SidecarError(
                 code=INVALID_REQUEST,
@@ -451,6 +539,69 @@ class ProfileStore:
 
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
+        if target.is_trashed:
+            return self._collection_response(self._live(profiles), profile=target)
+
+        trashed = target.trashed()
+        updated_profiles = sort_profiles(
+            [trashed if profile.id == target.id else profile for profile in profiles]
+        )
+        try:
+            self._write_profiles(updated_profiles)
+        except SidecarError as error:
+            if error.code == PROFILE_STORE_WRITE_FAILED:
+                raise SidecarError(
+                    code=PROFILE_DELETE_FAILED,
+                    message="Profile delete bookkeeping failed.",
+                    detail_ref=error.detail_ref,
+                ) from error
+            raise
+        return self._collection_response(self._live(updated_profiles), profile=trashed)
+
+    def list_trash(self) -> JsonObject:
+        """Profiles waiting in the trash, newest first."""
+        profiles = self._read_profiles()
+        trashed = sorted(
+            (profile for profile in profiles if profile.is_trashed),
+            key=lambda profile: profile.lifecycle.get("deletedAt") or "",
+            reverse=True,
+        )
+        return {
+            "storeVersion": STORE_VERSION,
+            "profiles": [profile.to_public_dict() for profile in trashed],
+            "count": len(trashed),
+        }
+
+    def restore(self, profile_id: str) -> JsonObject:
+        """Bring a profile back, renaming it if the name was taken meanwhile."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(code=INVALID_REQUEST, message="Profile id is required.")
+
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        if not target.is_trashed:
+            return self._collection_response(self._live(profiles), profile=target)
+
+        name = unique_profile_name(profiles, target.name, exclude_ids=frozenset({target.id}))
+        restored = target.restored(name=name if name != target.name else None)
+        updated_profiles = sort_profiles(
+            [restored if profile.id == target.id else profile for profile in profiles]
+        )
+        self._write_profiles(updated_profiles)
+        return self._collection_response(self._live(updated_profiles), profile=restored)
+
+    def purge(self, profile_id: str) -> JsonObject:
+        """Permanently drop a trashed profile's record. Caller removes its data."""
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(code=INVALID_REQUEST, message="Profile id is required.")
+
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        if not target.is_trashed:
+            raise SidecarError(
+                code=INVALID_REQUEST,
+                message="Move the profile to the trash before deleting it permanently.",
+            )
         updated_profiles = [profile for profile in profiles if profile.id != target.id]
         try:
             self._write_profiles(updated_profiles)
@@ -485,12 +636,39 @@ class ProfileStore:
                 message="Profile store is unavailable.",
             ) from exc
 
+        stored_version = payload.get("storeVersion") if isinstance(payload, Mapping) else None
         profiles, needs_migration = parse_store_payload_for_read(payload)
-        ensure_no_duplicate_names(profiles)
         sorted_profiles = sort_profiles(profiles)
         if needs_migration:
+            if isinstance(stored_version, int) and stored_version < STORE_VERSION:
+                self._back_up_before_migration(stored_version)
             self._write_profiles(sorted_profiles)
         return sorted_profiles
+
+    def _back_up_before_migration(self, from_version: int) -> None:
+        """Copy the store aside before rewriting it in a newer format.
+
+        Migration is the one write that cannot be undone by editing a field back.
+        If a future version's rules reject something this one accepted, or the
+        rewrite goes wrong halfway, the original bytes are the only way back --
+        and a profile library represents accounts and sessions that cannot be
+        recreated. Failing to write the copy is not a reason to refuse the read;
+        it only means this particular safety net is missing.
+        """
+        backup_path = self.store_file.with_name(
+            f"{self.store_file.stem}.v{from_version}.{utc_now_iso().replace(':', '-')}.bak"
+        )
+        if backup_path.exists():
+            return
+        try:
+            original = self.store_file.read_bytes()
+            descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, STORE_FILE_MODE)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            return
 
     def _restrict_store_file_mode(self) -> None:
         """Narrow a pre-existing store written before STORE_FILE_MODE existed.
@@ -604,11 +782,20 @@ class ProfileStore:
     ) -> None:
         requested = name.casefold()
         for profile in profiles:
+            # A trashed profile must not keep reserving its name, or deleting
+            # "Client A" would block ever creating one again.
+            if profile.is_trashed:
+                continue
             if profile.id != excluding_id and profile.name.casefold() == requested:
                 raise SidecarError(
                     code=PROFILE_DUPLICATE_NAME,
                     message="Profile name already exists.",
                 )
+
+    @staticmethod
+    def _live(profiles: Sequence[ProfileRecord]) -> List[ProfileRecord]:
+        """Profiles the ordinary list surfaces show: everything not in the trash."""
+        return [profile for profile in profiles if not profile.is_trashed]
 
     def _collection_response(
         self,
@@ -643,7 +830,16 @@ def parse_store_payload_for_read(payload: Any) -> tuple[List[ProfileRecord], boo
     store_version = payload.get("storeVersion")
     if isinstance(store_version, bool) or not isinstance(store_version, int):
         raise_corrupt_store()
-    if store_version not in {1, 2, STORE_VERSION}:
+    if store_version > STORE_VERSION:
+        # Not corruption: a newer build wrote this. Saying "corrupt" here would
+        # tell a user their whole library is damaged when the fix is to update
+        # the app -- and once profiles sync, one early upgrade would show that
+        # on every other machine at once.
+        raise SidecarError(
+            code=PROFILE_STORE_VERSION_TOO_NEW,
+            message="This profile store was written by a newer version of ThePrivator. Update the app to open it.",
+        )
+    if store_version not in SUPPORTED_READ_STORE_VERSIONS:
         raise_corrupt_store()
 
     raw_profiles = payload.get("profiles")
@@ -654,22 +850,58 @@ def parse_store_payload_for_read(payload: Any) -> tuple[List[ProfileRecord], boo
         ProfileRecord.from_dict(raw_profile, store_version=store_version)
         for raw_profile in raw_profiles
     ]
-    return profiles, store_version < STORE_VERSION
+    profiles, names_repaired = repair_duplicate_names(profiles)
+    return profiles, store_version < STORE_VERSION or names_repaired
 
 
 def proxy_for_store_version(data: Mapping[str, Any], store_version: int) -> JsonObject:
     """Return the private proxy config for a record read from a given store version."""
-    if store_version == STORE_VERSION:
+    if store_version >= 3:
         return normalize_proxy_config(data.get("proxy"))
     if store_version in {1, 2}:
         return default_proxy_config()
     raise_corrupt_store()
 
 
-def defaults_for_proxy(proxy: Any) -> ProfileDefaults:
-    """Derive non-authoritative defaults from canonical proxy truth."""
-    normalized = normalize_proxy_config(proxy)
-    return ProfileDefaults(proxyMode=normalized["mode"])
+def derive_defaults(*, proxy: Any, identity: Any, launch: Any) -> ProfileDefaults:
+    """Derive the non-authoritative defaults block from canonical truth.
+
+    ``defaults`` is a summary, never a source. from_dict re-derives it and rejects
+    any record whose stored copy disagrees, which is what stops a caller smuggling
+    a startUrl or fingerprintMode into a section the launcher trusts. Widening what
+    it summarises therefore has to keep that check exact rather than relax it.
+    """
+    normalized_proxy = normalize_proxy_config(proxy)
+    start_urls = start_urls_for_launch(normalize_profile_launch(launch))
+    return ProfileDefaults(
+        browser="chromium",
+        startUrl=start_urls[0] if start_urls else "about:blank",
+        proxyMode=normalized_proxy["mode"],
+        # v3 froze this at "disabled" even for a fully masked preset, so it lied.
+        fingerprintMode="disabled" if _identity_is_all_real(identity) else "managed",
+    )
+
+
+def defaults_for_store_version(store_version: int, *, proxy: Any, identity: Any, launch: Any) -> ProfileDefaults:
+    """Reproduce the defaults rule of the version a record was written under.
+
+    Migration has to verify a stored record against the rule that was in force
+    when it was written; checking it against the current rule would make every
+    older record look tampered with. Tamper detection therefore survives at every
+    version instead of being switched off for the ones being migrated.
+    """
+    if store_version >= STORE_VERSION:
+        return derive_defaults(proxy=proxy, identity=identity, launch=launch)
+    return ProfileDefaults(proxyMode=normalize_proxy_config(proxy)["mode"])
+
+
+def _identity_is_all_real(identity: Any) -> bool:
+    normalized = normalize_profile_identity(identity)
+    return all(
+        isinstance(surface, Mapping) and surface.get("mode") == "real"
+        for key, surface in normalized.items()
+        if isinstance(surface, Mapping) and key not in {"identityVersion", "label", "presetId"}
+    )
 
 
 def default_identity() -> JsonObject:
@@ -694,13 +926,66 @@ def sort_profiles(profiles: Iterable[ProfileRecord]) -> List[ProfileRecord]:
     return sorted(profiles, key=lambda profile: (profile.name.casefold(), profile.name, profile.id))
 
 
-def ensure_no_duplicate_names(profiles: Sequence[ProfileRecord]) -> None:
-    seen = set()
-    for profile in profiles:
+def repair_duplicate_names(profiles: Sequence[ProfileRecord]) -> tuple[List[ProfileRecord], bool]:
+    """Rename colliding profiles instead of declaring the store corrupt.
+
+    A duplicate name used to fail the whole read. That was defensible while the
+    store had exactly one writer, but two machines can independently create
+    "Client A" and then sync, and a name collision must not present as a damaged
+    library. The first record by id keeps the name; the rest are suffixed.
+    """
+    seen: set[str] = set()
+    repaired: List[ProfileRecord] = []
+    changed = False
+    for profile in sorted(profiles, key=lambda item: item.id):
+        if profile.is_trashed:
+            # A trashed profile does not hold its name -- that is what lets a new
+            # "Client A" be created after the old one is deleted. Repairing against
+            # it would rename the live profile instead, and which one lost the name
+            # would depend on how their uuids happened to sort.
+            repaired.append(profile)
+            continue
         folded = profile.name.casefold()
-        if folded in seen:
-            raise_corrupt_store()
-        seen.add(folded)
+        if folded not in seen:
+            seen.add(folded)
+            repaired.append(profile)
+            continue
+        candidate = _next_available_name(profile.name, seen)
+        seen.add(candidate.casefold())
+        repaired.append(replace(profile, name=candidate))
+        changed = True
+    return repaired, changed
+
+
+def _next_available_name(base: str, taken: set[str]) -> str:
+    for suffix in range(2, 10_000):
+        marker = f" ({suffix})"
+        trimmed = base[: MAX_PROFILE_NAME_LENGTH - len(marker)].rstrip()
+        candidate = f"{trimmed}{marker}"
+        if candidate.casefold() not in taken and is_valid_profile_name(candidate):
+            return candidate
+    return f"{base[:8]}-{uuid.uuid4().hex[:8]}"
+
+
+def unique_profile_name(
+    profiles: Iterable[ProfileRecord],
+    base_name: str,
+    *,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> str:
+    """A name not already used by another profile, suffixed if needed.
+
+    Shared by package import, trash restore, and sync, which all have to land a
+    profile whose preferred name may already be taken.
+    """
+    taken = {
+        profile.name.casefold()
+        for profile in profiles
+        if profile.id not in exclude_ids and profile.lifecycle.get("deletedAt") is None
+    }
+    if base_name.casefold() not in taken:
+        return base_name
+    return _next_available_name(base_name, taken)
 
 
 _SKIP_METADATA_VALUE = object()
@@ -848,6 +1133,60 @@ def is_valid_profile_name(name: str) -> bool:
         return False
 
     return True
+
+
+_DEVICE_ID_CACHE: dict[str, str] = {}
+_EPHEMERAL_DEVICE_ID: Optional[str] = None
+
+
+def local_device_id(store_root: Optional[Union[str, Path]] = None) -> str:
+    """A stable per-install identifier, generated once and never synchronised.
+
+    Sync needs to tell "this machine wrote it" from "the other machine did", and
+    a hostname cannot do that job: it is not stable, not unique, and is exactly
+    the kind of value the redaction rules keep out of anything user-visible. This
+    is a random id with no meaning outside the pairing.
+
+    Without a store root there is nowhere legitimate to persist it -- writing to
+    the user's home from a record constructor would put files outside the store
+    the caller named, and made test runs depend on each other. In that case the
+    id is process-local: stable for this run, and replaced by the persisted one
+    as soon as a store is involved.
+    """
+    global _EPHEMERAL_DEVICE_ID
+    if store_root is None:
+        if _EPHEMERAL_DEVICE_ID is None:
+            _EPHEMERAL_DEVICE_ID = str(uuid.uuid4())
+        return _EPHEMERAL_DEVICE_ID
+
+    root = Path(store_root) / STORE_DIR
+    key = str(root)
+    cached = _DEVICE_ID_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    path = root / DEVICE_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        device_id = payload.get("deviceId")
+        if isinstance(device_id, str) and is_uuid(device_id):
+            _DEVICE_ID_CACHE[key] = device_id
+            return device_id
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    device_id = str(uuid.uuid4())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"deviceId": device_id}, handle)
+    except OSError:
+        # Not persisting it only costs stability across restarts, which is a sync
+        # inconvenience rather than a reason to fail a profile read.
+        pass
+    _DEVICE_ID_CACHE[key] = device_id
+    return device_id
 
 
 def utc_now_iso() -> str:

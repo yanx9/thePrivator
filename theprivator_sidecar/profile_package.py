@@ -960,7 +960,12 @@ def _rollback_created_profile(store_root: Union[str, Path], profile_id: str) -> 
     except SidecarError:
         profile_dir = None
     try:
+        # Trash, then purge. delete() is a soft delete now, and a rollback must
+        # leave nothing behind: an import that failed halfway never existed as far
+        # as the user is concerned, so surfacing it in the trash would be a profile
+        # they did not create and cannot meaningfully restore.
         store.delete(profile_id)
+        store.purge(profile_id)
     except SidecarError:
         pass
     if profile_dir is not None:

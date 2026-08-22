@@ -25,7 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import chromium
 from .diagnostics import append_events
-from .profiles import ProfileRecord, ProfileStore, defaults_for_proxy, normalize_profile_identity
+from .profiles import ProfileRecord, ProfileStore, derive_defaults, normalize_profile_identity
 from .protocol import (
     AUTOMATION_API_BIND_FAILED,
     AUTOMATION_API_CONFIGURATION_ERROR,
@@ -1076,7 +1076,7 @@ def _automation_profile_summary(profile: ProfileRecord) -> JsonObject:
         "name": profile.name,
         "createdAt": profile.createdAt,
         "updatedAt": profile.updatedAt,
-        "defaults": asdict(defaults_for_proxy(proxy)),
+        "defaults": asdict(derive_defaults(proxy=proxy, identity=profile.identity, launch=profile.launch)),
         "identity": normalize_profile_identity(profile.identity),
         "proxy": _automation_proxy_summary(proxy),
     }

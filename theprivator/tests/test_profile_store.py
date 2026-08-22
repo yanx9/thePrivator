@@ -118,15 +118,26 @@ def write_profiles_payload(root: Path, payload: Mapping[str, Any]) -> Path:
     return store_file
 
 
+# Sections that did not exist before store v4. An older payload must not carry
+# them, or from_dict rightly rejects it as a shape that version never wrote.
+_POST_V3_SECTIONS = ("organization", "launch", "lifecycle", "sync")
+
+
+def _without_post_v3_sections(payload: dict[str, Any]) -> dict[str, Any]:
+    for section in _POST_V3_SECTIONS:
+        payload.pop(section, None)
+    return payload
+
+
 def v1_profile_payload(name: str = "Legacy") -> dict[str, Any]:
-    payload = ProfileRecord.create(name).to_store_dict()
+    payload = _without_post_v3_sections(ProfileRecord.create(name).to_store_dict())
     payload.pop("identity", None)
     payload.pop("proxy", None)
     return payload
 
 
 def v2_profile_payload(name: str = "Legacy", identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    payload = ProfileRecord.create(name).to_store_dict()
+    payload = _without_post_v3_sections(ProfileRecord.create(name).to_store_dict())
     payload.pop("proxy", None)
     if identity is not None:
         payload["identity"] = copy.deepcopy(identity)
@@ -140,10 +151,13 @@ def public_equivalent_for_store_profile(store_profile: Mapping[str, Any], public
 
 
 def test_empty_store_returns_versioned_empty_collection(tmp_path):
-    assert STORE_VERSION == 3
+    # Bumped once for the whole roadmap: each version change costs ~30 coordinated
+    # edits across four languages, so organization, launch, lifecycle and sync all
+    # landed together rather than one release at a time.
+    assert STORE_VERSION == 4
     result = ProfileStore(tmp_path).list()
 
-    assert result == {"storeVersion": 3, "profiles": [], "count": 0}
+    assert result == {"storeVersion": STORE_VERSION, "profiles": [], "count": 0}
 
 
 def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
@@ -151,7 +165,7 @@ def test_create_profile_persists_defaults_and_relative_storage_paths(tmp_path):
 
     result = store.create("Research")
 
-    assert result["storeVersion"] == 3
+    assert result["storeVersion"] == STORE_VERSION
     assert result["count"] == 1
     assert len(result["profiles"]) == 1
     assert result["profile"] == result["profiles"][0]
@@ -202,7 +216,7 @@ def test_v1_profiles_migrate_to_v3_with_default_identity_direct_proxy_and_rewrit
     result = ProfileStore(tmp_path).list()
 
     profile = result["profiles"][0]
-    assert result["storeVersion"] == 3
+    assert result["storeVersion"] == STORE_VERSION
     assert profile["id"] == legacy_profile["id"]
     assert profile["name"] == "Legacy Research"
     assert profile["storage"] == legacy_profile["storage"]
@@ -210,7 +224,7 @@ def test_v1_profiles_migrate_to_v3_with_default_identity_direct_proxy_and_rewrit
     assert_public_direct_proxy(profile)
     persisted = json.loads(store_file.read_text(encoding="utf-8"))
     stored_profile = persisted["profiles"][0]
-    assert persisted["storeVersion"] == 3
+    assert persisted["storeVersion"] == STORE_VERSION
     assert_store_direct_proxy(stored_profile)
     assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
     assert ProfileStore(tmp_path).list()["profiles"] == [profile]
@@ -227,14 +241,14 @@ def test_v2_profiles_migrate_to_v3_preserving_identity_storage_and_direct_proxy(
     result = ProfileStore(tmp_path).list()
 
     profile = result["profiles"][0]
-    assert result["storeVersion"] == 3
+    assert result["storeVersion"] == STORE_VERSION
     assert profile["id"] == legacy_profile["id"]
     assert profile["storage"] == legacy_profile["storage"]
     assert profile["identity"] == identity
     assert_public_direct_proxy(profile)
     persisted = json.loads(store_file.read_text(encoding="utf-8"))
     stored_profile = persisted["profiles"][0]
-    assert persisted["storeVersion"] == 3
+    assert persisted["storeVersion"] == STORE_VERSION
     assert stored_profile["identity"] == identity
     assert_store_direct_proxy(stored_profile)
     assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
@@ -361,7 +375,7 @@ def test_v3_record_missing_identity_raises_identity_error_without_rewrite(tmp_pa
 
 
 def test_unsupported_store_version_remains_corrupt_without_rewrite(tmp_path):
-    payload = {"storeVersion": 999, "profiles": []}
+    payload = {"storeVersion": 2.5, "profiles": []}
     store_file = write_profiles_payload(tmp_path, payload)
     original = store_file.read_text(encoding="utf-8")
 
@@ -716,7 +730,7 @@ def test_delete_unknown_profile_returns_not_found(tmp_path):
     assert_profile_error(exc_info, PROFILE_NOT_FOUND)
 
 
-def test_delete_removes_record_without_deleting_browser_user_data(tmp_path):
+def test_delete_moves_the_profile_to_the_trash_and_keeps_its_browser_data(tmp_path):
     store = ProfileStore(tmp_path)
     profile = store.create("Disposable")["profile"]
     user_data_dir = Path(tmp_path, profile["storage"]["userDataDir"])
@@ -726,10 +740,74 @@ def test_delete_removes_record_without_deleting_browser_user_data(tmp_path):
 
     result = store.delete(profile["id"])
 
-    assert result == {"storeVersion": STORE_VERSION, "profiles": [], "count": 0}
+    # Gone from the library the user browses, but not gone.
+    assert result["profiles"] == []
+    assert result["count"] == 0
+    assert ProfileStore(tmp_path).list()["profiles"] == []
     assert marker.read_text(encoding="utf-8") == "browser-data"
-    reloaded = ProfileStore(tmp_path).list()
-    assert reloaded["profiles"] == []
+
+    trash = ProfileStore(tmp_path).list_trash()
+    assert [entry["id"] for entry in trash["profiles"]] == [profile["id"]]
+    assert trash["profiles"][0]["lifecycle"]["deletedAt"].endswith("Z")
+
+
+def test_restore_brings_a_trashed_profile_back_with_its_data(tmp_path):
+    store = ProfileStore(tmp_path)
+    profile = store.create("Recoverable")["profile"]
+    store.delete(profile["id"])
+
+    restored = store.restore(profile["id"])["profile"]
+
+    assert restored["id"] == profile["id"]
+    assert restored["name"] == "Recoverable"
+    assert restored["lifecycle"]["deletedAt"] is None
+    assert ProfileStore(tmp_path).list_trash()["count"] == 0
+
+
+def test_restore_renames_when_the_name_was_taken_while_trashed(tmp_path):
+    store = ProfileStore(tmp_path)
+    original = store.create("Client A")["profile"]
+    store.delete(original["id"])
+    store.create("Client A")
+
+    restored = store.restore(original["id"])["profile"]
+
+    assert restored["id"] == original["id"]
+    assert restored["name"] != "Client A"
+    assert restored["name"].startswith("Client A")
+    assert len(ProfileStore(tmp_path).list()["profiles"]) == 2
+
+
+def test_a_trashed_name_stops_reserving_itself(tmp_path):
+    # Otherwise deleting "Client A" would block ever creating one again.
+    store = ProfileStore(tmp_path)
+    first = store.create("Client A")["profile"]
+    store.delete(first["id"])
+
+    second = store.create("Client A")["profile"]
+
+    assert second["id"] != first["id"]
+
+
+def test_purge_requires_the_profile_to_be_in_the_trash_first(tmp_path):
+    store = ProfileStore(tmp_path)
+    profile = store.create("Still Live")["profile"]
+
+    with pytest.raises(SidecarError) as exc_info:
+        store.purge(profile["id"])
+
+    assert_profile_error(exc_info, INVALID_REQUEST)
+
+
+def test_purge_drops_the_record_permanently(tmp_path):
+    store = ProfileStore(tmp_path)
+    profile = store.create("Disposable")["profile"]
+    store.delete(profile["id"])
+
+    store.purge(profile["id"])
+
+    assert ProfileStore(tmp_path).list_trash()["count"] == 0
+    assert ProfileStore(tmp_path).list()["profiles"] == []
 
 
 @pytest.mark.parametrize(
@@ -737,7 +815,7 @@ def test_delete_removes_record_without_deleting_browser_user_data(tmp_path):
     [
         "{not-json",
         json.dumps({"storeVersion": STORE_VERSION, "profiles": "not-a-list"}),
-        json.dumps({"storeVersion": 999, "profiles": []}),
+        json.dumps({"storeVersion": "3", "profiles": []}),
         json.dumps({"storeVersion": STORE_VERSION, "profiles": [{"id": "not-a-uuid"}]}),
     ],
 )
