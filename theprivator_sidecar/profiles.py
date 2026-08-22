@@ -29,6 +29,7 @@ from .profile_sections import (
     normalize_sync,
     start_urls_for_launch,
 )
+from .launch_args import validate_user_launch_args
 from .proxy import default_proxy_config, is_proxy_secret_key, normalize_proxy_config, public_proxy_summary
 from .protocol import (
     INVALID_REQUEST,
@@ -528,6 +529,47 @@ class ProfileStore:
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
         updated = target.with_proxy(normalized_proxy, device_id=self.device_id)
+        updated_profiles = sort_profiles(
+            [updated if profile.id == target.id else profile for profile in profiles]
+        )
+        self._write_profiles(updated_profiles)
+        return self._collection_response(updated_profiles, profile=updated)
+
+    def update_organization(self, profile_id: str, organization: Mapping[str, Any]) -> JsonObject:
+        """Replace one profile's folder, tags, notes, favourite flag and colour.
+
+        Takes the whole section rather than a patch: the sections are small and
+        strict-key, so a partial update would need its own merge rules and a way
+        to say "clear this field" that is distinguishable from "leave it alone".
+        """
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(code=INVALID_REQUEST, message="Profile id is required.")
+
+        normalized = normalize_organization(organization)
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        updated = target.with_organization(normalized, device_id=self.device_id)
+        updated_profiles = sort_profiles(
+            [updated if profile.id == target.id else profile for profile in profiles]
+        )
+        self._write_profiles(updated_profiles)
+        return self._collection_response(updated_profiles, profile=updated)
+
+    def update_launch(self, profile_id: str, launch: Mapping[str, Any]) -> JsonObject:
+        """Replace one profile's startup behaviour, start URLs and launch flags.
+
+        The flags are checked against the curated allow-list here, not only at
+        launch: saving a switch that would be refused later leaves a profile that
+        looks configured and then fails to start.
+        """
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(code=INVALID_REQUEST, message="Profile id is required.")
+
+        normalized = normalize_profile_launch(launch)
+        validate_user_launch_args(normalized.get("args"))
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        updated = target.with_launch(normalized, device_id=self.device_id)
         updated_profiles = sort_profiles(
             [updated if profile.id == target.id else profile for profile in profiles]
         )

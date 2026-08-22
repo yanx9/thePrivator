@@ -64,6 +64,13 @@ pub fn run() {
             sidecar::chromium_status,
             sidecar::chromium_launch,
             sidecar::chromium_stop,
+            sidecar::chromium_bulk_launch,
+            sidecar::chromium_bulk_stop,
+            sidecar::profiles_organization_update,
+            sidecar::profiles_launch_update,
+            sidecar::profiles_trash_list,
+            sidecar::profiles_trash_restore,
+            sidecar::profiles_trash_purge,
             sidecar::legacy_scan_profiles,
             sidecar::legacy_import_profiles
         ])

@@ -388,6 +388,20 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
                 "Profile id is required.",
             )
             return store.delete(profile_id)
+        if request.method == "profiles.organization.update":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            return store.update_organization(profile_id, request.params.get("organization"))
+        if request.method == "profiles.launch.update":
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Profile id is required.",
+            )
+            return store.update_launch(profile_id, request.params.get("launch"))
         if request.method == "profiles.trash.list":
             return store.list_trash()
         if request.method == "profiles.trash.restore":
@@ -527,6 +541,10 @@ def dispatch_chromium_request(request: SidecarRequest) -> JsonObject:
                 "Chromium profileId is required.",
             )
             return chromium.launch(store_root, profile_id)
+        if request.method == "chromium.bulk.launch":
+            return chromium.bulk_launch(store_root, request.params.get("profileIds", []))
+        if request.method == "chromium.bulk.stop":
+            return chromium.bulk_stop(store_root, request.params.get("profileIds"))
         if request.method == "chromium.stop":
             profile_id = require_string_param(
                 request.params,

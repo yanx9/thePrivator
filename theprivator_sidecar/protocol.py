@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ PROFILE_STORE_WRITE_FAILED = "PROFILE_STORE_WRITE_FAILED"
 PROFILE_STORE_VERSION_TOO_NEW = "PROFILE_STORE_VERSION_TOO_NEW"
 PROFILE_START_URL_INVALID = "PROFILE_START_URL_INVALID"
 PROFILE_ORGANIZATION_INVALID = "PROFILE_ORGANIZATION_INVALID"
+# A user-supplied Chromium switch outside the curated allow-list. Named
+# separately from PROXY_LAUNCH_ARG_UNSAFE so the UI can tell "this flag is not on
+# the list" from "this flag would break the proxy layer".
+LAUNCH_ARG_UNSUPPORTED = "LAUNCH_ARG_UNSUPPORTED"
 PROFILE_DELETE_FAILED = "PROFILE_DELETE_FAILED"
 LEGACY_ROOT_INVALID = "LEGACY_ROOT_INVALID"
 LEGACY_CONFIG_MISSING = "LEGACY_CONFIG_MISSING"
@@ -151,6 +156,25 @@ class SidecarError(Exception):
             "recoverable": self.recoverable,
             "detailRef": self.detail_ref,
         }
+
+
+def _sidecar_error_setattr(self: "SidecarError", name: str, value: Any) -> None:
+    """Keep the declared fields frozen, but let exception machinery write.
+
+    contextlib assigns ``exc.__traceback__`` from Python when re-raising through
+    a generator context manager, and a frozen dataclass rejects that with
+    FrozenInstanceError -- which then *replaces* the real error, so a genuine
+    failure surfaces as a confusing complaint about traceback assignment and the
+    original cause is lost. Installed after the class because the dataclass
+    decorator refuses to let a frozen class define __setattr__ itself.
+    """
+    if name.startswith("__") and name.endswith("__"):
+        object.__setattr__(self, name, value)
+        return
+    raise dataclasses.FrozenInstanceError(f"cannot assign to field {name!r}")
+
+
+SidecarError.__setattr__ = _sidecar_error_setattr  # type: ignore[method-assign]
 
 
 @dataclass(frozen=True)

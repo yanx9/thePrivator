@@ -30,6 +30,12 @@ from .identity_extension import (
     generate_identity_extension,
     runtime_identity_extension_root,
 )
+from .launch_args import USER_ALLOWED_SWITCHES, validate_user_launch_args
+from .profile_sections import (
+    STARTUP_BEHAVIOR_RESTORE_SESSION,
+    normalize_launch as normalize_profile_launch,
+    start_urls_for_launch,
+)
 from .identity_runtime import (
     WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG,
     IdentityRuntimePlan,
@@ -446,6 +452,103 @@ def collect_identity_audit_results(
 
 
 
+MAX_BULK_LAUNCH_PROFILES = 10
+BULK_LAUNCH_STAGGER_SECONDS = 0.25
+# Leaves room under the bridge's 120s bulk budget for the reply itself. Reaching
+# it returns what succeeded so far rather than letting the bridge kill the
+# sidecar mid-launch and orphan whatever browsers had already started.
+BULK_LAUNCH_DEADLINE_SECONDS = 110.0
+
+
+def bulk_launch(
+    store_root: Union[str, Path],
+    profile_ids: Sequence[str],
+    *,
+    stagger_seconds: float = BULK_LAUNCH_STAGGER_SECONDS,
+) -> JsonObject:
+    """Launch several profiles in one call, reporting per-profile outcomes.
+
+    Doing this from the UI as N separate commands meant N sidecar round-trips,
+    each doing its own unsynchronised read-modify-write of the process registry
+    -- a race that loses launches. One call keeps the registry consistent and
+    fits inside a single budget.
+
+    A failure is never fatal to the batch: one profile with a broken proxy should
+    not stop the other nine, so each outcome is reported and the caller decides.
+    """
+    ids = _validated_bulk_ids(profile_ids)
+    deadline = time.monotonic() + BULK_LAUNCH_DEADLINE_SECONDS
+    launched: list[JsonObject] = []
+    failed: list[JsonObject] = []
+
+    for index, profile_id in enumerate(ids):
+        if time.monotonic() >= deadline:
+            failed.append({"profileId": profile_id, "code": CHROMIUM_LAUNCH_FAILED})
+            continue
+        if index > 0 and stagger_seconds > 0:
+            # Chromium's first moments are disk- and CPU-heavy; starting ten at
+            # once makes them all slower and trips the liveness settle check.
+            time.sleep(stagger_seconds)
+        try:
+            result = launch(store_root, profile_id)
+        except SidecarError as error:
+            failed.append({"profileId": profile_id, "code": error.code})
+            continue
+        launched.append({"profileId": profile_id, "startedAt": result["startedAt"]})
+
+    return {
+        "launched": launched,
+        "failed": failed,
+        "runningCount": _active_count(RuntimeRegistry(store_root).read()),
+    }
+
+
+def bulk_stop(store_root: Union[str, Path], profile_ids: Optional[Sequence[str]] = None) -> JsonObject:
+    """Stop the named profiles, or every running one when none are named."""
+    if profile_ids is None:
+        registry = RuntimeRegistry(store_root)
+        ids = sorted(_reconciled_active_records(registry, error_code=CHROMIUM_STOP_FAILED))
+    else:
+        ids = _validated_bulk_ids(profile_ids, maximum=None)
+
+    stopped: list[JsonObject] = []
+    failed: list[JsonObject] = []
+    for profile_id in ids:
+        try:
+            result = stop(store_root, profile_id)
+        except SidecarError as error:
+            failed.append({"profileId": profile_id, "code": error.code})
+            continue
+        stopped.append({"profileId": profile_id, "termination": result["termination"]})
+
+    return {
+        "stopped": stopped,
+        "failed": failed,
+        "runningCount": _active_count(RuntimeRegistry(store_root).read()),
+    }
+
+
+def _validated_bulk_ids(
+    profile_ids: Any,
+    *,
+    maximum: Optional[int] = MAX_BULK_LAUNCH_PROFILES,
+) -> list[str]:
+    if not isinstance(profile_ids, Sequence) or isinstance(profile_ids, (str, bytes)):
+        raise SidecarError(code=INVALID_REQUEST, message="Chromium profileIds must be a list.")
+    ids: list[str] = []
+    for profile_id in profile_ids:
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise SidecarError(code=INVALID_REQUEST, message="Chromium profileId is required.")
+        if profile_id not in ids:
+            ids.append(profile_id)
+    if maximum is not None and len(ids) > maximum:
+        raise SidecarError(
+            code=INVALID_REQUEST,
+            message=f"At most {maximum} profiles can be launched at once.",
+        )
+    return ids
+
+
 def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Stop only the owned process tree for one stored profile."""
     profile = _load_profile(store_root, profile_id)
@@ -512,17 +615,33 @@ def discover_executable() -> Path:
 def build_launch_args(
     executable: Path,
     user_data_dir: Path,
-    start_url: str,
+    start_urls: Union[str, Sequence[str]],
     *,
     extra_args: Sequence[str] = (),
+    restore_session: bool = False,
 ) -> list[str]:
-    """Build safe Chromium arguments from sidecar-owned values only."""
+    """Build safe Chromium arguments from sidecar-owned values only.
+
+    Start URLs are trailing positionals. They are safe there only because the
+    store already refused anything that does not begin with an http(s) scheme --
+    a value starting with a dash would be read as a switch, so the validation
+    that makes that impossible lives at the point of persistence, not here.
+    """
+    if isinstance(start_urls, str):
+        positional = [start_urls or "about:blank"]
+    else:
+        positional = [url for url in start_urls if url] or ["about:blank"]
+
+    session_args = ["--restore-last-session"] if restore_session else []
     return [
         str(executable),
         f"--user-data-dir={user_data_dir}",
         *_SAFE_CHROMIUM_ARGS,
+        *session_args,
         *_validate_extra_launch_args(extra_args),
-        start_url or "about:blank",
+        # restoreSession reopens the previous tabs, so appending a positional URL
+        # would add a tab on every launch rather than restoring what was there.
+        *([] if restore_session else positional),
     ]
 
 
@@ -790,6 +909,17 @@ def _extension_launch_args(extension_dirs: Sequence[Union[str, Path]]) -> list[s
     ]
 
 
+def _is_allowed_user_launch_arg(arg: str) -> bool:
+    name = arg.partition("=")[0]
+    if name not in USER_ALLOWED_SWITCHES:
+        return False
+    try:
+        validate_user_launch_args([arg])
+    except SidecarError:
+        return False
+    return True
+
+
 def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
     safe_args: list[str] = []
     for arg in args:
@@ -813,6 +943,13 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
                 message="Chromium proxy launch arguments could not be prepared.",
             )
         if _is_allowed_identity_value_arg(arg):
+            safe_args.append(arg)
+            continue
+        if _is_allowed_user_launch_arg(arg):
+            # Already checked by launch_args.validate_user_launch_args at the
+            # point it was assembled. Re-checking here keeps this function the
+            # single authority over what reaches argv, so a future caller cannot
+            # append a switch without passing both layers.
             safe_args.append(arg)
             continue
         if arg.startswith(_LOAD_EXTENSION_PREFIX) or arg.startswith(_DISABLE_EXTENSIONS_EXCEPT_PREFIX):
@@ -1040,10 +1177,13 @@ def _launch_registered(
     proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
     proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
+    launch_plan = normalize_profile_launch(profile.launch)
+    restore_session = launch_plan.get("startupBehavior") == STARTUP_BEHAVIOR_RESTORE_SESSION
     args = build_launch_args(
         executable,
         user_data_path,
-        "about:blank",
+        start_urls_for_launch(launch_plan),
+        restore_session=restore_session,
         extra_args=[
             *_runtime_launch_args(
                 identity_plan,
@@ -1053,6 +1193,7 @@ def _launch_registered(
             ),
             *proxy_runtime.launch_args,
             *_proxy_proof_trust_args(),
+            *validate_user_launch_args(launch_plan.get("args")),
         ],
     )
 

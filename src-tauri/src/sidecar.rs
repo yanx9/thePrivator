@@ -30,6 +30,13 @@ const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 // worst case with nothing left for spawning the sidecar itself -- a browser that
 // ignored SIGTERM timed out every time. This leaves real headroom.
 const CHROMIUM_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+// Bulk launch staggers browser starts and each one carries the full launch cost,
+// so the batch needs a budget of its own. The sidecar stops at 110s and returns
+// what it managed, which is why this sits just above that.
+const CHROMIUM_BULK_LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
+const CHROMIUM_BULK_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+// Editing organization or launch settings is a single store write.
+const PROFILE_SECTION_TIMEOUT: Duration = Duration::from_secs(10);
 // Collecting the audit launches Chromium, waits for CDP discovery, then walks
 // nine checker pages one at a time, each of which loads a real remote page over
 // the profile's proxy. Measured runs take 40-90s; the previous 30s budget
@@ -403,6 +410,90 @@ pub async fn chromium_launch(
     let runner = TauriSidecarRunner::new(app.clone());
     let result = chromium_launch_with_runner(&runner, store_root, profile_id).await;
     events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.launch");
+    result
+}
+
+#[tauri::command]
+pub async fn profiles_organization_update(
+    app: tauri::AppHandle,
+    profile_id: String,
+    organization: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result =
+        profiles_organization_update_with_runner(&runner, store_root, profile_id, organization).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.organization.update");
+    result
+}
+
+#[tauri::command]
+pub async fn profiles_launch_update(
+    app: tauri::AppHandle,
+    profile_id: String,
+    launch: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_launch_update_with_runner(&runner, store_root, profile_id, launch).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.launch.update");
+    result
+}
+
+#[tauri::command]
+pub async fn profiles_trash_list(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    profiles_trash_list_with_runner(&runner, store_root).await
+}
+
+#[tauri::command]
+pub async fn profiles_trash_restore(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_trash_restore_with_runner(&runner, store_root, id).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.trash.restore");
+    result
+}
+
+#[tauri::command]
+pub async fn profiles_trash_purge(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_trash_purge_with_runner(&runner, store_root, id).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.trash.purge");
+    result
+}
+
+#[tauri::command]
+pub async fn chromium_bulk_launch(
+    app: tauri::AppHandle,
+    profile_ids: Vec<String>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = chromium_bulk_launch_with_runner(&runner, store_root, profile_ids).await;
+    events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.bulk.launch");
+    result
+}
+
+#[tauri::command]
+pub async fn chromium_bulk_stop(
+    app: tauri::AppHandle,
+    profile_ids: Option<Vec<String>>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = chromium_bulk_stop_with_runner(&runner, store_root, profile_ids).await;
+    events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.bulk.stop");
     result
 }
 
@@ -797,6 +888,95 @@ async fn chromium_launch_with_runner<R: SidecarRunner>(
             "profileId": profile_id,
         }),
         CHROMIUM_LAUNCH_TIMEOUT,
+    )
+    .await
+}
+
+async fn profiles_organization_update_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    organization: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "profiles.organization.update",
+        json!({ "storeRoot": store_root, "profileId": profile_id, "organization": organization }),
+        PROFILE_SECTION_TIMEOUT,
+    )
+    .await
+}
+
+async fn profiles_launch_update_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    launch: Value,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "profiles.launch.update",
+        json!({ "storeRoot": store_root, "profileId": profile_id, "launch": launch }),
+        PROFILE_SECTION_TIMEOUT,
+    )
+    .await
+}
+
+async fn profiles_trash_list_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(runner, "profiles.trash.list", json!({ "storeRoot": store_root })).await
+}
+
+async fn profiles_trash_restore_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params(runner, "profiles.trash.restore", json!({ "storeRoot": store_root, "id": id })).await
+}
+
+async fn profiles_trash_purge_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    // Purging removes the profile's user-data directory as well as its record,
+    // so it gets the longer portability budget rather than the CRUD one.
+    invoke_method_with_params_timeout(
+        runner,
+        "profiles.trash.purge",
+        json!({ "storeRoot": store_root, "id": id }),
+        COOKIE_PORTABILITY_TIMEOUT,
+    )
+    .await
+}
+
+async fn chromium_bulk_launch_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_ids: Vec<String>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "chromium.bulk.launch",
+        json!({ "storeRoot": store_root, "profileIds": profile_ids }),
+        CHROMIUM_BULK_LAUNCH_TIMEOUT,
+    )
+    .await
+}
+
+async fn chromium_bulk_stop_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_ids: Option<Vec<String>>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "chromium.bulk.stop",
+        json!({ "storeRoot": store_root, "profileIds": profile_ids }),
+        CHROMIUM_BULK_STOP_TIMEOUT,
     )
     .await
 }

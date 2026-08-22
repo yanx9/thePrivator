@@ -1730,3 +1730,94 @@ def test_launched_browser_is_detached_from_the_sidecar_that_started_it(tmp_path,
         )
     finally:
         chromium.stop(store_root, profile["id"])
+
+
+def _bulk_profiles(tmp_path, monkeypatch, count):
+    monkeypatch.setenv(chromium.CHROMIUM_EXECUTABLE_ENV, str(make_fake_chromium(tmp_path)))
+    store_root = tmp_path / "store"
+    store = ProfileStore(store_root)
+    return store_root, [store.create(f"Bulk {index}")["profile"]["id"] for index in range(count)]
+
+
+def test_bulk_launch_reports_per_profile_outcomes(tmp_path, monkeypatch):
+    """One bad profile must not stop the rest of the batch."""
+    store_root, ids = _bulk_profiles(tmp_path, monkeypatch, 3)
+
+    result = chromium.bulk_launch(store_root, [*ids, "11111111-1111-1111-1111-111111111111"], stagger_seconds=0)
+
+    try:
+        assert [entry["profileId"] for entry in result["launched"]] == ids
+        assert [entry["profileId"] for entry in result["failed"]] == ["11111111-1111-1111-1111-111111111111"]
+        assert result["failed"][0]["code"] == PROFILE_NOT_FOUND
+        assert result["runningCount"] == 3
+    finally:
+        chromium.bulk_stop(store_root)
+
+
+def test_bulk_launch_refuses_more_profiles_than_the_batch_limit(tmp_path, monkeypatch):
+    store_root, _ids = _bulk_profiles(tmp_path, monkeypatch, 1)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.bulk_launch(store_root, [f"id-{index}" for index in range(20)])
+
+    assert exc_info.value.code == INVALID_REQUEST
+
+
+def test_bulk_stop_without_ids_stops_everything_running(tmp_path, monkeypatch):
+    store_root, ids = _bulk_profiles(tmp_path, monkeypatch, 3)
+    chromium.bulk_launch(store_root, ids, stagger_seconds=0)
+
+    result = chromium.bulk_stop(store_root)
+
+    assert sorted(entry["profileId"] for entry in result["stopped"]) == sorted(ids)
+    assert result["runningCount"] == 0
+
+
+def test_launch_uses_the_profile_start_urls_and_curated_flags(tmp_path, monkeypatch):
+    """defaults.startUrl promised these; the launcher has to actually pass them."""
+    monkeypatch.setenv(chromium.CHROMIUM_EXECUTABLE_ENV, str(make_fake_chromium(tmp_path)))
+    argv_path = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_path))
+    store_root = tmp_path / "store"
+    store = ProfileStore(store_root)
+    profile_id = store.create("Start URLs")["profile"]["id"]
+    store.update_launch(
+        profile_id,
+        {
+            "startupBehavior": "customUrls",
+            "startUrls": ["https://first.example/", "https://second.example/"],
+            "args": ["--mute-audio", "--window-position=10,20"],
+        },
+    )
+
+    chromium.launch(store_root, profile_id)
+    try:
+        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        assert [arg for arg in argv if arg.startswith("https://")] == [
+            "https://first.example/",
+            "https://second.example/",
+        ]
+        assert "--mute-audio" in argv and "--window-position=10,20" in argv
+        assert "about:blank" not in argv
+    finally:
+        chromium.stop(store_root, profile_id)
+
+
+def test_restore_session_replaces_the_positional_url(tmp_path, monkeypatch):
+    """Appending a URL as well would add a tab on every launch, not restore one."""
+    monkeypatch.setenv(chromium.CHROMIUM_EXECUTABLE_ENV, str(make_fake_chromium(tmp_path)))
+    argv_path = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_path))
+    store_root = tmp_path / "store"
+    store = ProfileStore(store_root)
+    profile_id = store.create("Restore")["profile"]["id"]
+    store.update_launch(profile_id, {"startupBehavior": "restoreSession", "startUrls": [], "args": []})
+
+    chromium.launch(store_root, profile_id)
+    try:
+        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        assert "--restore-last-session" in argv
+        assert not any(arg.startswith("http") for arg in argv)
+        assert "about:blank" not in argv
+    finally:
+        chromium.stop(store_root, profile_id)

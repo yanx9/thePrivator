@@ -2115,3 +2115,57 @@ def test_legacy_malformed_params_return_invalid_request(tmp_path):
     assert diagnostic["detailRef"] == error["detailRef"]
     assert "Traceback" not in proc.stdout
     assert "Traceback" not in proc.stderr
+
+
+def test_every_sidecar_module_imports(tmp_path):
+    """main.py is only imported by the subprocess, so a syntax error there hides.
+
+    It happened: a dispatch branch went in at the wrong indentation, main.py
+    stopped importing entirely, and every in-process test still passed because
+    they import chromium and profiles directly. Only something that actually runs
+    the entrypoint notices.
+    """
+    import importlib
+    import pkgutil
+
+    import theprivator_sidecar
+
+    failures = []
+    for module in pkgutil.iter_modules(theprivator_sidecar.__path__):
+        if module.name in {"automation_api"}:
+            continue  # optional fastapi/uvicorn dependency
+        try:
+            importlib.import_module(f"theprivator_sidecar.{module.name}")
+        except Exception as error:  # noqa: BLE001 - the point is to report any failure
+            failures.append(f"{module.name}: {type(error).__name__}: {error}")
+
+    assert failures == []
+
+
+def test_new_v4_commands_are_reachable_through_the_real_entrypoint(tmp_path):
+    """A command that exists on the store but is not dispatched is dead code.
+
+    The trash shipped that way once: delete became soft while list/restore/purge
+    stayed unreachable, so deleting a profile was unrecoverable and its data
+    could never be freed.
+    """
+    store_root = str(tmp_path / "store")
+    created = parse_ndjson(
+        run_sidecar(
+            request_line({"id": "create", "method": "profiles.create", "params": {"storeRoot": store_root, "name": "Reachable"}})
+        ).stdout
+    )[0]
+    profile_id = created["result"]["profile"]["id"]
+
+    commands = [
+        ("profiles.organization.update", {"profileId": profile_id, "organization": {"tags": ["one"], "notes": "n", "favorite": True, "color": None, "folderId": None}}),
+        ("profiles.launch.update", {"profileId": profile_id, "launch": {"startupBehavior": "customUrls", "startUrls": ["https://example.com/"], "args": ["--mute-audio"]}}),
+        ("profiles.trash.list", {}),
+        ("profiles.delete", {"id": profile_id}),
+        ("profiles.trash.restore", {"id": profile_id}),
+    ]
+    for method, params in commands:
+        response = parse_ndjson(
+            run_sidecar(request_line({"id": method, "method": method, "params": {"storeRoot": store_root, **params}})).stdout
+        )[0]
+        assert response["ok"] is True, f"{method} failed: {response.get('error')}"
