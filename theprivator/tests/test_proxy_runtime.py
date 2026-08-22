@@ -211,3 +211,23 @@ def test_safe_generated_proxy_server_arg_round_trips_through_validator():
     arg = f"{PROXY_SERVER_ARG_PREFIX}http://proxy.example.invalid:8080"
 
     assert validate_proxy_server_launch_arg(arg) == arg
+
+
+@pytest.mark.parametrize(
+    "switch",
+    [
+        "--host-resolver-rules=MAP * 1.2.3.4",
+        "--host-rules=MAP * 1.2.3.4",
+        "--dns-over-https-templates=https://example.invalid/dns",
+        "--dns-over-https-mode=secure",
+    ],
+)
+def test_name_resolution_overrides_are_rejected(switch):
+    """These defeat the proxy without naming it, so they must never reach argv."""
+    assert is_rejected_launch_switch(switch) is True
+
+
+@pytest.mark.parametrize("switch", ["--proxy-server-lookalike=x", "--mute-audio", "--host-resolver-rules-extra"])
+def test_denylist_matches_switch_names_not_prefixes(switch):
+    """Matching is name-exact so a longer unrelated switch is not caught."""
+    assert is_rejected_launch_switch(switch) is False

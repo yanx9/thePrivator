@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import ipaddress
 import socket
 import threading
 from pathlib import Path
@@ -36,6 +37,9 @@ PROXY_CHECK_VERSION = 1
 PROXY_CHECK_SCOPE_LOCAL_FIXTURE = "sidecar-managed-local-fixture"
 PROXY_CHECK_PUBLIC_CHECKER_STATUS = "advisory-only"
 PROXY_CHECK_TIMEOUT_SECONDS = 5.0
+# Longest possible textual IPv6 address, including a zone id. Kept under the
+# TypeScript client's 64-character bound for this field.
+MAX_PUBLIC_EXIT_IP_LENGTH = 45
 _PUBLIC_EXIT_LOOKUP_HOST = "ip-api.com"
 _PUBLIC_EXIT_LOOKUP_PATH = "/json/?fields=status,message,query,country,regionName,city,timezone,isp"
 _PUBLIC_EXIT_LOOKUP_URL = f"http://{_PUBLIC_EXIT_LOOKUP_HOST}{_PUBLIC_EXIT_LOOKUP_PATH}"
@@ -437,13 +441,29 @@ def _proxy_authority(proxy: Mapping[str, Any]) -> str:
 
 
 def _public_exit_from_payload(payload: Mapping[str, Any]) -> JsonObject | None:
+    """Extract the advisory public exit observation, or None.
+
+    This lookup runs as plain HTTP through the user's own proxy, so the response
+    is attacker-controlled by any tampering middlebox. The exit IP must therefore
+    be validated as an actual address rather than merely stripped: the TypeScript
+    client hard-rejects unsafe text and would fail the entire proxy check -- and
+    the deterministic local route proof it would discard is the part that
+    actually proves anything. The advisory half fails soft, by design.
+    """
     if payload.get("status") not in {None, "success"}:
         return None
     public_ip = payload.get("query")
-    if not isinstance(public_ip, str) or not public_ip.strip():
+    if not isinstance(public_ip, str):
+        return None
+    candidate = public_ip.strip()
+    if not candidate or len(candidate) > MAX_PUBLIC_EXIT_IP_LENGTH:
+        return None
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
         return None
     return {
-        "ip": public_ip.strip(),
+        "ip": candidate,
         "location": _public_exit_location(
             {
                 "country": payload.get("country"),

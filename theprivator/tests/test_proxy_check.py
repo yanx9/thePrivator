@@ -23,6 +23,7 @@ from theprivator_sidecar.proxy_check import (
     PROXY_CHECK_PUBLIC_CHECKER_STATUS,
     PROXY_CHECK_SCOPE_LOCAL_FIXTURE,
     PROXY_CHECK_VERSION,
+    _public_exit_from_payload,
     check_profile_proxy,
 )
 
@@ -408,3 +409,33 @@ def test_unexpected_or_unsafe_proof_summaries_fail_closed_without_public_leak(tm
         check_profile_proxy(store_root, profile["id"])
 
     assert_sidecar_error(exc_info, PROXY_PROOF_FAILED)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "a" * 100,
+        "not an ip",
+        "1.2.3.4 /etc/passwd",
+        "1.2.3.4\nX-Injected: 1",
+        "",
+        "   ",
+    ],
+)
+def test_public_exit_rejects_a_value_that_is_not_an_ip_address(query):
+    """The lookup runs as plain HTTP through an untrusted proxy.
+
+    A tampering middlebox can return anything here. The TypeScript client hard-
+    rejects unsafe text, so forwarding it would fail the whole proxy check and
+    discard the deterministic local route proof -- the part that actually proves
+    something. The advisory half has to fail soft instead.
+    """
+    assert _public_exit_from_payload({"status": "success", "query": query}) is None
+
+
+@pytest.mark.parametrize("query", ["1.2.3.4", "2001:db8::1", "::1"])
+def test_public_exit_accepts_a_real_address(query):
+    result = _public_exit_from_payload({"status": "success", "query": query})
+
+    assert result is not None
+    assert result["ip"] == query

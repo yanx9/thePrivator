@@ -38,6 +38,20 @@ _REJECTED_PROXY_SWITCH_PREFIXES = (
     "--proxy-auto-detect",
     "--proxy-server",  # malformed variants; exact generated form is validated separately.
     "--no-proxy-server",
+    # Name resolution overrides defeat the proxy without ever naming it:
+    # --host-resolver-rules=MAP * 1.2.3.4 silently redirects every request.
+    # Not reachable today, because nothing user-supplied reaches this validator
+    # -- but this denylist is what makes it safe to change that.
+    #
+    # Matching is by exact switch name (see is_rejected_launch_switch), so each
+    # variant is listed rather than relying on prefix bleed. --enable-features is
+    # deliberately absent: its value is a comma-separated list, so a name-level
+    # entry could not catch "--enable-features=Foo,DnsOverHttps" and would only
+    # look like protection. That one belongs in a value-aware allowlist.
+    "--host-resolver-rules",
+    "--host-rules",
+    "--dns-over-https-templates",
+    "--dns-over-https-mode",
 )
 _REJECTED_RUNTIME_SWITCH_PREFIXES = (
     "--remote-debugging-address",
