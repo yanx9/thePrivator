@@ -2,6 +2,7 @@ import { type FormEvent, type MouseEvent, useCallback, useEffect, useMemo, useRe
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { buildGlobalStatusSummary, type GlobalStatusSummary } from "./globalStatus";
 import { closeWindow, minimizeWindow, startDragging, toggleMaximizeWindow } from "./windowControls";
+import { subscribeToChromiumStatusChanged, subscribeToProfilesChanged } from "./sidecarEvents";
 import {
   createIdentityDraftState,
   formatIdentityExpectedValueSummary,
@@ -921,7 +922,7 @@ export function App() {
   }, [clearLifecycleErrorForProfile]);
 
   const refreshChromiumStatus = useCallback(
-    async (_reason: "startup" | "manual" | "poll" | "launch" | "stop" = "manual") => {
+    async (_reason: "startup" | "manual" | "poll" | "event" | "launch" | "stop" = "manual") => {
       if (chromiumStatusInFlightRef.current) {
         return;
       }
@@ -1299,6 +1300,25 @@ export function App() {
 
     return () => window.clearInterval(pollId);
   }, [refreshChromiumStatus]);
+
+  useEffect(() => {
+    // The bridge knows a launch or rename landed the moment it returns; without
+    // these the UI waits out the poll interval to find out. The poll stays as the
+    // backstop, so both refreshes must be safe to run more often than needed.
+    const unsubscribeRuntime = subscribeToChromiumStatusChanged(() => {
+      void refreshChromiumStatus("event");
+    });
+    const unsubscribeProfiles = subscribeToProfilesChanged(() => {
+      // "refresh" rather than a new context: this is an ordinary re-read, and the
+      // context only shapes the message shown if it fails.
+      void refreshProfiles("refresh");
+    });
+
+    return () => {
+      unsubscribeRuntime();
+      unsubscribeProfiles();
+    };
+  }, [refreshChromiumStatus, refreshProfiles]);
 
   const runProfileMutation = useCallback(
     async (

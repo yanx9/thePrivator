@@ -1,4 +1,5 @@
 use crate::diagnostics::{DiagnosticStore, StderrPersistOutcome};
+use crate::events;
 use crate::sidecar_pool::SidecarPool;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -247,8 +248,10 @@ pub async fn profiles_identity_apply_preset(
     preset_id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_identity_apply_preset_with_runner(&runner, store_root, profile_id, preset_id).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_identity_apply_preset_with_runner(&runner, store_root, profile_id, preset_id).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.identity.applyPreset");
+    result
 }
 
 #[tauri::command]
@@ -258,8 +261,10 @@ pub async fn profiles_identity_update(
     identity: Value,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_identity_update_with_runner(&runner, store_root, profile_id, identity).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_identity_update_with_runner(&runner, store_root, profile_id, identity).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.identity.update");
+    result
 }
 
 #[tauri::command]
@@ -269,8 +274,10 @@ pub async fn profiles_proxy_update(
     proxy: Value,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_proxy_update_with_runner(&runner, store_root, profile_id, proxy).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_proxy_update_with_runner(&runner, store_root, profile_id, proxy).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.proxy.update");
+    result
 }
 
 #[tauri::command]
@@ -303,8 +310,10 @@ pub async fn profile_cookies_replace(
     source_path: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profile_cookies_replace_with_runner(&runner, store_root, profile_id, source_path).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profile_cookies_replace_with_runner(&runner, store_root, profile_id, source_path).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "portability.cookies.replace");
+    result
 }
 
 #[tauri::command]
@@ -324,8 +333,10 @@ pub async fn profile_package_import(
     source_path: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profile_package_import_with_runner(&runner, store_root, source_path).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profile_package_import_with_runner(&runner, store_root, source_path).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "portability.profile_package.import");
+    result
 }
 
 #[tauri::command]
@@ -343,8 +354,10 @@ pub async fn profiles_create(
     name: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_create_with_runner(&runner, store_root, name).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_create_with_runner(&runner, store_root, name).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.create");
+    result
 }
 
 #[tauri::command]
@@ -354,8 +367,10 @@ pub async fn profiles_update(
     name: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_update_with_runner(&runner, store_root, id, name).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_update_with_runner(&runner, store_root, id, name).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.update");
+    result
 }
 
 #[tauri::command]
@@ -364,8 +379,10 @@ pub async fn profiles_delete(
     id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    profiles_delete_with_runner(&runner, store_root, id).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = profiles_delete_with_runner(&runner, store_root, id).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.delete");
+    result
 }
 
 #[tauri::command]
@@ -383,8 +400,10 @@ pub async fn chromium_launch(
     profile_id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    chromium_launch_with_runner(&runner, store_root, profile_id).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = chromium_launch_with_runner(&runner, store_root, profile_id).await;
+    events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.launch");
+    result
 }
 
 #[tauri::command]
@@ -393,8 +412,10 @@ pub async fn chromium_stop(
     profile_id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    chromium_stop_with_runner(&runner, store_root, profile_id).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = chromium_stop_with_runner(&runner, store_root, profile_id).await;
+    events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.stop");
+    result
 }
 
 #[tauri::command]
@@ -414,8 +435,10 @@ pub async fn legacy_import_profiles(
     items: Vec<LegacyImportItemParam>,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     let store_root = resolve_profile_store_root(&app)?;
-    let runner = TauriSidecarRunner::new(app);
-    legacy_import_profiles_with_runner(&runner, store_root, legacy_root, items).await
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = legacy_import_profiles_with_runner(&runner, store_root, legacy_root, items).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "legacy.import");
+    result
 }
 
 pub async fn sidecar_health_with_runner<R: SidecarRunner>(

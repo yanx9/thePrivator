@@ -839,6 +839,9 @@ const NEGATIVE_RULE_EXEMPTIONS: Record<string, readonly string[]> = {
   // Holds the forbidden marketing phrases as the denylist it enforces; a module
   // whose job is to reject "guaranteed undetectability" has to contain it.
   "./identityAuditGuidance.ts": ["credential or guarantee copy"],
+  // The single module allowed to subscribe to bridge events, for the same reason
+  // windowControls owns the window API: one seam, dynamically imported, mockable.
+  "./sidecarEvents.ts": ["direct event API"],
 };
 
 const uiSourceEntries = () =>
@@ -3852,6 +3855,7 @@ describe("ThePrivator profile library UI", () => {
       ["PAC/system proxy copy", /PAC proxy|Proxy Auto-Config|System proxy|Direct fallback|autoConfigUrl|proxyAutoConfig/],
       ["filesystem or shell plugin", /@tauri-apps\/plugin-(fs|shell)/],
       ["direct window API", /@tauri-apps\/api\/window/],
+      ["direct event API", /@tauri-apps\/api\/event/],
       ["raw invoke outside the client", /\binvoke\s*\(/],
       ["browser storage or file bypass", /showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/],
       ["DOM or network escape hatch", /type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/],
@@ -3882,6 +3886,7 @@ describe("ThePrivator profile library UI", () => {
       "DOM or network escape hatch",
       "internal artifact vocabulary",
       "credential or guarantee copy",
+      "direct event API",
     ]);
     for (const [path, rules] of Object.entries(NEGATIVE_RULE_EXEMPTIONS)) {
       expect(paths, `exemption names a module that no longer exists: ${path}`).toContain(path);

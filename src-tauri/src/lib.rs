@@ -1,5 +1,6 @@
 mod automation_api;
 mod diagnostics;
+mod events;
 mod sidecar;
 mod sidecar_pool;
 
