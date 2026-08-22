@@ -30,6 +30,7 @@ from .proxy import (
     public_proxy_summary,
 )
 from .proxy_proof import PROXY_PROOF_SCHEMA_VERSION, collect_proxy_proof
+from .proxy_runtime import build_proxy_runtime_plan
 
 PROXY_CHECK_VERSION = 1
 PROXY_CHECK_SCOPE_LOCAL_FIXTURE = "sidecar-managed-local-fixture"
@@ -180,6 +181,11 @@ def check_profile_proxy(store_root: Union[str, Path], profile_id: str) -> JsonOb
             raise _proof_failure()
 
         normalized_proxy = normalize_proxy_config(profile.proxy)
+        # Surface the launch-time verdict before the proof runs. A configuration
+        # Chromium could never be launched with -- SOCKS4 carrying credentials,
+        # which the protocol has no mechanism for -- should say so, rather than
+        # reaching collect_proxy_proof and failing as an invalid proof case.
+        build_proxy_runtime_plan(normalized_proxy)
         proof = collect_proxy_proof(
             store_root,
             {

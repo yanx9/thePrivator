@@ -15,6 +15,7 @@ from theprivator_sidecar.protocol import (
     PROFILE_NOT_FOUND,
     PROXY_CONNECTIVITY_FAILED,
     PROXY_INVALID,
+    PROXY_SOCKS_AUTH_UNSUPPORTED,
     PROXY_PROOF_FAILED,
     SidecarError,
 )
@@ -353,7 +354,10 @@ def test_socks4_credentials_fail_before_public_payload_without_secret_leak(tmp_p
     with pytest.raises(SidecarError) as exc_info:
         check_profile_proxy(store_root, profile["id"])
 
-    assert_sidecar_error(exc_info, PROXY_INVALID)
+    # The launch-time verdict, not the generic "invalid proof case" the proof
+    # collector used to raise: SOCKS4 has no credential mechanism at all, and the
+    # message should say that rather than blaming the fixture.
+    assert_sidecar_error(exc_info, PROXY_SOCKS_AUTH_UNSUPPORTED)
 
 
 def test_socks5_credentials_return_local_proof_without_leaking_secret_values(tmp_path):

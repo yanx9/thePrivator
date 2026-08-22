@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readUiSources } from "./ui-sources.mjs";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SIDECAR_NAME = "theprivator-sidecar";
@@ -553,8 +554,13 @@ function assertProvedRouteProof(routeProof, expectedProxy) {
 }
 
 function assertIpHiding(ipHiding, expectedStatus) {
-  exactKeys(ipHiding, ["status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "localFixtureConclusion"], "ipHiding");
-  assert(ipHiding.publicExitIpClaimed === false && ipHiding.publicExitIp === null, "Proxy check must not claim a public exit IP.", { ipHiding });
+  exactKeys(ipHiding, ["status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "publicExitLocation", "localFixtureConclusion"], "ipHiding");
+  // A public exit IP is advisory and only ever populated by a live lookup through
+  // the real proxy. This verifier runs entirely against the managed local fixture
+  // on a .invalid host, which proxy_check skips, so all three must be absent here
+  // -- an exit IP appearing in this run would mean the check reached the network.
+  assert(ipHiding.publicExitIpClaimed === false && ipHiding.publicExitIp === null && ipHiding.publicExitLocation === null,
+    "Proxy check must not report a public exit observation against the local fixture.", { ipHiding });
   if (expectedStatus === "not-proven") {
     assert(ipHiding.status === "not-proven", "Direct profile IP hiding status mismatch.", { ipHiding });
     assert(ipHiding.basis === "direct-profile" && ipHiding.scope === "not-applicable", "Direct profile IP hiding basis/scope mismatch.", { ipHiding });
@@ -830,17 +836,22 @@ async function runProxyCheckCase(session, caseConfig) {
   }
 }
 
+// SOCKS5 credentials used to be rejected outright. They are now carried by the
+// local SOCKS5 auth bridge (theprivator_sidecar/proxy_bridge.py), because Chromium
+// cannot send SOCKS5 username/password upstream itself. SOCKS4 has no credential
+// mechanism at all, so it is the protocol that still fails closed -- and keeping
+// this case pointed at it preserves the coverage rather than deleting it.
 async function runSocksCredentialFailure(session) {
-  const caseLabel = "socks5-auth-unsupported";
+  const caseLabel = "socks4-auth-unsupported";
   const storeRoot = makeTempRoot(`theprivator-s04-${caseLabel}-`);
   const transcriptsBefore = SIDECAR_TRANSCRIPTS.length;
   try {
-    emit({ phase: "case-start", caseLabel, proxyMode: "fixedServer", protocol: "socks5", expectation: "typed-error" });
+    emit({ phase: "case-start", caseLabel, proxyMode: "fixedServer", protocol: "socks4", expectation: "typed-error" });
     const profile = await createProfile(session, storeRoot, "S04 SOCKS auth unsupported");
     const proxy = {
       proxyVersion: 1,
       mode: "fixedServer",
-      protocol: "socks5",
+      protocol: "socks4",
       host: "proxy.s04-socks-auth.invalid",
       port: 19051,
       credentials: { username: PROXY_USERNAME, password: PROXY_PASSWORD },
@@ -941,11 +952,13 @@ function assertVerifierEventsRedacted() {
 }
 
 function assertStaticNoPublicCheckerScraping() {
+  // The UI half is discovered rather than listed, so the rule keeps applying once
+  // src/App.tsx is split into components. See scripts/ui-sources.mjs.
   const sources = [
-    "theprivator_sidecar/proxy_check.py",
-    "src/sidecar/client.ts",
-    "src/App.tsx",
+    { path: "theprivator_sidecar/proxy_check.py", text: readFileSync(join(ROOT_DIR, "theprivator_sidecar", "proxy_check.py"), "utf8") },
+    ...readUiSources(ROOT_DIR).files,
   ];
+  assert(sources.length > 1, "Proxy-check static scan found no UI sources under src/.");
   const forbiddenSourcePatterns = [
     /checkerBody/i,
     /fetch\s*\(\s*["']https:\/\//i,
@@ -955,17 +968,45 @@ function assertStaticNoPublicCheckerScraping() {
     /requests\.get\s*\(/i,
   ];
   const findings = [];
-  for (const source of sources) {
-    const text = readFileSync(join(ROOT_DIR, source), "utf8");
+  for (const { path: source, text } of sources) {
     assert(!text.includes(PROXY_USERNAME) && !text.includes(PROXY_PASSWORD), "Static source leaked verifier credential sentinels.", { source });
+    const scannable = withoutAuditedPublicExitLookup(source, text);
     for (const pattern of forbiddenSourcePatterns) {
-      if (pattern.test(text)) {
+      if (pattern.test(scannable)) {
         findings.push({ source, pattern: String(pattern) });
       }
     }
   }
   assert(findings.length === 0, "Static proxy-check surfaces appear to scrape public checker content.", { findings });
-  return { sources: sources.length, forbiddenFindings: 0 };
+  return { sources: sources.length, forbiddenFindings: 0, auditedPublicExitLookup: assertAuditedPublicExitLookupShape() };
+}
+
+/**
+ * The proxy check makes exactly one outbound request: an advisory IP-metadata
+ * lookup through the user's own proxy, used to report the exit IP and location.
+ * That is a different thing from scraping a public checker page, which is what
+ * this guardrail exists to prevent -- so the one audited call is excised before
+ * the generic patterns run, and its shape is asserted separately below. Nothing
+ * else in the file gets to make an outbound request.
+ */
+function withoutAuditedPublicExitLookup(source, text) {
+  if (source !== "theprivator_sidecar/proxy_check.py") return text;
+  return text.replace(AUDITED_PUBLIC_EXIT_LOOKUP_CALL, "");
+}
+
+const AUDITED_PUBLIC_EXIT_LOOKUP_CALL = /requests\.get\(\s*_PUBLIC_EXIT_LOOKUP_URL,\s*proxies=\{"http": proxy_url\},\s*timeout=PROXY_CHECK_TIMEOUT_SECONDS,\s*\)/;
+
+function assertAuditedPublicExitLookupShape() {
+  const text = readFileSync(join(ROOT_DIR, "theprivator_sidecar", "proxy_check.py"), "utf8");
+  const callCount = (text.match(/requests\.get\s*\(/g) ?? []).length;
+  assert(callCount === 1, "Proxy check must make exactly one outbound request.", { callCount });
+  assert(AUDITED_PUBLIC_EXIT_LOOKUP_CALL.test(text), "The proxy check public exit lookup must keep its audited fixed-URL, proxied, timeout-bounded shape.");
+  assert(text.includes('_PUBLIC_EXIT_LOOKUP_HOST = "ip-api.com"'), "The proxy check public exit lookup host must stay fixed.");
+  // The advisory checker catalog is data the UI links to, never something the
+  // sidecar fetches: none of those hosts may appear in the lookup URL.
+  assert(!/_PUBLIC_EXIT_LOOKUP_URL\s*=.*(browserleaks|pixelscan|browserscan|amiunique|coveryourtracks)/i.test(text),
+    "The proxy check public exit lookup must not point at a public checker.");
+  return "fixed-ip-metadata-endpoint";
 }
 
 function assertProofShapeGuardStatic() {
