@@ -170,6 +170,7 @@ function seedS04Root({ permissions, appSource, clientSource, libSource, sidecarS
   });
   writeJson(join(root, "src-tauri", "tauri.conf.json"), {
     build: { beforeDevCommand: "npm run sidecar:build && npm run dev", beforeBuildCommand: "npm run build && npm run sidecar:build" },
+    app: { windows: [{ label: "main", decorations: false }] },
     bundle: { externalBin: ["binaries/theprivator-sidecar"], targets },
   });
   writeJson(join(root, "package.json"), {
@@ -220,7 +221,20 @@ describe("verify-m005-s04 capability and config guardrails", () => {
     const root = seedS04Root();
     expect(assertM005S04CapabilityConfig({ rootDir: root })).toMatchObject({ dialogOpenSave: "allowed", filesystemAuthority: "absent", fixedSidecarSpawn: true });
     expect(assertM005S04Guardrails({ rootDir: root, platform: "linux" })).toMatchObject({ tauriConfig: { linuxPackageTargets: ["deb", "rpm"] } });
-    expect(() => assertS06TauriGuardrails({ rootDir: root, platform: "linux" })).toThrow(/Default capability widened/);
+    // Assert that S06's capability guardrail rejects an M005 root, via its stable
+    // error code rather than its prose. Which rejection branch fires depends on
+    // S06's own allow-list, which is owned by verify-s06 and may grow; pinning the
+    // exact message or branch here couples this suite to that file's wording.
+    let s06Failure;
+    try {
+      assertS06TauriGuardrails({ rootDir: root, platform: "linux" });
+    } catch (error) {
+      s06Failure = error;
+    }
+    // Not toBeInstanceOf: each verifier script declares its own VerifyFailure class,
+    // so an error thrown by verify-s06 is never an instance of the one imported here.
+    expect(s06Failure?.name).toBe("VerifyFailure");
+    expect(s06Failure.details?.code).toMatch(/^S06_CAPABILITY_/);
   });
 
   it("rejects missing dialog permission, broad filesystem/shell authority, arbitrary spawn, and missing Linux targets", () => {
