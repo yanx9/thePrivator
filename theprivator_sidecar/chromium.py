@@ -118,6 +118,11 @@ IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
 AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 AUDIT_TARGET_OPEN_TIMEOUT_SECONDS = 5.0
 AUDIT_RESULT_CAPTURE_TIMEOUT_SECONDS = 6.0
+# Wall-clock budget for walking every checker page, chosen to leave headroom
+# under the bridge's IDENTITY_AUDIT_COLLECT_TIMEOUT (120s) after discovery and
+# launch. Pages not reached in time report as unavailable rather than letting
+# the bridge kill the sidecar mid-collection.
+AUDIT_COLLECT_BUDGET_SECONDS = 90.0
 AUDIT_RESULT_READY_WAIT_MS = 2500
 _DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort"
 
@@ -1286,8 +1291,33 @@ def _open_public_audit_target(endpoint: Any, audit_page: Mapping[str, Any]) -> N
 
 
 def _collect_public_audit_targets(endpoint: Any, audit_pages: Sequence[JsonObject]) -> list[JsonObject]:
+    """Walk the checker pages in order, bounded by a wall-clock budget.
+
+    Each page already fails soft, but the total was unbounded: nine pages at up
+    to eleven seconds each, plus discovery, runs to about 109s against a 120s
+    bridge budget. Exceeding it does not merely lose the result -- the bridge
+    kills the sidecar mid-flight, orphaning the browser it had launched and
+    leaving the UI believing nothing started. Answering with the pages that did
+    complete is strictly better than being killed with all of them.
+    """
     allowed_urls = {page["url"] for page in audit_pages if isinstance(page.get("url"), str)}
-    return [_collect_public_audit_target(endpoint, page, allowed_urls=allowed_urls) for page in audit_pages]
+    deadline = time.monotonic() + AUDIT_COLLECT_BUDGET_SECONDS
+    results: list[JsonObject] = []
+    for page in audit_pages:
+        if time.monotonic() >= deadline:
+            results.append(
+                _audit_page_result(
+                    page,
+                    status="unavailable",
+                    title="No result captured",
+                    summary="The audit ran out of time before reaching this checker.",
+                    rows=[],
+                    notes=["Run the audit again to read the checkers that were skipped."],
+                )
+            )
+            continue
+        results.append(_collect_public_audit_target(endpoint, page, allowed_urls=allowed_urls))
+    return results
 
 
 def _collect_public_audit_target(endpoint: Any, audit_page: JsonObject, *, allowed_urls: set[str]) -> JsonObject:

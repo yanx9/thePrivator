@@ -1673,3 +1673,36 @@ def test_records_written_before_ownership_tracking_are_left_alone(tmp_path, monk
     chromium._stop_proxy_bridge_for_record(tmp_path, record)
 
     assert killed == []
+
+
+def test_audit_collection_reports_skipped_pages_instead_of_overrunning(monkeypatch):
+    """Exceeding the bridge budget gets the sidecar killed mid-collection.
+
+    That orphans the browser it launched and leaves the UI believing nothing
+    started, so pages not reached in time must report as unavailable and let the
+    completed ones through.
+    """
+    pages = [
+        {"id": f"checker-{index}", "label": f"Checker {index}", "category": "privacy",
+         "url": f"https://example.invalid/{index}", "surfaces": ["canvas"], "requiresUserAction": False}
+        for index in range(4)
+    ]
+    collected: list[str] = []
+
+    def slow_collect(_endpoint, page, *, allowed_urls):
+        collected.append(page["id"])
+        clock["now"] += 40.0  # each page eats a large slice of the budget
+        return chromium._audit_page_result(
+            page, status="captured", title="ok", summary="ok", rows=[], notes=[]
+        )
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(chromium.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(chromium, "_collect_public_audit_target", slow_collect)
+
+    results = chromium._collect_public_audit_targets(object(), pages)
+
+    assert len(results) == len(pages), "every page must still be represented in the result"
+    assert collected == ["checker-0", "checker-1", "checker-2"], "collection did not stop at the budget"
+    assert [result["status"] for result in results] == ["captured", "captured", "captured", "unavailable"]
+    assert "ran out of time" in results[-1]["summary"]
