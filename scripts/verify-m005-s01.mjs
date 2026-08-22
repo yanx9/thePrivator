@@ -14,6 +14,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { ROOT_DIR, VerifyFailure, executable } from "./verify-m004-s01.mjs";
+import { readGuardedUiSources } from "./ui-sources.mjs";
 
 export const VERIFY_EVENT = "verify.m005.s01";
 export const PORTABILITY_EXPORT = "portability.cookies.export";
@@ -599,17 +600,20 @@ export function assertM005SourceGuardrails({ rootDir = ROOT_DIR } = {}) {
     });
   }
 
-  const appSource = readFileSync(assertFileExists(rootDir, "src/App.tsx"), "utf8");
-  assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(appSource), "Cookie portability UI must not gain frontend filesystem authority.", {
-    phase: "source-guardrail",
-    file: "src/App.tsx",
-    markerClass: "frontend_filesystem_authority",
-  });
-  assert(!appSource.includes('"profile_cookies_export"') && !appSource.includes('"profile_cookies_replace"'), "Cookie portability UI must call typed client wrappers instead of raw invoke command names.", {
-    phase: "source-guardrail",
-    file: "src/App.tsx",
-    markerClass: "raw_cookie_invoke_in_ui",
-  });
+  // Applied per UI file rather than to src/App.tsx alone, so the rule still holds
+  // once the UI is split into components. See scripts/ui-sources.mjs.
+  for (const file of readGuardedUiSources(rootDir).files) {
+    assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(file.text), "Cookie portability UI must not gain frontend filesystem authority.", {
+      phase: "source-guardrail",
+      file: file.path,
+      markerClass: "frontend_filesystem_authority",
+    });
+    assert(!file.text.includes('"profile_cookies_export"') && !file.text.includes('"profile_cookies_replace"'), "Cookie portability UI must call typed client wrappers instead of raw invoke command names.", {
+      phase: "source-guardrail",
+      file: file.path,
+      markerClass: "raw_cookie_invoke_in_ui",
+    });
+  }
 
   const clientSource = readFileSync(assertFileExists(rootDir, "src/sidecar/client.ts"), "utf8");
   assert(!clientSource.includes('"portability.cookies.export"') && !clientSource.includes('"portability.cookies.replace"'), "TypeScript client must not expose raw sidecar portability method strings.", {

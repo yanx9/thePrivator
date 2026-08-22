@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROOT_DIR, VerifyFailure, executable } from "./verify-m004-s01.mjs";
+import { readGuardedUiSources } from "./ui-sources.mjs";
 
 export const VERIFY_EVENT = "verify.m005.s02";
 export const PROFILE_PACKAGE_EXPORT = "portability.profile_package.export";
@@ -548,9 +549,12 @@ export function assertM005S02SourceGuardrails({ rootDir = ROOT_DIR } = {}) {
     scannedFiles.push(relativePath);
     assert(!IGNORED_ARTIFACT_REFERENCE_PATTERN.test(source), "M005/S02 verifier and tests must not import ignored planning artifacts.", { phase: "source-guardrail", file: relativePath, markerClass: "ignored_artifact_reference" });
   }
-  const appSource = readFileSync(assertFileExists(rootDir, "src/App.tsx"), "utf8");
-  assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(appSource), "Profile package UI must not gain frontend filesystem authority.", { phase: "source-guardrail", file: "src/App.tsx", markerClass: "frontend_filesystem_authority" });
-  assert(!appSource.includes('"profile_package_export"') && !appSource.includes('"profile_package_import"'), "Profile package UI must call typed client wrappers instead of raw invoke command names.", { phase: "source-guardrail", file: "src/App.tsx", markerClass: "raw_package_invoke_in_ui" });
+  // Applied per UI file rather than to src/App.tsx alone, so the rule still holds
+  // once the UI is split into components. See scripts/ui-sources.mjs.
+  for (const file of readGuardedUiSources(rootDir).files) {
+    assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(file.text), "Profile package UI must not gain frontend filesystem authority.", { phase: "source-guardrail", file: file.path, markerClass: "frontend_filesystem_authority" });
+    assert(!file.text.includes('"profile_package_export"') && !file.text.includes('"profile_package_import"'), "Profile package UI must call typed client wrappers instead of raw invoke command names.", { phase: "source-guardrail", file: file.path, markerClass: "raw_package_invoke_in_ui" });
+  }
   const clientSource = readFileSync(assertFileExists(rootDir, "src/sidecar/client.ts"), "utf8");
   assert(!clientSource.includes('"portability.profile_package.export"') && !clientSource.includes('"portability.profile_package.import"'), "TypeScript client must not expose raw sidecar profile package method strings.", { phase: "source-guardrail", file: "src/sidecar/client.ts", markerClass: "raw_sidecar_method_in_client" });
   assert(clientSource.includes('invoke<unknown>("profile_package_export"') && clientSource.includes('invoke<unknown>("profile_package_import"'), "TypeScript client must keep fixed profile package Tauri wrappers.", { phase: "source-guardrail", file: "src/sidecar/client.ts", markerClass: "missing_fixed_wrappers" });

@@ -6,6 +6,7 @@ import { basename, delimiter as hostPathDelimiter, dirname, extname, isAbsolute,
 import { fileURLToPath } from "node:url";
 import { By } from "selenium-webdriver";
 import { ROOT_DIR, VerifyFailure, executable } from "./verify-m004-s01.mjs";
+import { readGuardedUiSources, readUiSources } from "./ui-sources.mjs";
 import {
   COOKIE_MEMBER,
   MANIFEST_MEMBER,
@@ -1254,13 +1255,20 @@ export function assertM005S04SourceGuardrails({ rootDir = ROOT_DIR } = {}) {
     assert(!IGNORED_ARTIFACT_REFERENCE_PATTERN.test(source), "M005/S04 verifier and tests must not import ignored planning artifacts.", { phase: "source-guardrail", fileLabel: relativePath, markerClass: "ignored_artifact_reference" });
   }
 
-  const appSource = readFileSync(assertFileExists(rootDir, "src/App.tsx"), "utf8");
-  assert(appSource.includes("@tauri-apps/plugin-dialog"), "React UI must use native open/save dialogs for portability path selection.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "missing_native_dialogs" });
-  assert(/\bopen\s*\(/.test(appSource) && /\bsave\s*\(/.test(appSource), "React UI must keep native open and save dialog calls.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "missing_native_dialogs" });
-  assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(appSource), "React portability UI must not gain frontend filesystem authority.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "frontend_filesystem_authority" });
-  assert(!FRONTEND_SHELL_OPEN_AUTHORITY_PATTERN.test(appSource), "React portability UI must not gain shell-open authority.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "shell_open_authority" });
-  for (const command of FIXED_TAURI_COMMANDS) assert(!appSource.includes(`"${command}"`) && !appSource.includes(`'${command}'`), "React UI must call typed client wrappers instead of raw invoke command names.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "raw_invoke_in_ui" });
-  for (const wrapper of ["exportProfileCookies", "replaceProfileCookies", "exportProfilePackage", "importProfilePackage"]) assert(appSource.includes(wrapper), "React UI must use typed cookie/package portability wrappers.", { phase: "source-guardrail", fileLabel: "src/App.tsx", markerClass: "missing_typed_wrapper" });
+  // Scanned across the whole UI tree, not just src/App.tsx: negative rules must
+  // hold for every component, and positive ones only care that the UI calls the
+  // typed wrapper somewhere. See scripts/ui-sources.mjs.
+  const ui = readUiSources(rootDir);
+  const guardedUi = readGuardedUiSources(rootDir);
+  assert(ui.count > 0, "M005/S04 verifier source scan found no UI sources under src/.", { phase: "source-guardrail", fileLabel: "src", markerClass: "missing_ui_sources" });
+  assert(ui.combined.includes("@tauri-apps/plugin-dialog"), "React UI must use native open/save dialogs for portability path selection.", { phase: "source-guardrail", fileLabel: "src", markerClass: "missing_native_dialogs" });
+  assert(/\bopen\s*\(/.test(ui.combined) && /\bsave\s*\(/.test(ui.combined), "React UI must keep native open and save dialog calls.", { phase: "source-guardrail", fileLabel: "src", markerClass: "missing_native_dialogs" });
+  for (const file of guardedUi.files) {
+    assert(!FRONTEND_FILESYSTEM_AUTHORITY_PATTERN.test(file.text), "React portability UI must not gain frontend filesystem authority.", { phase: "source-guardrail", fileLabel: file.path, markerClass: "frontend_filesystem_authority" });
+    assert(!FRONTEND_SHELL_OPEN_AUTHORITY_PATTERN.test(file.text), "React portability UI must not gain shell-open authority.", { phase: "source-guardrail", fileLabel: file.path, markerClass: "shell_open_authority" });
+    for (const command of FIXED_TAURI_COMMANDS) assert(!file.text.includes(`"${command}"`) && !file.text.includes(`'${command}'`), "React UI must call typed client wrappers instead of raw invoke command names.", { phase: "source-guardrail", fileLabel: file.path, markerClass: "raw_invoke_in_ui" });
+  }
+  for (const wrapper of ["exportProfileCookies", "replaceProfileCookies", "exportProfilePackage", "importProfilePackage"]) assert(ui.combined.includes(wrapper), "React UI must use typed cookie/package portability wrappers.", { phase: "source-guardrail", fileLabel: "src", markerClass: "missing_typed_wrapper" });
 
   const clientSource = readFileSync(assertFileExists(rootDir, "src/sidecar/client.ts"), "utf8");
   for (const method of FIXED_SIDECAR_METHODS) assert(!clientSource.includes(`"${method}"`) && !clientSource.includes(`'${method}'`), "TypeScript client must not expose raw sidecar portability method strings.", { phase: "source-guardrail", fileLabel: "src/sidecar/client.ts", markerClass: "raw_sidecar_method_in_client" });
