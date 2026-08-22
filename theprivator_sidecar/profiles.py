@@ -120,8 +120,15 @@ class ProfileRecord:
     lifecycle: JsonObject = field(default_factory=default_lifecycle)
     sync: JsonObject = field(default_factory=lambda: default_sync(local_device_id()))
 
+
     @classmethod
-    def create(cls, name: str, metadata: Optional[Mapping[str, Any]] = None) -> "ProfileRecord":
+    def create(
+        cls,
+        name: str,
+        metadata: Optional[Mapping[str, Any]] = None,
+        *,
+        device_id: Optional[str] = None,
+    ) -> "ProfileRecord":
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
         proxy = default_proxy_config()
@@ -140,7 +147,7 @@ class ProfileRecord:
             organization=default_organization(),
             launch=launch,
             lifecycle=default_lifecycle(),
-            sync=default_sync(local_device_id()),
+            sync=default_sync(device_id or local_device_id()),
         )
 
     @classmethod
@@ -151,6 +158,7 @@ class ProfileRecord:
         identity: Mapping[str, Any],
         proxy: Mapping[str, Any],
         metadata: Optional[Mapping[str, Any]] = None,
+        device_id: Optional[str] = None,
     ) -> "ProfileRecord":
         """Create an imported package record with sidecar-normalized safe fields."""
         profile_id = str(uuid.uuid4())
@@ -171,7 +179,7 @@ class ProfileRecord:
             organization=default_organization(),
             launch=launch,
             lifecycle=default_lifecycle(),
-            sync=default_sync(local_device_id()),
+            sync=default_sync(device_id or local_device_id()),
         )
 
     @classmethod
@@ -288,7 +296,7 @@ class ProfileRecord:
         launch = normalize_profile_launch(changes.pop("launch", self.launch))
         organization = normalize_organization(changes.pop("organization", self.organization))
         lifecycle = normalize_lifecycle(changes.pop("lifecycle", self.lifecycle))
-        device_id = local_device_id()
+        device_id = changes.pop("device_id", None) or local_device_id()
         sync = {
             **normalize_sync(changes.pop("sync", self.sync), device_id=device_id),
         }
@@ -308,29 +316,29 @@ class ProfileRecord:
             **changes,
         )
 
-    def renamed(self, name: str) -> "ProfileRecord":
-        return self._evolve(name=name)
+    def renamed(self, name: str, *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(name=name, device_id=device_id)
 
-    def with_identity(self, identity: Mapping[str, Any]) -> "ProfileRecord":
-        return self._evolve(identity=identity)
+    def with_identity(self, identity: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(identity=identity, device_id=device_id)
 
-    def with_proxy(self, proxy: Mapping[str, Any]) -> "ProfileRecord":
-        return self._evolve(proxy=proxy)
+    def with_proxy(self, proxy: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(proxy=proxy, device_id=device_id)
 
-    def with_organization(self, organization: Mapping[str, Any]) -> "ProfileRecord":
-        return self._evolve(organization=organization)
+    def with_organization(self, organization: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(organization=organization, device_id=device_id)
 
-    def with_launch(self, launch: Mapping[str, Any]) -> "ProfileRecord":
-        return self._evolve(launch=launch)
+    def with_launch(self, launch: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(launch=launch, device_id=device_id)
 
-    def trashed(self) -> "ProfileRecord":
-        return self._evolve(lifecycle={**self.lifecycle, "deletedAt": utc_now_iso()})
+    def trashed(self, *, device_id: Optional[str] = None) -> "ProfileRecord":
+        return self._evolve(lifecycle={**self.lifecycle, "deletedAt": utc_now_iso()}, device_id=device_id)
 
-    def restored(self, *, name: Optional[str] = None) -> "ProfileRecord":
+    def restored(self, *, name: Optional[str] = None, device_id: Optional[str] = None) -> "ProfileRecord":
         changes: dict[str, Any] = {"lifecycle": {**self.lifecycle, "deletedAt": None}}
         if name is not None:
             changes["name"] = name
-        return self._evolve(**changes)
+        return self._evolve(**changes, device_id=device_id)
 
     @property
     def is_trashed(self) -> bool:
@@ -392,10 +400,21 @@ class ProfileStore:
         self.profiles_dir = self.store_dir / PROFILES_DIR
         self.store_file = self.store_dir / PROFILES_FILE
 
+    @property
+    def device_id(self) -> str:
+        """This installation's sync identity, persisted under this store root.
+
+        Resolved from the store rather than a record constructor: a record does
+        not know which store it belongs to, and an earlier draft that guessed
+        wrote files into the user's home instead. Records take it as a parameter
+        so every write from this store stamps the same, restart-stable id.
+        """
+        return local_device_id(self.store_root)
+
     def list(self) -> JsonObject:
         """The profile library as the user sees it: everything except the trash."""
         profiles = self._read_profiles()
-        return self._collection_response(self._live(profiles))
+        return self._collection_response(profiles)
 
     def get(self, profile_id: str) -> ProfileRecord:
         """Load one profile record by id through the canonical store parser."""
@@ -433,6 +452,7 @@ class ProfileStore:
             identity=identity,
             proxy=proxy,
             metadata=metadata,
+            device_id=self.device_id,
         )
         self._ensure_profile_directories(profile)
         updated_profiles = sort_profiles([*profiles, profile])
@@ -448,7 +468,7 @@ class ProfileStore:
         profiles = self._read_profiles()
         self._ensure_unique_name(profiles, valid_name)
 
-        profile = ProfileRecord.create(valid_name, metadata=metadata)
+        profile = ProfileRecord.create(valid_name, metadata=metadata, device_id=self.device_id)
         self._ensure_profile_directories(profile)
         updated_profiles = sort_profiles([*profiles, profile])
         self._write_profiles(updated_profiles)
@@ -484,7 +504,7 @@ class ProfileStore:
 
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
-        updated = target.with_identity(identity)
+        updated = target.with_identity(identity, device_id=self.device_id)
         warnings = warnings_for_identity(updated.identity)
         updated_profiles = sort_profiles(
             [updated if profile.id == target.id else profile for profile in profiles]
@@ -507,12 +527,12 @@ class ProfileStore:
         normalized_proxy = normalize_proxy_config(proxy)
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
-        updated = target.with_proxy(normalized_proxy)
+        updated = target.with_proxy(normalized_proxy, device_id=self.device_id)
         updated_profiles = sort_profiles(
             [updated if profile.id == target.id else profile for profile in profiles]
         )
         self._write_profiles(updated_profiles)
-        return self._collection_response(self._live(updated_profiles), profile=updated)
+        return self._collection_response(updated_profiles, profile=updated)
 
     def apply_identity_preset(self, profile_id: str, preset_id: str) -> JsonObject:
         """Apply a curated identity preset to one profile and return warnings."""
@@ -540,9 +560,9 @@ class ProfileStore:
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
         if target.is_trashed:
-            return self._collection_response(self._live(profiles), profile=target)
+            return self._collection_response(profiles, profile=target)
 
-        trashed = target.trashed()
+        trashed = target.trashed(device_id=self.device_id)
         updated_profiles = sort_profiles(
             [trashed if profile.id == target.id else profile for profile in profiles]
         )
@@ -556,7 +576,7 @@ class ProfileStore:
                     detail_ref=error.detail_ref,
                 ) from error
             raise
-        return self._collection_response(self._live(updated_profiles), profile=trashed)
+        return self._collection_response(updated_profiles, profile=trashed)
 
     def list_trash(self) -> JsonObject:
         """Profiles waiting in the trash, newest first."""
@@ -580,15 +600,15 @@ class ProfileStore:
         profiles = self._read_profiles()
         target = self._find_profile(profiles, profile_id)
         if not target.is_trashed:
-            return self._collection_response(self._live(profiles), profile=target)
+            return self._collection_response(profiles, profile=target)
 
         name = unique_profile_name(profiles, target.name, exclude_ids=frozenset({target.id}))
-        restored = target.restored(name=name if name != target.name else None)
+        restored = target.restored(name=name if name != target.name else None, device_id=self.device_id)
         updated_profiles = sort_profiles(
             [restored if profile.id == target.id else profile for profile in profiles]
         )
         self._write_profiles(updated_profiles)
-        return self._collection_response(self._live(updated_profiles), profile=restored)
+        return self._collection_response(updated_profiles, profile=restored)
 
     def purge(self, profile_id: str) -> JsonObject:
         """Permanently drop a trashed profile's record. Caller removes its data."""
@@ -642,7 +662,17 @@ class ProfileStore:
         if needs_migration:
             if isinstance(stored_version, int) and stored_version < STORE_VERSION:
                 self._back_up_before_migration(stored_version)
-            self._write_profiles(sorted_profiles)
+            try:
+                self._write_profiles(sorted_profiles)
+            except SidecarError as error:
+                # Every record parsed; only persisting the newer form failed. On a
+                # read-only or full volume that used to make the whole library
+                # unreadable -- a write error raised out of what the caller issued
+                # as a read, taking get() and therefore launching with it. The
+                # in-memory migration is complete and correct, so degrade to
+                # read-only rather than pretending the profiles are gone.
+                if error.code != PROFILE_STORE_WRITE_FAILED:
+                    raise
         return sorted_profiles
 
     def _back_up_before_migration(self, from_version: int) -> None:
@@ -803,7 +833,15 @@ class ProfileStore:
         profile: Optional[ProfileRecord] = None,
         warnings: Optional[list[JsonObject]] = None,
     ) -> JsonObject:
-        sorted_profiles = sort_profiles(profiles)
+        """Build the standard collection reply.
+
+        Trashed records are filtered here rather than by each caller. Doing it at
+        the call sites meant nine places had to remember, four of them did not,
+        and a deleted profile reappeared in the list after any unrelated rename or
+        create. The ``profile`` field is exempt: delete and restore both need to
+        return the record they just acted on, which is precisely the trashed one.
+        """
+        sorted_profiles = sort_profiles(self._live(profiles))
         response: JsonObject = {
             "storeVersion": STORE_VERSION,
             "profiles": [item.to_public_dict() for item in sorted_profiles],

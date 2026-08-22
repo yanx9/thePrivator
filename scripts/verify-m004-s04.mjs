@@ -434,7 +434,7 @@ function assertPresetList(result) {
 }
 
 function assertAppliedIdentity(result, profile, preset) {
-  assert(result?.storeVersion === 3, "Identity apply did not preserve store v3.", { phase: "identity-apply" });
+  assert(result?.storeVersion === 4, "Identity apply did not preserve store v4.", { phase: "identity-apply" });
   assert(Array.isArray(result.warnings) && result.warnings.length === 0, "Curated identity preset should apply without warnings.", { phase: "identity-apply", warningCount: Array.isArray(result.warnings) ? result.warnings.length : null });
   assert(result.profile?.id === profile.id, "Identity apply profile id mismatch.", { phase: "identity-apply" });
   assert(result.profile?.identity?.presetId === PRESET_ID, "Identity apply did not persist preset id.", { phase: "identity-apply" });
@@ -443,7 +443,7 @@ function assertAppliedIdentity(result, profile, preset) {
 }
 
 function assertProxyUpdate(result, profile, expectedProxy) {
-  assert(result?.storeVersion === 3, "Proxy update did not preserve store v3.", { phase: "proxy-update" });
+  assert(result?.storeVersion === 4, "Proxy update did not preserve store v4.", { phase: "proxy-update" });
   assert(result.profile?.id === profile.id, "Proxy update profile id mismatch.", { phase: "proxy-update" });
   const proxy = result.profile?.proxy;
   assert(proxy?.proxyVersion === 1, "Proxy update did not return proxyVersion 1.", { phase: "proxy-update" });

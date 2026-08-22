@@ -577,10 +577,69 @@ function identityEnvelope(result: unknown, overrides: Record<string, unknown> = 
   };
 }
 
+function profileOrganization(overrides: Record<string, unknown> = {}) {
+  return {
+    folderId: null,
+    tags: [],
+    notes: "",
+    favorite: false,
+    color: null,
+    ...overrides,
+  };
+}
+
+function profileLaunch(overrides: Record<string, unknown> = {}) {
+  return {
+    startupBehavior: "customUrls",
+    startUrls: [],
+    args: [],
+    ...overrides,
+  };
+}
+
+function profileLifecycle(overrides: Record<string, unknown> = {}) {
+  return {
+    deletedAt: null,
+    lastLaunchedAt: null,
+    launchCount: 0,
+    ...overrides,
+  };
+}
+
+function profileSync(overrides: Record<string, unknown> = {}) {
+  return {
+    revision: 1,
+    updatedBy: "device-alpha",
+    originDeviceId: "device-alpha",
+    lastSyncedAt: null,
+    lastSyncedRevision: null,
+    ...overrides,
+  };
+}
+
+function derivedStartUrl(launch: unknown): string {
+  const record = (launch ?? {}) as { startupBehavior?: unknown; startUrls?: unknown };
+  const startUrls = Array.isArray(record.startUrls) ? record.startUrls : [];
+  if (record.startupBehavior !== "customUrls" || startUrls.length === 0) {
+    return "about:blank";
+  }
+  return String(startUrls[0]);
+}
+
+function derivedFingerprintMode(identity: unknown): string {
+  const surfaces = Object.values((identity ?? {}) as Record<string, unknown>);
+  const allReal = surfaces.every(
+    (surface) => typeof surface !== "object" || surface === null || (surface as { mode?: unknown }).mode === "real",
+  );
+  return allReal ? "disabled" : "managed";
+}
+
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
   const proxy = overrides.proxy ?? directProxySummary();
   const proxyMode = typeof proxy === "object" && proxy !== null && (proxy as { mode?: unknown }).mode === "fixedServer" ? "fixedServer" : "direct";
+  const identity = overrides.identity ?? defaultIdentity();
+  const launch = overrides.launch ?? profileLaunch();
   return {
     id,
     name: "Research",
@@ -588,16 +647,20 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
     updatedAt: "2026-05-04T18:01:00.000Z",
     defaults: {
       browser: "chromium",
-      startUrl: "about:blank",
+      startUrl: derivedStartUrl(launch),
       proxyMode,
-      fingerprintMode: "disabled",
+      fingerprintMode: derivedFingerprintMode(identity),
     },
     storage: {
       profileDir: `profile-store/profiles/${id}`,
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
-    identity: defaultIdentity(),
+    identity,
     proxy,
+    organization: profileOrganization(),
+    launch,
+    lifecycle: profileLifecycle(),
+    sync: profileSync(),
     ...overrides,
   };
 }
@@ -605,7 +668,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 function profileResult(overrides: Record<string, unknown> = {}) {
   const profiles = overrides.profiles ?? [profileRecord()];
   return {
-    storeVersion: 3,
+    storeVersion: 4,
     profiles,
     count: Array.isArray(profiles) ? profiles.length : 1,
     ...overrides,
@@ -1150,7 +1213,7 @@ describe("sidecar client", () => {
       protocolVersion: "1.0.0",
       durationMs: 4.5,
       result: {
-        storeVersion: 3,
+        storeVersion: 4,
         profiles: [],
         count: 0,
       },
@@ -1160,7 +1223,7 @@ describe("sidecar client", () => {
 
     expect(mockInvoke).toHaveBeenCalledWith("profiles_list");
     expect(snapshot.requestId).toBe("bridge-profiles-1");
-    expect(snapshot.storeVersion).toBe(3);
+    expect(snapshot.storeVersion).toBe(4);
     expect(snapshot.profiles).toEqual([]);
     expect(snapshot.count).toBe(0);
   });
@@ -1188,10 +1251,15 @@ describe("sidecar client", () => {
   it("wraps create, update, and delete with fixed profile command params only", async () => {
     const original = profileRecord({ name: "Research" });
     const renamed = profileRecord({ name: "Renamed", updatedAt: "2026-05-04T18:02:00.000Z" });
+    const trashed = profileRecord({
+      name: "Renamed",
+      updatedAt: "2026-05-04T18:03:00.000Z",
+      lifecycle: profileLifecycle({ deletedAt: "2026-05-04T18:03:00.000Z" }),
+    });
     mockInvoke
       .mockResolvedValueOnce(profileEnvelope(profileResult({ profile: original, profiles: [original] })))
       .mockResolvedValueOnce(profileEnvelope(profileResult({ profile: renamed, profiles: [renamed] })))
-      .mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [], count: 0 })));
+      .mockResolvedValueOnce(profileEnvelope(profileResult({ profile: trashed, profiles: [] })));
 
     const created = await createProfile("Research");
     const updated = await updateProfile(original.id, "Renamed");
@@ -1202,8 +1270,45 @@ describe("sidecar client", () => {
     expect(mockInvoke).toHaveBeenNthCalledWith(3, "profiles_delete", { id: original.id });
     expect(created.profile).toEqual(original);
     expect(updated.profile).toEqual(renamed);
-    expect(deleted.profile).toBeUndefined();
+    expect(deleted.profile).toEqual(trashed);
+    expect(deleted.profile?.lifecycle.deletedAt).toBe("2026-05-04T18:03:00.000Z");
     expect(deleted.profiles).toEqual([]);
+    expect(deleted.count).toBe(0);
+  });
+
+  it("keeps organization notes and tags that read like paths or URLs", async () => {
+    const organization = profileOrganization({
+      folderId: "55555555-5555-5555-5555-555555555555",
+      tags: ["client-work", "EU proxy"],
+      notes: "Billing: https://billing.example.com/account/42 — key lives at C:/keys/2026, rotate it first.",
+      favorite: true,
+      color: "#1a2b3c",
+    });
+    const profile = profileRecord({ organization });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile] })));
+
+    const snapshot = await listProfiles();
+
+    expect(snapshot.profiles[0].organization).toEqual(organization);
+  });
+
+  it("derives profile defaults from the launch block and the identity surfaces", async () => {
+    const launch = profileLaunch({
+      startUrls: ["https://example.com/start", "http://intranet.example/", "about:blank"],
+      args: ["--disable-features=Translate"],
+    });
+    const profile = profileRecord({ identity: presetIdentity(), launch });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile] })));
+
+    const snapshot = await listProfiles();
+
+    expect(snapshot.profiles[0].launch).toEqual(launch);
+    expect(snapshot.profiles[0].defaults).toEqual({
+      browser: "chromium",
+      startUrl: "https://example.com/start",
+      proxyMode: "direct",
+      fingerprintMode: "managed",
+    });
   });
 
   it("wraps proxy validation and profile proxy update with fixed command params only", async () => {
@@ -2447,6 +2552,8 @@ describe("sidecar client", () => {
     ["malformed envelope", { protocolVersion: "1.0.0", durationMs: 4.5, result: profileResult() }],
     ["stale v1 store version", profileEnvelope(profileResult({ storeVersion: 1 }))],
     ["stale v2 store version", profileEnvelope(profileResult({ storeVersion: 2 }))],
+    ["stale v3 store version", profileEnvelope(profileResult({ storeVersion: 3 }))],
+    ["store version newer than this build", profileEnvelope(profileResult({ storeVersion: 5 }))],
     ["wrong profiles item type", profileEnvelope(profileResult({ profiles: ["not-a-profile"] }))],
     ["missing defaults", profileEnvelope(profileResult({ profiles: [profileRecord({ defaults: undefined })] }))],
     ["missing identity", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: undefined })] }))],
@@ -2461,6 +2568,23 @@ describe("sidecar client", () => {
     ["absolute storage path", profileEnvelope(profileResult({ profiles: [profileRecord({ storage: { profileDir: "/tmp/profile", userDataDir: "/tmp/profile/user-data" } })] }))],
     ["non-number count", profileEnvelope(profileResult({ count: "one" }))],
     ["non-string timestamp", profileEnvelope(profileResult({ profiles: [profileRecord({ createdAt: 42 })] }))],
+    ["missing organization", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: undefined })] }))],
+    ["missing launch", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: undefined })] }))],
+    ["missing lifecycle", profileEnvelope(profileResult({ profiles: [profileRecord({ lifecycle: undefined })] }))],
+    ["missing sync", profileEnvelope(profileResult({ profiles: [profileRecord({ sync: undefined })] }))],
+    ["unknown organization field", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: { ...profileOrganization(), archived: true } })] }))],
+    ["too many organization tags", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ tags: Array.from({ length: 11 }, (_item, index) => `tag-${index}`) }) })] }))],
+    ["organization tag outside the tag character set", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ tags: ["ops/prod"] }) })] }))],
+    ["organization tag beyond the length bound", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ tags: ["t".repeat(33)] }) })] }))],
+    ["organization notes beyond the length bound", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ notes: "n".repeat(1501) }) })] }))],
+    ["organization notes containing a control character", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ notes: "Rotate the key\u0007then restart." }) })] }))],
+    ["organization color outside the hex form", profileEnvelope(profileResult({ profiles: [profileRecord({ organization: profileOrganization({ color: "#12345" }) })] }))],
+    ["start URL with a non-http scheme", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: profileLaunch({ startUrls: ["file:///etc/passwd"] }) })] }))],
+    ["too many start URLs", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: profileLaunch({ startUrls: Array.from({ length: 11 }, (_item, index) => `https://example.com/${index}`) }) })] }))],
+    ["launch argument that is not a switch", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: profileLaunch({ args: ["--disable-features=Translate", "https://example.com/"] }) })] }))],
+    ["too many launch arguments", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: profileLaunch({ args: Array.from({ length: 21 }, (_item, index) => `--flag-${index}`) }) })] }))],
+    ["defaults start URL disagreeing with the launch block", profileEnvelope(profileResult({ profiles: [profileRecord({ launch: profileLaunch({ startUrls: ["https://example.com/start"] }), defaults: { browser: "chromium", startUrl: "about:blank", proxyMode: "direct", fingerprintMode: "disabled" } })] }))],
+    ["defaults fingerprint mode disagreeing with the identity surfaces", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: presetIdentity(), defaults: { browser: "chromium", startUrl: "about:blank", proxyMode: "direct", fingerprintMode: "disabled" } })] }))],
   ])("maps malformed profile payloads to protocol errors: %s", async (_caseName, envelope) => {
     mockInvoke.mockResolvedValueOnce(envelope);
 
@@ -2496,6 +2620,18 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
       detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
+  });
+
+  it("keeps the args leak guard armed everywhere except the launch block", async () => {
+    const profile = profileRecord({ metadata: { args: ["--proxy-server=http://user:pass@proxy.example:8080"] } });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile] })));
+
+    await expect(listProfiles()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      message: expect.stringContaining("must not expose proxy credentials or runtime details"),
+      source: "protocol",
+      phase: "bridge-error",
     });
   });
 
@@ -2618,9 +2754,12 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["PROFILE_INVALID_NAME", "Profile name is invalid."],
-    ["PROFILE_DUPLICATE_NAME", "Profile name already exists."],
-  ])("preserves typed recoverable profile errors: %s", async (code, message) => {
+    ["PROFILE_INVALID_NAME", "Profile name is invalid.", () => createProfile("Research")],
+    ["PROFILE_DUPLICATE_NAME", "Profile name already exists.", () => createProfile("Research")],
+    ["PROFILE_STORE_VERSION_TOO_NEW", "This profile store was written by a newer version of ThePrivator. Update the app to open it.", () => listProfiles()],
+    ["PROFILE_START_URL_INVALID", "Start URLs must begin with https:// or http://.", () => listProfiles()],
+    ["PROFILE_ORGANIZATION_INVALID", "Profile notes cannot contain control characters.", () => listProfiles()],
+  ])("preserves typed recoverable profile errors: %s", async (code, message, callClient) => {
     mockInvoke.mockRejectedValueOnce({
       code,
       message,
@@ -2628,7 +2767,7 @@ describe("sidecar client", () => {
       detailRef: "sidecar-profile-detail",
     });
 
-    await expect(createProfile("Research")).rejects.toMatchObject({
+    await expect(callClient()).rejects.toMatchObject({
       code,
       message,
       recoverable: true,

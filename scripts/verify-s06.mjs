@@ -72,14 +72,20 @@ const STANDARD_CHROMIUM_NAMES = [
 ];
 const LINUX_WEBDRIVER_NAMES = ["WebKitWebDriver", "webkit2gtk-driver"];
 const PACKAGE_EXTENSIONS = new Set([".deb", ".rpm", ".AppImage", ".appimage"]);
-const DEFAULT_SENSITIVE_SUBSTRINGS = [
+// Planted secret VALUES. Finding one of these anywhere outside the credentials
+// key is a real leak, including inside a profile note, so they are always
+// scanned against the unmasked payload.
+const SENSITIVE_VALUE_SENTINELS = [
   "copied-browser-data-should-not-leak",
   "outside-secret-should-not-leak",
   "proxy-user-should-not-leak",
   "proxy-pass-should-not-leak",
-  "proxy_user",
-  "proxy_pass",
 ];
+// Credential FIELD names. These catch a runtime structure being serialised into
+// public output -- but "rotate proxy_user each quarter" is an ordinary thing for
+// a user to write in a note, so they are not applied to free text the user owns.
+const SENSITIVE_FIELD_NAME_MARKERS = ["proxy_user", "proxy_pass"];
+const DEFAULT_SENSITIVE_SUBSTRINGS = [...SENSITIVE_VALUE_SENTINELS, ...SENSITIVE_FIELD_NAME_MARKERS];
 const PROFILE_STORE_RELATIVE_PATH = "profile-store/profiles.json";
 const DIAGNOSTIC_RELATIVE_LOG_PATH = "profile-store/diagnostics/events.jsonl";
 const MAX_POST_SMOKE_SCAN_ENTRIES = 5_000;
@@ -173,6 +179,21 @@ export const FORBIDDEN_PROFILE_RUNTIME_FIELDS = new Set([
   "proxyAuthExtensionPath",
   "proxyAuthorization",
 ]);
+// Store v4 persists the user's own Chromium switches at profile.launch.args. That
+// is declared configuration the user typed, not captured runtime truth, so the key
+// stays forbidden everywhere except this one exact path.
+const FORBIDDEN_PROFILE_RUNTIME_FIELD_EXEMPT_PATHS = new Set(["$.launch.args"]);
+const EMPTY_KEY_PATHS = new Set();
+const MAX_PROFILE_TAGS = 10;
+const MAX_PROFILE_TAG_LENGTH = 32;
+const MAX_PROFILE_NOTES_LENGTH = 1500;
+const MAX_PROFILE_START_URLS = 10;
+const MAX_PROFILE_START_URL_LENGTH = 2048;
+const MAX_PROFILE_LAUNCH_ARGS = 20;
+const MAX_PROFILE_LAUNCH_ARG_LENGTH = 256;
+const PROFILE_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+const PROFILE_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+const PROFILE_STARTUP_BEHAVIORS = new Set(["customUrls", "restoreSession"]);
 const FORBIDDEN_DIAGNOSTIC_KEYS = new Set([
   "params",
   "command",
@@ -2860,6 +2881,16 @@ function assertNoUnsafeText(label, value, options = {}) {
   }
 
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  // Only the pattern stage may look at a masked copy. The absolute-value and
+  // fixture-substring scans must see the real bytes: masking them there is how
+  // profile notes and tags ended up with no leak coverage at all, when the only
+  // thing that needed exempting was the path-shaped pattern rule.
+  const patternText =
+    options.patternMaskedValue === undefined
+      ? text
+      : typeof options.patternMaskedValue === "string"
+        ? options.patternMaskedValue
+        : JSON.stringify(options.patternMaskedValue ?? "");
   for (const sensitive of Array.from(sensitiveValues).filter(Boolean).sort((a, b) => b.length - a.length)) {
     if (text.includes(sensitive)) {
       fail(`${label} leaked an absolute sensitive value.`, {
@@ -2869,7 +2900,7 @@ function assertNoUnsafeText(label, value, options = {}) {
       }, { rootDir, sensitiveValues: Array.from(sensitiveValues) });
     }
   }
-  for (const token of DEFAULT_SENSITIVE_SUBSTRINGS) {
+  for (const token of SENSITIVE_VALUE_SENTINELS) {
     if (text.includes(token)) {
       fail(`${label} leaked forbidden smoke fixture text.`, {
         code: "S06_REDACTION_FORBIDDEN_FIXTURE",
@@ -2878,8 +2909,17 @@ function assertNoUnsafeText(label, value, options = {}) {
       }, { rootDir, sensitiveValues: Array.from(sensitiveValues) });
     }
   }
+  for (const token of SENSITIVE_FIELD_NAME_MARKERS) {
+    if (patternText.includes(token)) {
+      fail(`${label} leaked forbidden smoke fixture text.`, {
+        code: "S06_REDACTION_FORBIDDEN_FIXTURE",
+        label,
+        token,
+      }, { rootDir, sensitiveValues: Array.from(sensitiveValues) });
+    }
+  }
   for (const { code, pattern } of UNSAFE_TEXT_PATTERNS) {
-    if (pattern.test(text)) {
+    if (pattern.test(patternText)) {
       fail(`${label} leaked unsafe diagnostic/verifier text.`, {
         code,
         label,
@@ -3004,20 +3044,20 @@ function findSmokeProfileStore(rootDir, smokeContext) {
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 }
 
-function collectForbiddenKeys(value, forbiddenKeys, path = "$", output = []) {
+function collectForbiddenKeys(value, forbiddenKeys, path = "$", output = [], exemptPaths = EMPTY_KEY_PATHS) {
   if (!value || typeof value !== "object") {
     return output;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => collectForbiddenKeys(item, forbiddenKeys, `${path}[${index}]`, output));
+    value.forEach((item, index) => collectForbiddenKeys(item, forbiddenKeys, `${path}[${index}]`, output, exemptPaths));
     return output;
   }
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${path}.${key}`;
-    if (forbiddenKeys.has(key)) {
+    if (forbiddenKeys.has(key) && !exemptPaths.has(childPath)) {
       output.push(childPath);
     }
-    collectForbiddenKeys(child, forbiddenKeys, childPath, output);
+    collectForbiddenKeys(child, forbiddenKeys, childPath, output, exemptPaths);
   }
   return output;
 }
@@ -3074,22 +3114,170 @@ function assertPackagedSmokeIdentity(identity, profileStorePath, rootDir, smokeC
   };
 }
 
-function sanitizePrivateProfileStoreForRedaction(value) {
+// organization.notes and organization.tags are text the user typed. Slashes and
+// colons are ordinary content there, so they are masked before the path-shaped
+// redaction patterns run; assertPackagedSmokeOrganization bounds them instead.
+/**
+ * Mask the private store for redaction checks.
+ *
+ * Two different exemptions, deliberately separated:
+ *
+ * - Proxy credentials are legitimately stored here, so they are masked for every
+ *   stage. The private store is where they live; finding them is not a leak.
+ * - Organization notes and tags are free user text that may contain slashes and
+ *   colons, so only the path-shaped pattern rules may skip them. The
+ *   absolute-value and fixture-substring scans must still see the real bytes, or
+ *   a credential pasted into a note would go entirely unchecked.
+ */
+function sanitizePrivateProfileStoreForRedaction(value, { maskOrganizationText = false } = {}, parentKey = null) {
   if (!value || typeof value !== "object") {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizePrivateProfileStoreForRedaction(item));
+    return value.map((item) => sanitizePrivateProfileStoreForRedaction(item, { maskOrganizationText }, parentKey));
   }
   const output = {};
   for (const [key, child] of Object.entries(value)) {
     if (key === "credentials") {
       output[key] = "<private-store-credentials>";
+    } else if (maskOrganizationText && parentKey === "organization" && (key === "notes" || key === "tags")) {
+      output[key] = "<private-store-organization-text>";
     } else {
-      output[key] = sanitizePrivateProfileStoreForRedaction(child);
+      output[key] = sanitizePrivateProfileStoreForRedaction(child, { maskOrganizationText }, key);
     }
   }
   return output;
+}
+
+// Mirrors _TAG_RE in theprivator_sidecar/profile_sections.py and PROFILE_TAG_PATTERN
+// in src/sidecar/client.ts. Without it a persisted tag could be an absolute path
+// or a raw credential and still satisfy this verifier's shape check.
+const PROFILE_TAG_PATTERN = /^[\p{L}\p{N}_ -]+$/u;
+
+function isBoundedProfileFreeText(value, maxLength) {
+  return typeof value === "string" && Array.from(value).length <= maxLength && !PROFILE_CONTROL_CHARACTER_PATTERN.test(value);
+}
+
+function isSafeProfileStartUrl(value) {
+  if (typeof value !== "string" || value.length === 0 || Array.from(value).length > MAX_PROFILE_START_URL_LENGTH) {
+    return false;
+  }
+  if (/\s/.test(value) || PROFILE_CONTROL_CHARACTER_PATTERN.test(value)) {
+    return false;
+  }
+  return value === "about:blank" || value.startsWith("https://") || value.startsWith("http://");
+}
+
+function isSafeProfileLaunchArg(value) {
+  return typeof value === "string"
+    && value.startsWith("--")
+    && value.length <= MAX_PROFILE_LAUNCH_ARG_LENGTH
+    && !PROFILE_CONTROL_CHARACTER_PATTERN.test(value);
+}
+
+function assertPackagedSmokeOrganization(organization, profileStorePath, rootDir, smokeContext) {
+  assert(organization && typeof organization === "object" && !Array.isArray(organization), "Smoke profile organization metadata is missing.", {
+    code: "S06_PROFILE_ORGANIZATION_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  const tags = organization.tags;
+  assert(Array.isArray(tags) && tags.length <= MAX_PROFILE_TAGS && tags.every((tag) => isBoundedProfileFreeText(tag, MAX_PROFILE_TAG_LENGTH) && tag.length > 0 && PROFILE_TAG_PATTERN.test(tag)), "Smoke profile organization.tags left the persisted tag bounds.", {
+    code: "S06_PROFILE_ORGANIZATION_TAGS_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    maxTags: MAX_PROFILE_TAGS,
+    maxTagLength: MAX_PROFILE_TAG_LENGTH,
+    actualTagCount: Array.isArray(tags) ? tags.length : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(isBoundedProfileFreeText(organization.notes, MAX_PROFILE_NOTES_LENGTH), "Smoke profile organization.notes left the persisted notes bounds.", {
+    code: "S06_PROFILE_ORGANIZATION_NOTES_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    maxNotesLength: MAX_PROFILE_NOTES_LENGTH,
+    actualNotesLength: typeof organization.notes === "string" ? organization.notes.length : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(typeof organization.favorite === "boolean", "Smoke profile organization.favorite must be a boolean.", {
+    code: "S06_PROFILE_ORGANIZATION_FAVORITE_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(organization.color === null || (typeof organization.color === "string" && PROFILE_COLOR_PATTERN.test(organization.color)), "Smoke profile organization.color must be a #rrggbb value or null.", {
+    code: "S06_PROFILE_ORGANIZATION_COLOR_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  return {
+    tagCount: tags.length,
+    notesLength: organization.notes.length,
+    favorite: organization.favorite,
+    foldered: typeof organization.folderId === "string",
+    colored: typeof organization.color === "string",
+  };
+}
+
+function assertPackagedSmokeLaunch(launch, profileStorePath, rootDir, smokeContext) {
+  assert(launch && typeof launch === "object" && !Array.isArray(launch), "Smoke profile launch metadata is missing.", {
+    code: "S06_PROFILE_LAUNCH_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(PROFILE_STARTUP_BEHAVIORS.has(launch.startupBehavior), "Smoke profile launch.startupBehavior was not a supported startup behavior.", {
+    code: "S06_PROFILE_LAUNCH_BEHAVIOR_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualStartupBehavior: typeof launch.startupBehavior === "string" ? launch.startupBehavior : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  const startUrls = launch.startUrls;
+  assert(Array.isArray(startUrls) && startUrls.length <= MAX_PROFILE_START_URLS && startUrls.every(isSafeProfileStartUrl), "Smoke profile launch.startUrls must stay bounded https/http/about:blank entries.", {
+    code: "S06_PROFILE_START_URL_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    maxStartUrls: MAX_PROFILE_START_URLS,
+    actualStartUrlCount: Array.isArray(startUrls) ? startUrls.length : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  const args = launch.args;
+  assert(Array.isArray(args) && args.length <= MAX_PROFILE_LAUNCH_ARGS && args.every(isSafeProfileLaunchArg), "Smoke profile launch.args must stay bounded '--' switches.", {
+    code: "S06_PROFILE_LAUNCH_ARGS_UNSAFE",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    maxArgs: MAX_PROFILE_LAUNCH_ARGS,
+    maxArgLength: MAX_PROFILE_LAUNCH_ARG_LENGTH,
+    actualArgCount: Array.isArray(args) ? args.length : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  return {
+    startupBehavior: launch.startupBehavior,
+    startUrlCount: startUrls.length,
+    argCount: args.length,
+  };
+}
+
+function assertPackagedSmokeLifecycle(lifecycle, profileStorePath, rootDir, smokeContext) {
+  assert(lifecycle && typeof lifecycle === "object" && !Array.isArray(lifecycle), "Smoke profile lifecycle metadata is missing.", {
+    code: "S06_PROFILE_LIFECYCLE_MISSING",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  // A non-null deletedAt means the record is in the trash, which the packaged
+  // smoke must never leave behind: the smoke profile has to stay live.
+  assert(lifecycle.deletedAt === null, "Smoke profile was left in the profile-store trash.", {
+    code: "S06_PROFILE_LIFECYCLE_TRASHED",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+  assert(Number.isInteger(lifecycle.launchCount) && lifecycle.launchCount >= 0, "Smoke profile lifecycle.launchCount must be a non-negative whole number.", {
+    code: "S06_PROFILE_LIFECYCLE_LAUNCH_COUNT",
+    profileStore: repoRelative(rootDir, profileStorePath),
+    smokeProfileName: smokeContext.smokeProfileName,
+    actualLaunchCount: Number.isInteger(lifecycle.launchCount) ? lifecycle.launchCount : null,
+  }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
+
+  return {
+    trashed: false,
+    launchCount: lifecycle.launchCount,
+  };
 }
 
 function assertPackagedSmokeProxy(proxy, profileStorePath, rootDir, smokeContext) {
@@ -3171,15 +3359,18 @@ export function assertPostSmokeProfileStore(options = {}) {
   }, { rootDir });
 
   const { path, appDataRoot, payload, profile } = findSmokeProfileStore(rootDir, smokeContext);
-  assert(payload.storeVersion === 3, "profile-store/profiles.json must persist storeVersion: 3 for packaged proxy smoke.", {
+  assert(payload.storeVersion === 4, "profile-store/profiles.json must persist storeVersion: 4 for packaged proxy smoke.", {
     code: "S06_PROFILE_STORE_VERSION",
     profileStore: repoRelative(rootDir, path),
     smokeProfileName: smokeContext.smokeProfileName,
-    expectedStoreVersion: 3,
+    expectedStoreVersion: 4,
     actualStoreVersion: payload.storeVersion,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot, appDataRoot] });
   const identity = assertPackagedSmokeIdentity(profile.identity, path, rootDir, smokeContext);
   const proxy = assertPackagedSmokeProxy(profile.proxy, path, rootDir, smokeContext);
+  const organization = assertPackagedSmokeOrganization(profile.organization, path, rootDir, smokeContext);
+  const launch = assertPackagedSmokeLaunch(profile.launch, path, rootDir, smokeContext);
+  const lifecycle = assertPackagedSmokeLifecycle(profile.lifecycle, path, rootDir, smokeContext);
   const storage = profile.storage;
   assert(storage && typeof storage === "object" && !Array.isArray(storage), "Smoke profile storage metadata is missing.", {
     code: "S06_PROFILE_STORAGE_MISSING",
@@ -3198,7 +3389,7 @@ export function assertPostSmokeProfileStore(options = {}) {
     userDataDir: storage.userDataDir,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 
-  const runtimeFields = collectForbiddenKeys(profile, FORBIDDEN_PROFILE_RUNTIME_FIELDS);
+  const runtimeFields = collectForbiddenKeys(profile, FORBIDDEN_PROFILE_RUNTIME_FIELDS, "$", [], FORBIDDEN_PROFILE_RUNTIME_FIELD_EXEMPT_PATHS);
   assert(runtimeFields.length === 0, "profiles.json persisted transient Chromium runtime truth.", {
     code: "S06_PROFILE_RUNTIME_PERSISTED",
     profileStore: repoRelative(rootDir, path),
@@ -3207,6 +3398,7 @@ export function assertPostSmokeProfileStore(options = {}) {
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 
   assertNoUnsafeText("profile-store/profiles.json", sanitizePrivateProfileStoreForRedaction(payload), {
+    patternMaskedValue: sanitizePrivateProfileStoreForRedaction(payload, { maskOrganizationText: true }),
     rootDir,
     smokeContext,
     sensitiveValues: [appDataRoot],
@@ -3222,6 +3414,9 @@ export function assertPostSmokeProfileStore(options = {}) {
     storeVersion: payload.storeVersion,
     identity,
     proxy,
+    organization,
+    launch,
+    lifecycle,
     storage: {
       profileDir: storage.profileDir,
       userDataDir: storage.userDataDir,
@@ -3463,6 +3658,7 @@ export function assertPostSmokeRedaction(options = {}) {
   const { appDataRoot, payload } = findSmokeProfileStore(rootDir, smokeContext);
   const diagnosticsPath = join(appDataRoot, DIAGNOSTIC_RELATIVE_LOG_PATH);
   assertNoUnsafeText("profile-store/profiles.json", sanitizePrivateProfileStoreForRedaction(payload), {
+    patternMaskedValue: sanitizePrivateProfileStoreForRedaction(payload, { maskOrganizationText: true }),
     rootDir,
     smokeContext,
     sensitiveValues: [appDataRoot],
@@ -3515,6 +3711,9 @@ function summarizeProfileStoreForEvidence(profileStore) {
     persistedRuntimeFields: profileStore.persistedRuntimeFields,
     storage: profileStore.storage ? "safe-relative-store-paths" : undefined,
     proxy: profileStore.proxy,
+    organization: profileStore.organization,
+    launch: profileStore.launch,
+    lifecycle: profileStore.lifecycle,
   };
 }
 

@@ -570,7 +570,7 @@ function assertProfileShape(profile, expectedName = SMOKE_PROFILE_NAME) {
 }
 
 function assertCollectionShape(result, expectedProfileId) {
-  assert(result.storeVersion === 3, "Profile collection must use storeVersion 3.", { storeVersion: result.storeVersion });
+  assert(result.storeVersion === 4, "Profile collection must use storeVersion 4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.profiles), "Profile collection profiles field is not an array.");
   assert(result.count === result.profiles.length, "Profile collection count mismatch.", {
     count: result.count,
@@ -650,7 +650,7 @@ function assertProxyValidationResult(result, expected) {
 }
 
 function assertProxyMutationResult(result, profileId, expected) {
-  assert(result.storeVersion === 3, "Proxy update did not preserve store v3.", { storeVersion: result.storeVersion });
+  assert(result.storeVersion === 4, "Proxy update did not preserve store v4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.profiles), "Proxy update did not return a profiles array.");
   assert(result.profile?.id === profileId, "Proxy update returned the wrong profile id.", {
     profileId: result.profile?.id,
@@ -681,7 +681,7 @@ function readProfilesJson(storeRoot) {
 
 function findPrivateProfile(storeRoot, profileId) {
   const { text, payload } = readProfilesJson(storeRoot);
-  assert(payload.storeVersion === 3, "profiles.json must remain a v3 profile-store payload.", {
+  assert(payload.storeVersion === 4, "profiles.json must remain a v4 profile-store payload.", {
     storeVersion: payload.storeVersion,
   });
   assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");
@@ -806,7 +806,12 @@ function assertNoForbiddenKeys(value, context, path = "$", allowProxyCredentials
   for (const [key, nestedValue] of Object.entries(value)) {
     const nextPath = `${path}.${key}`;
     const isAllowedCredentialKey = allowProxyCredentials && (nextPath.endsWith(".proxy.credentials") || nextPath.endsWith(".proxy.credentials.username") || nextPath.endsWith(".proxy.credentials.password"));
-    assert(isAllowedCredentialKey || !FORBIDDEN_DURABLE_KEYS.has(key), `${context} contains forbidden runtime/debug field ${key}.`, {
+    // Anchored to the profile record root on purpose. A suffix match would also
+    // exempt metadata.launch.args or proxy.launch.args, so a captured Chromium
+    // launch record shaped {"launch": {"args": [...]}} persisted anywhere in the
+    // store would pass the guard it exists to trip.
+    const isAllowedLaunchArgsKey = /^\$\.profiles\[\d+\]\.launch\.args$/.test(nextPath);
+    assert(isAllowedCredentialKey || isAllowedLaunchArgsKey || !FORBIDDEN_DURABLE_KEYS.has(key), `${context} contains forbidden runtime/debug field ${key}.`, {
       key,
       path: nextPath,
     });

@@ -254,7 +254,14 @@ def test_v2_profiles_migrate_to_v3_preserving_identity_storage_and_direct_proxy(
     assert public_equivalent_for_store_profile(stored_profile, profile["proxy"]) == profile
 
 
-def test_migration_write_failure_keeps_v1_file_and_returns_write_error(tmp_path, monkeypatch):
+def test_migration_write_failure_still_serves_the_v1_library_read_only(tmp_path, monkeypatch):
+    """A store that cannot be rewritten must still be readable.
+
+    Migration used to raise the write error out of what the caller issued as a
+    read, so on a read-only or full volume the entire profile library became
+    inaccessible -- taking get(), and therefore launching, with it. Every record
+    parsed fine; only persisting the newer form failed.
+    """
     legacy_payload = {"storeVersion": 1, "profiles": [v1_profile_payload("Legacy Research")]}
     store_file = write_profiles_payload(tmp_path, legacy_payload)
     original = store_file.read_text(encoding="utf-8")
@@ -264,14 +271,20 @@ def test_migration_write_failure_keeps_v1_file_and_returns_write_error(tmp_path,
 
     monkeypatch.setattr("theprivator_sidecar.profiles.os.replace", fail_replace)
 
-    with pytest.raises(SidecarError) as exc_info:
-        ProfileStore(tmp_path).list()
+    result = ProfileStore(tmp_path).list()
 
-    assert_profile_error(exc_info, PROFILE_STORE_WRITE_FAILED)
+    assert result["storeVersion"] == STORE_VERSION
+    assert profile_names(result) == ["Legacy Research"]
     assert store_file.read_text(encoding="utf-8") == original
 
+def test_migration_write_failure_still_serves_the_v2_library_read_only(tmp_path, monkeypatch):
+    """A store that cannot be rewritten must still be readable.
 
-def test_migration_write_failure_keeps_v2_file_and_returns_write_error(tmp_path, monkeypatch):
+    Migration used to raise the write error out of what the caller issued as a
+    read, so on a read-only or full volume the entire profile library became
+    inaccessible -- taking get(), and therefore launching, with it. Every record
+    parsed fine; only persisting the newer form failed.
+    """
     legacy_payload = {"storeVersion": 2, "profiles": [v2_profile_payload("Legacy Research")]}
     store_file = write_profiles_payload(tmp_path, legacy_payload)
     original = store_file.read_text(encoding="utf-8")
@@ -281,12 +294,11 @@ def test_migration_write_failure_keeps_v2_file_and_returns_write_error(tmp_path,
 
     monkeypatch.setattr("theprivator_sidecar.profiles.os.replace", fail_replace)
 
-    with pytest.raises(SidecarError) as exc_info:
-        ProfileStore(tmp_path).list()
+    result = ProfileStore(tmp_path).list()
 
-    assert_profile_error(exc_info, PROFILE_STORE_WRITE_FAILED)
+    assert result["storeVersion"] == STORE_VERSION
+    assert profile_names(result) == ["Legacy Research"]
     assert store_file.read_text(encoding="utf-8") == original
-
 
 def test_v1_records_missing_m001_fields_remain_corrupt_without_rewrite(tmp_path):
     payload = {"storeVersion": 1, "profiles": [{"id": v1_profile_payload()["id"], "name": "Missing"}]}

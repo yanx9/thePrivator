@@ -62,10 +62,15 @@ import type {
   IdentityWarning,
   ProfileIdentity,
   ProfileIdentityMutationSnapshot,
+  ProfileLaunch,
+  ProfileLifecycle,
+  ProfileOrganization,
   ProfileProxyDraft,
   ProfileProxyMode,
   ProfileProxyMutationSnapshot,
   ProfileProxySummary,
+  ProfileStartupBehavior,
+  ProfileSync,
   ProxyCheckIpHiding,
   ProxyCheckPublicCheckerPage,
   ProxyCheckPublicCheckerSurface,
@@ -91,6 +96,7 @@ import type {
   LegacyScanResult,
   LegacyScanSnapshot,
   LegacyUserDataStatus,
+  FingerprintMode,
   ProfileDefaults,
   ProfileListResult,
   ProfileListSnapshot,
@@ -321,6 +327,26 @@ const FORBIDDEN_PUBLIC_PROXY_FIELD_TOKENS = new Set([
   "args",
   "argv",
 ]);
+
+// launch.args is the single public profile path that legitimately carries a
+// switch list, so it is exempted by path rather than by dropping the token: the
+// same key name anywhere else in a profile record is still a leak.
+const PUBLIC_PROFILE_FORBIDDEN_TOKEN_EXEMPT_PATHS = new Set(["launch.args"]);
+
+const MAX_PROFILE_TAGS = 10;
+const MAX_PROFILE_TAG_LENGTH = 32;
+const MAX_PROFILE_NOTES_LENGTH = 1500;
+const MAX_PROFILE_START_URLS = 10;
+const MAX_PROFILE_START_URL_LENGTH = 2048;
+const MAX_PROFILE_LAUNCH_ARGS = 20;
+const MAX_PROFILE_LAUNCH_ARG_LENGTH = 256;
+const MAX_PROFILE_DEVICE_ID_LENGTH = 64;
+
+const PROFILE_IDENTITY_SURFACES = ["browser", "navigator", "screen", "locale", "canvas", "audio", "webgl", "webrtc"] as const;
+
+const PROFILE_TAG_PATTERN = /^[\p{L}\p{N}_ -]+$/u;
+const PROFILE_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+const PROFILE_FOLDER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const FORBIDDEN_AUTOMATION_API_FIELD_TOKENS = new Set([
   "appdata",
@@ -670,8 +696,10 @@ export async function updateProfile(id: string, name: string): Promise<ProfileMu
 export async function deleteProfile(id: string): Promise<ProfileMutationSnapshot> {
   try {
     const envelope = await invoke<unknown>("profiles_delete", { id });
+    // Delete is a soft delete: the trashed record still comes back on profile,
+    // but it is excluded from the refreshed profiles array.
     return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
-      requireProfile: false,
+      requireProfile: true,
       requireProfileInList: false,
       requireWarnings: false,
     });
@@ -2857,8 +2885,8 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
   assertNoForbiddenPublicProfileFields(record, field);
   requirePublicKeys(
     record,
-    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "metadata"],
-    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy"],
+    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "organization", "launch", "lifecycle", "sync", "metadata"],
+    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "organization", "launch", "lifecycle", "sync"],
     field,
   );
   const id = requireNonBlankString(record.id, `${field}.id`);
@@ -2866,6 +2894,8 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
   const createdAt = requireIsoTimestamp(record.createdAt, `${field}.createdAt`);
   const updatedAt = requireIsoTimestamp(record.updatedAt, `${field}.updatedAt`);
   const proxy = parseProfileProxySummary(record.proxy, `${field}.proxy`);
+  const identity = parseProfileIdentity(record.identity, `${field}.identity`);
+  const launch = parseProfileLaunch(record.launch, `${field}.launch`);
 
   const metadata = record.metadata === undefined ? undefined : parseSafePublicMetadata(record.metadata, `${field}.metadata`);
 
@@ -2874,32 +2904,60 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
     name,
     createdAt,
     updatedAt,
-    defaults: parseProfileDefaults(record.defaults, `${field}.defaults`, proxy.mode),
+    defaults: parseProfileDefaults(record.defaults, `${field}.defaults`, {
+      proxyMode: proxy.mode,
+      startUrl: deriveProfileStartUrl(launch),
+      fingerprintMode: deriveFingerprintMode(identity),
+    }),
     storage: parseProfileStorage(record.storage, id, `${field}.storage`),
-    identity: parseProfileIdentity(record.identity, `${field}.identity`),
+    identity,
     proxy,
+    organization: parseProfileOrganization(record.organization, `${field}.organization`),
+    launch,
+    lifecycle: parseProfileLifecycle(record.lifecycle, `${field}.lifecycle`),
+    sync: parseProfileSync(record.sync, `${field}.sync`),
     ...(metadata === undefined ? {} : { metadata }),
   };
 }
 
-function parseProfileDefaults(value: unknown, field: string, expectedProxyMode: ProfileProxyMode): ProfileDefaults {
+function parseProfileDefaults(value: unknown, field: string, expected: Omit<ProfileDefaults, "browser">): ProfileDefaults {
   const defaults = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
   requirePublicKeys(defaults, ["browser", "startUrl", "proxyMode", "fingerprintMode"], ["browser", "startUrl", "proxyMode", "fingerprintMode"], field);
   requireLiteral(defaults.browser, `${field}.browser`, "chromium");
-  requireLiteral(defaults.startUrl, `${field}.startUrl`, "about:blank");
+  const startUrl = requireProfileStartUrl(defaults.startUrl, `${field}.startUrl`);
   const proxyMode = requireProfileProxyMode(defaults.proxyMode, `${field}.proxyMode`);
-  requireLiteral(defaults.fingerprintMode, `${field}.fingerprintMode`, "disabled");
+  const fingerprintMode = requireFingerprintMode(defaults.fingerprintMode, `${field}.fingerprintMode`);
 
-  if (proxyMode !== expectedProxyMode) {
+  // defaults is a summary of the canonical sections, never a source: a value the
+  // launcher trusts must be re-derivable from launch, identity, and proxy.
+  if (proxyMode !== expected.proxyMode) {
     throw makeProtocolError(`The sidecar profile result field ${field}.proxyMode must match the public proxy summary.`);
+  }
+  if (startUrl !== expected.startUrl) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.startUrl must match the launch block.`);
+  }
+  if (fingerprintMode !== expected.fingerprintMode) {
+    throw makeProtocolError(`The sidecar profile result field ${field}.fingerprintMode must match the identity surfaces.`);
   }
 
   return {
     browser: "chromium",
-    startUrl: "about:blank",
+    startUrl,
     proxyMode,
-    fingerprintMode: "disabled",
+    fingerprintMode,
   };
+}
+
+function deriveProfileStartUrl(launch: ProfileLaunch): string {
+  if (launch.startupBehavior !== "customUrls" || launch.startUrls.length === 0) {
+    return "about:blank";
+  }
+
+  return launch.startUrls[0];
+}
+
+function deriveFingerprintMode(identity: ProfileIdentity): FingerprintMode {
+  return PROFILE_IDENTITY_SURFACES.every((surface) => identity[surface].mode === "real") ? "disabled" : "managed";
 }
 
 function parseProfileProxySummary(value: unknown, field: string): ProfileProxySummary {
@@ -2965,6 +3023,173 @@ function parseProfileStorage(value: unknown, profileId: string, field: string): 
     profileDir,
     userDataDir,
   };
+}
+
+function parseProfileOrganization(value: unknown, field: string): ProfileOrganization {
+  const organization = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requirePublicKeys(
+    organization,
+    ["folderId", "tags", "notes", "favorite", "color"],
+    ["folderId", "tags", "notes", "favorite", "color"],
+    field,
+  );
+
+  return {
+    folderId: organization.folderId === null ? null : requireProfileFolderId(organization.folderId, `${field}.folderId`),
+    tags: parseProfileTagArray(organization.tags, `${field}.tags`),
+    // Notes are text the user typed: slashes and colons are ordinary content, so
+    // the guard is control characters and length, never a path-shaped rejection.
+    notes: requireProfileFreeText(organization.notes, `${field}.notes`, MAX_PROFILE_NOTES_LENGTH),
+    favorite: requireBoolean(organization.favorite, `${field}.favorite`),
+    color: organization.color === null ? null : requireProfileColor(organization.color, `${field}.color`),
+  };
+}
+
+function parseProfileLaunch(value: unknown, field: string): ProfileLaunch {
+  const launch = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requirePublicKeys(launch, ["startupBehavior", "startUrls", "args"], ["startupBehavior", "startUrls", "args"], field);
+
+  return {
+    startupBehavior: requireProfileStartupBehavior(launch.startupBehavior, `${field}.startupBehavior`),
+    startUrls: parseProfileStartUrlArray(launch.startUrls, `${field}.startUrls`),
+    args: parseProfileLaunchArgArray(launch.args, `${field}.args`),
+  };
+}
+
+function parseProfileLifecycle(value: unknown, field: string): ProfileLifecycle {
+  const lifecycle = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requirePublicKeys(lifecycle, ["deletedAt", "lastLaunchedAt", "launchCount"], ["deletedAt", "lastLaunchedAt", "launchCount"], field);
+
+  return {
+    deletedAt: lifecycle.deletedAt === null ? null : requireIsoTimestamp(lifecycle.deletedAt, `${field}.deletedAt`),
+    lastLaunchedAt:
+      lifecycle.lastLaunchedAt === null ? null : requireIsoTimestamp(lifecycle.lastLaunchedAt, `${field}.lastLaunchedAt`),
+    launchCount: requireNonNegativeInteger(lifecycle.launchCount, `${field}.launchCount`),
+  };
+}
+
+function parseProfileSync(value: unknown, field: string): ProfileSync {
+  const sync = requireRecord(value, `The sidecar profile result field ${field} must be an object.`);
+  requirePublicKeys(
+    sync,
+    ["revision", "updatedBy", "originDeviceId", "lastSyncedAt", "lastSyncedRevision"],
+    ["revision", "updatedBy", "originDeviceId", "lastSyncedAt", "lastSyncedRevision"],
+    field,
+  );
+
+  return {
+    revision: requirePositiveInteger(sync.revision, `${field}.revision`),
+    updatedBy: requireProfileDeviceId(sync.updatedBy, `${field}.updatedBy`),
+    originDeviceId: requireProfileDeviceId(sync.originDeviceId, `${field}.originDeviceId`),
+    lastSyncedAt: sync.lastSyncedAt === null ? null : requireIsoTimestamp(sync.lastSyncedAt, `${field}.lastSyncedAt`),
+    lastSyncedRevision:
+      sync.lastSyncedRevision === null ? null : requirePositiveInteger(sync.lastSyncedRevision, `${field}.lastSyncedRevision`),
+  };
+}
+
+function parseProfileTagArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_PROFILE_TAGS) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a bounded tag array.`);
+  }
+
+  const tags = value.map((item, index) => requireProfileTag(item, `${field}[${index}]`));
+  if (new Set(tags.map((tag) => tag.toLowerCase())).size !== tags.length) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must not repeat tags.`);
+  }
+
+  return tags;
+}
+
+function requireProfileTag(value: unknown, field: string): string {
+  const tag = requireProfileFreeText(value, field, MAX_PROFILE_TAG_LENGTH);
+  if (!tag.trim() || !PROFILE_TAG_PATTERN.test(tag)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be letters, digits, spaces, or hyphens.`);
+  }
+
+  return tag;
+}
+
+function requireProfileFreeText(value: unknown, field: string, maxLength: number): string {
+  const text = requireString(value, field);
+  if (codePointLength(text) > maxLength || containsControlCharacters(text)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
+  }
+
+  return text;
+}
+
+function requireProfileFolderId(value: unknown, field: string): string {
+  const folderId = requireNonBlankString(value, field);
+  if (!PROFILE_FOLDER_ID_PATTERN.test(folderId)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a uuid or null.`);
+  }
+
+  return folderId;
+}
+
+function requireProfileColor(value: unknown, field: string): string {
+  const color = requireString(value, field);
+  if (!PROFILE_COLOR_PATTERN.test(color)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a #rrggbb color or null.`);
+  }
+
+  return color;
+}
+
+function requireProfileStartupBehavior(value: unknown, field: string): ProfileStartupBehavior {
+  if (value === "customUrls" || value === "restoreSession") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar profile result field ${field} must be a supported startup behavior.`);
+}
+
+function parseProfileStartUrlArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_PROFILE_START_URLS) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a bounded start URL array.`);
+  }
+
+  return value.map((item, index) => requireProfileStartUrl(item, `${field}[${index}]`));
+}
+
+function requireProfileStartUrl(value: unknown, field: string): string {
+  const startUrl = requireString(value, field);
+  if (!startUrl || codePointLength(startUrl) > MAX_PROFILE_START_URL_LENGTH || containsControlCharacters(startUrl) || /\s/.test(startUrl)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
+  }
+  // A start URL is handed to Chromium as a positional argument, so an exact
+  // scheme prefix is what makes switch injection structurally impossible.
+  if (startUrl !== "about:blank" && !startUrl.startsWith("https://") && !startUrl.startsWith("http://")) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must begin with https:// or http://.`);
+  }
+
+  return startUrl;
+}
+
+function parseProfileLaunchArgArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_PROFILE_LAUNCH_ARGS) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a bounded launch argument array.`);
+  }
+
+  return value.map((item, index) => requireProfileLaunchArg(item, `${field}[${index}]`));
+}
+
+function requireProfileLaunchArg(value: unknown, field: string): string {
+  const arg = requireProfileFreeText(value, field, MAX_PROFILE_LAUNCH_ARG_LENGTH);
+  if (!arg.startsWith("--")) {
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a switch beginning with --.`);
+  }
+
+  return arg;
+}
+
+function requireProfileDeviceId(value: unknown, field: string): string {
+  const deviceId = requireNonBlankString(value, field);
+  if (codePointLength(deviceId) > MAX_PROFILE_DEVICE_ID_LENGTH || containsControlCharacters(deviceId)) {
+    throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
+  }
+
+  return deviceId;
 }
 
 function parseIdentityArray(value: unknown, field: string): ProfileIdentity[] {
@@ -3849,8 +4074,21 @@ function assertNoForbiddenAuditFields(value: unknown, field: string): void {
   }
 }
 
-function assertNoForbiddenPublicProfileFields(value: unknown, field: string): void {
-  assertNoForbiddenPublicProxyFields(value, field);
+function assertNoForbiddenPublicProfileFields(value: unknown, field: string, path = ""): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenPublicProfileFields(item, `${field}[${index}]`, path));
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const keyPath = path ? `${path}.${key}` : key;
+    if (FORBIDDEN_PUBLIC_PROXY_FIELD_TOKENS.has(fieldToken(key)) && !PUBLIC_PROFILE_FORBIDDEN_TOKEN_EXEMPT_PATHS.has(keyPath)) {
+      throw makeProtocolError(`The sidecar public profile field ${field}.${key} must not expose proxy credentials or runtime details.`);
+    }
+    assertNoForbiddenPublicProfileFields(item, `${field}.${key}`, keyPath);
+  }
 }
 
 function assertNoForbiddenPublicProxyFields(value: unknown, field: string): void {
@@ -3896,6 +4134,14 @@ function requireProfileProxyMode(value: unknown, field: string): ProfileProxyMod
     return value;
   }
   throw makeProtocolError(`The sidecar profile proxy field ${field} must be a supported mode.`);
+}
+
+function requireFingerprintMode(value: unknown, field: string): FingerprintMode {
+  if (value === "disabled" || value === "managed") {
+    return value;
+  }
+
+  throw makeProtocolError(`The sidecar profile result field ${field} must be a supported fingerprint mode.`);
 }
 
 function requireProxyProtocol(value: unknown, field: string): ProxyProtocol {
@@ -3991,16 +4237,33 @@ function requireTimezoneId(value: unknown, field: string): string {
   return timezone;
 }
 
-function containsControlCharacters(value: string): boolean {
-  return Array.from(value).some((character) => character.charCodeAt(0) < 32);
+/**
+ * Length in code points, matching Python's len().
+ *
+ * JavaScript string length counts UTF-16 units, so an emoji costs two. A note the
+ * sidecar accepts and persists at exactly the bound would then fail this
+ * boundary -- and rejecting one field rejects the whole profiles response.
+ */
+function codePointLength(value: string): number {
+  return Array.from(value).length;
 }
 
-function requireStoreVersion(value: unknown): 3 {
-  if (value !== 3) {
-    throw makeProtocolError("The sidecar profile result field storeVersion must be 3.");
+function containsControlCharacters(value: string): boolean {
+  // DEL included to match the sidecar's _contains_control_characters. Without it
+  // this boundary accepts a notes, tag, or launch-arg value the producer rejects,
+  // which is the wrong direction for a validator to be lenient in.
+  return Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+}
+
+function requireStoreVersion(value: unknown): 4 {
+  if (value !== 4) {
+    throw makeProtocolError("The sidecar profile result field storeVersion must be 4.");
   }
 
-  return 3;
+  return 4;
 }
 
 function requireNonBlankString(value: unknown, field: string): string {
@@ -4023,7 +4286,7 @@ function requireIsoTimestamp(value: unknown, field: string): string {
 
 function requireNonNegativeInteger(value: unknown, field: string): number {
   const number = requireNumber(value, field);
-  if (!Number.isInteger(number) || number < 0) {
+  if (!Number.isSafeInteger(number) || number < 0) {
     throw makeProtocolError(`The sidecar response field ${field} must be a non-negative integer.`);
   }
 
@@ -4032,7 +4295,7 @@ function requireNonNegativeInteger(value: unknown, field: string): number {
 
 function requirePositiveInteger(value: unknown, field: string): number {
   const number = requireNumber(value, field);
-  if (!Number.isInteger(number) || number <= 0) {
+  if (!Number.isSafeInteger(number) || number <= 0) {
     throw makeProtocolError(`The sidecar response field ${field} must be a positive integer.`);
   }
 
@@ -4385,6 +4648,10 @@ function sameProfileRecord(left: ProfileRecord, right: ProfileRecord): boolean {
     left.defaults.fingerprintMode === right.defaults.fingerprintMode &&
     JSON.stringify(left.identity) === JSON.stringify(right.identity) &&
     JSON.stringify(left.proxy) === JSON.stringify(right.proxy) &&
+    JSON.stringify(left.organization) === JSON.stringify(right.organization) &&
+    JSON.stringify(left.launch) === JSON.stringify(right.launch) &&
+    JSON.stringify(left.lifecycle) === JSON.stringify(right.lifecycle) &&
+    JSON.stringify(left.sync) === JSON.stringify(right.sync) &&
     JSON.stringify(left.metadata ?? null) === JSON.stringify(right.metadata ?? null)
   );
 }

@@ -64,7 +64,7 @@ function writeJson(path, value) {
   writeText(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function seedPackagedProfileStore({ root = makeRoot(), profileName = "M005 Packaged Portability Smoke unit", profileId = "m005-s04-profile-1", storeVersion = 3, profiles } = {}) {
+function seedPackagedProfileStore({ root = makeRoot(), profileName = "M005 Packaged Portability Smoke unit", profileId = "m005-s04-profile-1", storeVersion = 4, profiles } = {}) {
   const smokeRoot = join(root, "smoke-root");
   const dataRoot = join(smokeRoot, "data");
   const appDataRoot = join(dataRoot, "theprivator-app-data");
@@ -531,7 +531,7 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
       },
     };
     const profileStorePath = join(seeded.appDataRoot, "profile-store", "profiles.json");
-    writeJson(profileStorePath, { storeVersion: 3, profiles: [seeded.profile, imported] });
+    writeJson(profileStorePath, { storeVersion: 4, profiles: [seeded.profile, imported] });
     const importedUserDataRoot = join(seeded.appDataRoot, imported.storage.userDataDir);
     const context = createM005S04PublicScanContext({ appDataRoot: seeded.appDataRoot, userDataRoot: importedUserDataRoot, cookieDomains: ["m005-s04-cookie.invalid"], cookieNames: ["m005_s04_session", "m005_s04_theme"], cookieValues: ["m005-s04-cookie-value", "m005-s04-second-cookie-value"] });
     const cookies = createM005S04CookieDbFixture({ appDataRoot: seeded.appDataRoot, userDataRoot: importedUserDataRoot }, context);
@@ -542,7 +542,7 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
     expect(restored.log).toMatchObject({ copiedProfile: "restored", sourcePreserved: true, copiedIdDistinct: true, nameConflictResolved: true, runtimeStatus: "stopped", expectedCookiesPresent: true, payloadFilesRestored: 2 });
     expect(findM005S04ForbiddenPublicMarker(restored.log, context)).toBeNull();
 
-    writeJson(profileStorePath, { storeVersion: 3, profiles: [seeded.profile, { ...imported, name: "Wrong Imported Name" }] });
+    writeJson(profileStorePath, { storeVersion: 4, profiles: [seeded.profile, { ...imported, name: "Wrong Imported Name" }] });
     expect(() => assertM005S04CopiedProfileRestored({ profileStorePath, appDataRoot: seeded.appDataRoot, sourceProfile: seeded.profile, expectedCookieRows: cookies.value.cookies }, context)).toThrow(VerifyFailure);
   });
 

@@ -102,10 +102,68 @@ function fixedProxySummary(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function profileOrganization(overrides: Record<string, unknown> = {}) {
+  return {
+    folderId: null,
+    tags: [],
+    notes: "",
+    favorite: false,
+    color: null,
+    ...overrides,
+  };
+}
+
+function profileLaunch(overrides: Record<string, unknown> = {}) {
+  return {
+    startupBehavior: "customUrls",
+    startUrls: [],
+    args: [],
+    ...overrides,
+  };
+}
+
+function profileLifecycle(overrides: Record<string, unknown> = {}) {
+  return {
+    deletedAt: null,
+    lastLaunchedAt: null,
+    launchCount: 0,
+    ...overrides,
+  };
+}
+
+function profileSync(overrides: Record<string, unknown> = {}) {
+  return {
+    revision: 1,
+    updatedBy: "33333333-3333-3333-3333-333333333333",
+    originDeviceId: "33333333-3333-3333-3333-333333333333",
+    lastSyncedAt: null,
+    lastSyncedRevision: null,
+    ...overrides,
+  };
+}
+
+// The sidecar treats defaults as a derived summary and the client re-checks it against
+// the canonical sections, so startUrl and fingerprintMode are not independently settable
+// on a fixture.
+function derivedStartUrl(launch: unknown) {
+  const record = (launch ?? {}) as { startupBehavior?: unknown; startUrls?: unknown };
+  const startUrls = record.startupBehavior === "customUrls" && Array.isArray(record.startUrls) ? record.startUrls : [];
+  return typeof startUrls[0] === "string" ? startUrls[0] : "about:blank";
+}
+
+function derivedFingerprintMode(identity: unknown) {
+  const surfaces = Object.entries((identity ?? {}) as Record<string, unknown>).filter(
+    ([key]) => key !== "identityVersion" && key !== "label" && key !== "presetId",
+  );
+  return surfaces.every(([, surface]) => (surface as { mode?: unknown } | null)?.mode === "real") ? "disabled" : "managed";
+}
+
 function profileRecord(overrides: Record<string, unknown> = {}) {
   const id = typeof overrides.id === "string" ? overrides.id : "11111111-1111-1111-1111-111111111111";
   const proxy = overrides.proxy ?? directProxySummary();
   const proxyMode = typeof proxy === "object" && proxy !== null && (proxy as { mode?: unknown }).mode === "fixedServer" ? "fixedServer" : "direct";
+  const identity = overrides.identity ?? defaultIdentity();
+  const launch = overrides.launch ?? profileLaunch();
   const base = {
     id,
     name: "Research",
@@ -113,16 +171,20 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
     updatedAt: "2026-05-04T18:01:00.000Z",
     defaults: {
       browser: "chromium",
-      startUrl: "about:blank",
+      startUrl: derivedStartUrl(launch),
       proxyMode,
-      fingerprintMode: "disabled",
+      fingerprintMode: derivedFingerprintMode(identity),
     },
     storage: {
       profileDir: `profile-store/profiles/${id}`,
       userDataDir: `profile-store/profiles/${id}/user-data`,
     },
-    identity: defaultIdentity(),
+    identity,
     proxy,
+    organization: profileOrganization(),
+    launch,
+    lifecycle: profileLifecycle(),
+    sync: profileSync(),
   };
 
   return {
@@ -134,7 +196,7 @@ function profileRecord(overrides: Record<string, unknown> = {}) {
 
 function profileResult(profiles: unknown[], overrides: Record<string, unknown> = {}) {
   return {
-    storeVersion: 3,
+    storeVersion: 4,
     profiles,
     count: profiles.length,
     ...overrides,
@@ -1049,6 +1111,40 @@ describe("ThePrivator profile library UI", () => {
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Current count1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/List requestbridge-profiles-1/i);
     expect(screen.getByLabelText(/profile observability/i)).toHaveTextContent(/Running count0/i);
+  });
+
+  it("renders defaults derived from the masked identity and the first configured start URL", async () => {
+    const profile = profileRecord({
+      name: "Research",
+      identity: defaultIdentity({ label: "Masked identity", presetId: "balanced-desktop", canvas: { mode: "noise", noiseSeed: 1234 } }),
+      launch: profileLaunch({ startUrls: ["https://start.example/dashboard", "https://start.example/mail"] }),
+    });
+    mockStartup([profile]);
+
+    render(<App />);
+
+    const card = await screen.findByRole("listitem", { name: /research/i });
+    expect(card).toHaveTextContent(/managed fingerprinting/i);
+    expect(card).toHaveTextContent(/https:\/\/start\.example\/dashboard/i);
+    expect(card).not.toHaveTextContent(/https:\/\/start\.example\/mail/i);
+  });
+
+  it("accepts organization notes and tags that read like paths or URLs", async () => {
+    const profile = profileRecord({
+      name: "Research",
+      organization: profileOrganization({
+        tags: ["client-work", "Q3 review"],
+        notes: "Renewal doc: https://vendor.example/terms — mirrored at C:/Users/analyst/Desktop/terms.pdf",
+        favorite: true,
+        color: "#3366ff",
+      }),
+    });
+    mockStartup([profile]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("listitem", { name: /research/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/profile load recovery/i)).not.toBeInTheDocument();
   });
 
   it("renders safe fixed proxy summaries without credential values", async () => {
@@ -2367,8 +2463,9 @@ describe("ThePrivator profile library UI", () => {
 
   it("requires explicit delete confirmation and removes the card after sidecar success", async () => {
     const profile = profileRecord({ name: "Research" });
+    const trashed = profileRecord({ name: "Research", lifecycle: profileLifecycle({ deletedAt: "2026-05-04T18:10:00.000Z" }) });
     mockStartup([profile]);
-    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult([])));
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult([], { profile: trashed })));
 
     render(<App />);
 

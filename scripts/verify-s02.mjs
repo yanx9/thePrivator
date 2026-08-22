@@ -648,7 +648,7 @@ function assertPresetList(result) {
 }
 
 function assertAppliedIdentity(result, profile, preset) {
-  assert(result.storeVersion === 3, "Identity apply did not preserve store v3.", { storeVersion: result.storeVersion });
+  assert(result.storeVersion === 4, "Identity apply did not preserve store v4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.warnings) && result.warnings.length === 0, "Curated identity preset should apply without warnings.", {
     warnings: result.warnings,
   });
@@ -749,7 +749,7 @@ function assertPrivateProfileStoreSafe(storeRoot, profileId, expectedProxy) {
   const text = readFileSync(path, "utf8");
   assertNoPrivateStoreRuntimeLeaks("profiles.json", text);
   const payload = JSON.parse(text);
-  assert(payload.storeVersion === 3, "profiles.json did not remain store v3.", { storeVersion: payload.storeVersion });
+  assert(payload.storeVersion === 4, "profiles.json did not remain store v4.", { storeVersion: payload.storeVersion });
   const profile = payload.profiles.find((item) => item?.id === profileId);
   assert(profile, "profiles.json does not contain the proof profile.", { profileId });
   assert(profile.proxy?.protocol === expectedProxy.protocol, "Persisted proxy protocol mismatch.", { protocol: profile.proxy?.protocol, expectedProtocol: expectedProxy.protocol });
@@ -765,6 +765,21 @@ function assertNoPrivateStoreRuntimeLeaks(label, text) {
     assert(!text.includes(marker), `${label} leaked runtime/debug marker.`, { marker });
   }
   assert(!text.includes(ROOT_DIR), `${label} leaked the repository path.`);
+}
+
+function assertLaunchArgsMarkerGuard() {
+  const marker = "--user-data-dir";
+  const probe = JSON.stringify({ storeVersion: 4, profiles: [{ launch: { args: [`${marker}=/probe`] } }] });
+  let failure = null;
+  try {
+    assertNoPrivateStoreRuntimeLeaks("launch args probe", probe);
+  } catch (error) {
+    failure = error;
+  }
+  assert(failure instanceof VerifyFailure, "Private store marker guard missed a runtime marker inside launch.args.");
+  assert(failure.details?.marker === marker, "Private store marker guard tripped on an unexpected marker.", { marker: failure.details?.marker });
+  // Step results are swept against PUBLIC_FORBIDDEN_MARKERS, so the probed marker must not appear in this summary.
+  return { guard: "private-store-runtime-markers", probe: "launch.args", tripped: true };
 }
 
 function parseDiagnosticsLog(storeRoot) {
@@ -1178,7 +1193,7 @@ async function createProfileWithProxy(binaryPath, storeRoot, caseConfig, proxy, 
     "profiles.create",
     { storeRoot, name: profileName },
   ).result;
-  assert(create.storeVersion === 3, "Profile create did not return store v3.", { storeVersion: create.storeVersion });
+  assert(create.storeVersion === 4, "Profile create did not return store v4.", { storeVersion: create.storeVersion });
   const profile = assertProfileShape(create.profile, profileName);
 
   const applied = sidecarSuccess(
@@ -1195,7 +1210,7 @@ async function createProfileWithProxy(binaryPath, storeRoot, caseConfig, proxy, 
     "profiles.proxy.update",
     { storeRoot, profileId: profile.id, proxy },
   ).result;
-  assert(updated.storeVersion === 3, "Proxy update did not preserve store v3.", { storeVersion: updated.storeVersion });
+  assert(updated.storeVersion === 4, "Proxy update did not preserve store v4.", { storeVersion: updated.storeVersion });
   assert(updated.profile?.id === profile.id, "Proxy update profile id mismatch.", { profileId: updated.profile?.id, expectedProfileId: profile.id });
   assertProxySummary(updated.profile.proxy, {
     protocol: proxy.protocol,
@@ -1558,6 +1573,8 @@ async function main() {
   }
   negativeProofs.push(await runStep("proxy-negative-http-unreachable", () => runUnreachableProxyCase(binaryPath, preset)));
   negativeProofs.push(await runStep("proxy-negative-socks-auth-unsupported", () => runSocksCredentialUnsupportedCase(binaryPath)));
+
+  await runStep("launch-args-marker-guard", () => assertLaunchArgsMarkerGuard());
 
   await runStep("redaction-sweep", () => {
     assertTranscriptRedaction(ALL_TRANSCRIPTS);

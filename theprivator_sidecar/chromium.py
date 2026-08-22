@@ -52,6 +52,7 @@ from .protocol import (
     IDENTITY_CDP_FAILED,
     INVALID_REQUEST,
     JsonObject,
+    PROFILE_NOT_FOUND,
     PROXY_LAUNCH_ARG_UNSAFE,
     PROXY_PROOF_FAILED,
     SidecarError,
@@ -1753,12 +1754,25 @@ def is_process_alive(pid: int) -> bool:
 
 
 def _load_profile(store_root: Union[str, Path], profile_id: str) -> ProfileRecord:
+    """Load a profile for a runtime operation, refusing one that is in the trash.
+
+    The store still returns trashed records -- restore and purge need them -- but
+    a profile the user deleted must not be launchable. Without this a stale id
+    starts a real browser session against a profile that no longer appears in the
+    library, and whose data is queued for removal.
+    """
     if not isinstance(profile_id, str) or not profile_id.strip():
         raise SidecarError(
             code=INVALID_REQUEST,
             message="Chromium profileId is required.",
         )
-    return ProfileStore(store_root).get(profile_id)
+    profile = ProfileStore(store_root).get(profile_id)
+    if profile.is_trashed:
+        raise SidecarError(
+            code=PROFILE_NOT_FOUND,
+            message="Profile was not found.",
+        )
+    return profile
 
 
 

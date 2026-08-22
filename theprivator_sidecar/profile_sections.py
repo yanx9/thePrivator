@@ -255,10 +255,21 @@ def _require_object(value: Any, fallback: JsonObject, allowed: frozenset[str]) -
     return merged
 
 
+_UTC_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
+
+
 def _optional_timestamp(value: Any, label: str) -> Optional[str]:
+    """Accept only the extended-ISO form utc_now_iso emits, or null.
+
+    "ends with Z" was too loose in a way that mattered: deletedAt is what puts a
+    profile in the trash, so a record carrying "Z" would silently vanish from the
+    library and sort arbitrarily in the trash view. It also disagreed with the
+    TypeScript client, which additionally requires the value to parse -- and a
+    value one side accepts and the other rejects fails the whole response.
+    """
     if value is None:
         return None
-    if not isinstance(value, str) or not value.endswith("Z") or len(value) > 40:
+    if not isinstance(value, str) or not _UTC_ISO_RE.match(value):
         raise _organization_error(f"Profile {label} must be a UTC timestamp or null.")
     return value
 

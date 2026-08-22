@@ -128,7 +128,7 @@ export interface DiagnosticLookupResult {
   entries: DiagnosticEntry[];
 }
 
-export type FingerprintMode = "disabled";
+export type FingerprintMode = "disabled" | "managed";
 
 export type IdentitySurface = "browser" | "navigator" | "screen" | "locale" | "canvas" | "audio" | "webgl" | "webrtc";
 export type IdentityMaskingMode = "real" | "masked" | "custom";
@@ -622,7 +622,7 @@ export interface IdentityValidationSnapshot extends IdentityValidationResult {
 
 export interface ProfileDefaults {
   browser: "chromium";
-  startUrl: "about:blank";
+  startUrl: string;
   proxyMode: ProfileProxyMode;
   fingerprintMode: FingerprintMode;
 }
@@ -630,6 +630,37 @@ export interface ProfileDefaults {
 export interface ProfileStorage {
   profileDir: string;
   userDataDir: string;
+}
+
+export interface ProfileOrganization {
+  folderId: string | null;
+  tags: string[];
+  notes: string;
+  favorite: boolean;
+  color: string | null;
+}
+
+export type ProfileStartupBehavior = "customUrls" | "restoreSession";
+
+export interface ProfileLaunch {
+  startupBehavior: ProfileStartupBehavior;
+  startUrls: string[];
+  args: string[];
+}
+
+export interface ProfileLifecycle {
+  /** A non-null deletedAt means the profile sits in the trash and is absent from every profiles array. */
+  deletedAt: string | null;
+  lastLaunchedAt: string | null;
+  launchCount: number;
+}
+
+export interface ProfileSync {
+  revision: number;
+  updatedBy: string;
+  originDeviceId: string;
+  lastSyncedAt: string | null;
+  lastSyncedRevision: number | null;
 }
 
 export interface ProfileRecord {
@@ -641,11 +672,15 @@ export interface ProfileRecord {
   storage: ProfileStorage;
   identity: ProfileIdentity;
   proxy: ProfileProxySummary;
+  organization: ProfileOrganization;
+  launch: ProfileLaunch;
+  lifecycle: ProfileLifecycle;
+  sync: ProfileSync;
   metadata?: JsonObject;
 }
 
 export interface ProfileListResult {
-  storeVersion: 3;
+  storeVersion: 4;
   profiles: ProfileRecord[];
   count: number;
 }

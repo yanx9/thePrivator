@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import sys
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, TextIO, Tuple
@@ -314,6 +315,25 @@ def dispatch_proxy_request(request: SidecarRequest) -> JsonObject:
 
 
 
+def purge_profile(store_root: Any, profile_id: str) -> JsonObject:
+    """Drop a trashed profile permanently and free the disk it was holding.
+
+    The record and the browser data have to go together. Removing only the record
+    is what the pre-trash delete did, and it left user-data directories that
+    nothing could ever reach again. The path is resolved through the launcher's
+    own containment check rather than joined by hand, so a tampered storage field
+    cannot point the delete outside the store.
+    """
+    store = ProfileStore(store_root)
+    profile = store.get(profile_id)
+    chromium.ensure_profile_stopped_for_portability(store_root, profile)
+    profile_dir = chromium.resolve_user_data_path(store_root, profile).parent
+
+    result = store.purge(profile_id)
+    shutil.rmtree(profile_dir, ignore_errors=True)
+    return result
+
+
 def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
     """Dispatch profile CRUD commands through the sidecar-owned store."""
     try:
@@ -368,6 +388,22 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
                 "Profile id is required.",
             )
             return store.delete(profile_id)
+        if request.method == "profiles.trash.list":
+            return store.list_trash()
+        if request.method == "profiles.trash.restore":
+            profile_id = require_string_param(
+                request.params,
+                "id",
+                "Profile id is required.",
+            )
+            return store.restore(profile_id)
+        if request.method == "profiles.trash.purge":
+            profile_id = require_string_param(
+                request.params,
+                "id",
+                "Profile id is required.",
+            )
+            return purge_profile(request.params["storeRoot"], profile_id)
         if request.method == "profiles.identity.applyPreset":
             profile_id = require_string_param(
                 request.params,

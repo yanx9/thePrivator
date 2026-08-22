@@ -403,7 +403,7 @@ function assertInvalidInputEnvelope(invalidInput, invalidLog) {
 function assertProfileCreateEnvelope(response, diagnostic, profileName) {
   assert(response.id === "verify-profile-create", "Profile create did not echo request id.");
   assert(response.ok === true, "Profile create did not return ok:true.");
-  assert(response.result?.storeVersion === 3, "Profile create did not return storeVersion 3.");
+  assert(response.result?.storeVersion === 4, "Profile create did not return storeVersion 4.");
   assert(response.result?.profile?.id, "Profile create is missing profile id.");
   assert(response.result?.profile?.name === profileName, "Profile create returned the wrong profile name.");
   assert(
@@ -433,7 +433,7 @@ function assertPresetListEnvelope(response, diagnostic) {
 function assertApplyPresetEnvelope(response, diagnostic, presetId) {
   assert(response.id === "verify-identity-apply", "Identity apply did not echo request id.");
   assert(response.ok === true, "Identity apply did not return ok:true.");
-  assert(response.result?.storeVersion === 3, "Identity apply did not return storeVersion 3.");
+  assert(response.result?.storeVersion === 4, "Identity apply did not return storeVersion 4.");
   assert(Array.isArray(response.result?.warnings), "Identity apply did not return warnings array.");
   assert(response.result.warnings.length === 0, "Curated preset apply should not warn.");
   assert(
@@ -498,7 +498,7 @@ function assertProxyValidateEnvelope(response, diagnostic, requestId, expectedPr
 function assertProxyUpdateEnvelope(response, diagnostic, profileId, expectedProxy) {
   assert(response.id === "verify-proxy-update", "Proxy update did not echo request id.");
   assert(response.ok === true, "Proxy update did not return ok:true.");
-  assert(response.result?.storeVersion === 3, "Proxy update did not return storeVersion 3.");
+  assert(response.result?.storeVersion === 4, "Proxy update did not return storeVersion 4.");
   assert(response.result?.profile?.id === profileId, "Proxy update returned the wrong profile id.");
   assertPublicProxySummary(response.result?.profile?.proxy, expectedProxy);
   assert(Array.isArray(response.result?.profiles), "Proxy update did not return profiles array.");
@@ -515,7 +515,7 @@ function assertProxyUpdateEnvelope(response, diagnostic, profileId, expectedProx
 function assertProfileListProxyEnvelope(response, diagnostic, profileId, expectedProxy) {
   assert(response.id === "verify-profile-list-v3", "Profile list did not echo request id.");
   assert(response.ok === true, "Profile list did not return ok:true.");
-  assert(response.result?.storeVersion === 3, "Profile list did not return storeVersion 3.");
+  assert(response.result?.storeVersion === 4, "Profile list did not return storeVersion 4.");
   assert(Array.isArray(response.result?.profiles), "Profile list did not return profiles array.");
   const listed = response.result.profiles.find((profile) => profile?.id === profileId);
   assert(listed, "Profile list did not include the smoke profile.");
@@ -528,7 +528,7 @@ function assertProfileListProxyEnvelope(response, diagnostic, profileId, expecte
 
 function assertPersistedProxyCredentials(storeRoot, profileId) {
   const { payload } = readProfileStore(storeRoot);
-  assert(payload?.storeVersion === 3, "Persisted profile store did not use storeVersion 3.", {
+  assert(payload?.storeVersion === 4, "Persisted profile store did not use storeVersion 4.", {
     storeVersion: payload?.storeVersion,
   });
   const profile = Array.isArray(payload.profiles)

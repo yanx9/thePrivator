@@ -472,7 +472,7 @@ describe("verify-m004-s05 public evidence redaction", () => {
         expiredRevocation: { status: "pass" },
       },
       playwright: { attached: true, navigated: true, targetMarker: true, identityMatches: 8, proxyObservationCount: 2 },
-      profileStore: { storeVersion: 3, profileCount: 1, identity: { presetId: "ubuntu-linux-chrome-120" }, proxy: { credentialState: "configured" }, persistedRuntimeFields: 0 },
+      profileStore: { storeVersion: 4, profileCount: 1, identity: { presetId: "ubuntu-linux-chrome-120" }, proxy: { credentialState: "configured" }, persistedRuntimeFields: 0 },
       diagnostics: { requiredMethods: ["profiles.create", "chromium.launch"], leaseFailureMethods: S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS, typedFailureCount: 5, totalRowsRead: 12, validRows: 12, malformedRows: 0 },
       cleanup: { appStopped: true, apiStopped: true, listenerClosed: true, runtimeStopped: true, fixtureStopped: true, retainedSmokeData: true, diagnosticsScanned: true },
       redaction: { status: "clean", scanned: true, forbiddenMarkerCount: 0 },
@@ -481,7 +481,7 @@ describe("verify-m004-s05 public evidence redaction", () => {
     const encoded = JSON.stringify(summary);
     expect(summary.proofScope).toMatchObject({ playwrightAttach: true, cleanupVerified: true });
     expect(summary.failures).toHaveLength(2);
-    expect(summary.profileStore).toMatchObject({ scanned: true, storeVersion: 3, identityPresetApplied: true, proxyConfigured: true });
+    expect(summary.profileStore).toMatchObject({ scanned: true, storeVersion: 4, identityPresetApplied: true, proxyConfigured: true });
     expect(summary.diagnostics).toMatchObject({ scanned: true, leaseFailureMethodCount: S05_REQUIRED_DIAGNOSTIC_FAILURE_METHODS.length, typedFailureCount: 5 });
     for (const privateMarker of [token, leaseId, endpoint, apiBaseUrl, targetUrl, proxyAuthority, appDataRoot]) {
       expect(encoded).not.toContain(privateMarker);
@@ -500,7 +500,7 @@ describe("verify-m004-s05 public evidence redaction", () => {
     });
     const appDataRoot = join(smokeContext.dataRoot, "theprivator-desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+      storeVersion: 4,
       profiles: [{ id: "profile-s05diag", name: smokeContext.smokeProfileName }],
     });
     const diagnosticsPath = join(appDataRoot, "profile-store", "diagnostics", "events.jsonl");

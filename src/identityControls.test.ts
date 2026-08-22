@@ -67,7 +67,7 @@ function profileRecord(savedIdentity = identity()): ProfileRecord {
       browser: "chromium",
       startUrl: "about:blank",
       proxyMode: "direct",
-      fingerprintMode: "disabled",
+      fingerprintMode: "managed",
     },
     storage: {
       profileDir: "profile-store/profiles/11111111-1111-1111-1111-111111111111",
@@ -79,6 +79,30 @@ function profileRecord(savedIdentity = identity()): ProfileRecord {
       mode: "direct",
       credentialState: "none",
       summary: "Direct connection",
+    },
+    organization: {
+      folderId: null,
+      tags: [],
+      notes: "",
+      favorite: false,
+      color: null,
+    },
+    launch: {
+      startupBehavior: "customUrls",
+      startUrls: [],
+      args: [],
+    },
+    lifecycle: {
+      deletedAt: null,
+      lastLaunchedAt: null,
+      launchCount: 0,
+    },
+    sync: {
+      revision: 1,
+      updatedBy: "33333333-3333-3333-3333-333333333333",
+      originDeviceId: "33333333-3333-3333-3333-333333333333",
+      lastSyncedAt: null,
+      lastSyncedRevision: null,
     },
   };
 }

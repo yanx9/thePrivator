@@ -92,6 +92,64 @@ function packagedSmokeProxy(overrides = {}) {
   };
 }
 
+function packagedSmokeOrganization(overrides = {}) {
+  return {
+    folderId: null,
+    tags: ["packaged smoke", "proxy_user rotation"],
+    notes: "Runbook: rotate proxy_user each quarter, notes live at profile-store/profiles and wss://ops.example/runbook.",
+    favorite: true,
+    color: "#3366ff",
+    ...overrides,
+  };
+}
+
+function packagedSmokeLaunch(overrides = {}) {
+  return {
+    startupBehavior: "customUrls",
+    startUrls: ["about:blank", "https://example.invalid/start"],
+    args: ["--disable-features=Translate", "--no-first-run"],
+    ...overrides,
+  };
+}
+
+function packagedSmokeLifecycle(overrides = {}) {
+  return {
+    deletedAt: null,
+    lastLaunchedAt: "2026-05-09T10:11:12.000Z",
+    launchCount: 2,
+    ...overrides,
+  };
+}
+
+function packagedSmokeSync(overrides = {}) {
+  return {
+    revision: 3,
+    updatedBy: "44444444-4444-4444-8444-444444444444",
+    originDeviceId: "44444444-4444-4444-8444-444444444444",
+    lastSyncedAt: null,
+    lastSyncedRevision: null,
+    ...overrides,
+  };
+}
+
+function packagedSmokeStoreProfile(profileId, smokeProfileName, overrides = {}) {
+  return {
+    id: profileId,
+    name: smokeProfileName,
+    storage: {
+      profileDir: `profile-store/profiles/${profileId}`,
+      userDataDir: `profile-store/profiles/${profileId}/user-data`,
+    },
+    identity: packagedSmokeIdentity(),
+    proxy: packagedSmokeProxy(),
+    organization: packagedSmokeOrganization(),
+    launch: packagedSmokeLaunch(),
+    lifecycle: packagedSmokeLifecycle(),
+    sync: packagedSmokeSync(),
+    ...overrides,
+  };
+}
+
 function packagedSmokeProxyProof(overrides = {}) {
   return {
     proxyCheckVersion: 1,
@@ -241,7 +299,10 @@ describe("verify-s06 guard helpers", () => {
       "proxyAuthExtensionPath",
       "proxyAuthorization",
     ]));
+    expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).toContain("args");
     expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).not.toContain("credentials");
+    expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).not.toContain("organization");
+    expect(Array.from(FORBIDDEN_PROFILE_RUNTIME_FIELDS)).not.toContain("launch");
   });
 
   it("exports only the packaged helper surface S05 needs without proxy secrets", () => {
@@ -541,7 +602,36 @@ describe("verify-s06 guard helpers", () => {
     expect(snippet.length).toBeLessThanOrEqual(520);
   });
 
-  it("asserts packaged store-v3 proxy persistence while redacting public proof", () => {
+  it("catches a real secret pasted into a profile note", () => {
+    // The organization-text exemption exists so notes keep slashes and colons.
+    // It must not extend to planted secret values: masking those was how notes
+    // and tags ended up with no leak coverage at all.
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "leak123",
+      baseEnv: {},
+    });
+    const profileId = "11111111-1111-4111-8111-111111111111";
+    const storePath = join(context.dataRoot, "Com.ThePrivator.Desktop", "profile-store", "profiles.json");
+    writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
+          organization: packagedSmokeOrganization({
+            notes: "Reminder: the password is proxy-pass-should-not-leak",
+          }),
+        }),
+      ],
+    });
+
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(
+      /leaked forbidden smoke fixture text/,
+    );
+  });
+
+  it("asserts packaged store-v4 proxy persistence while redacting public proof", () => {
     const root = makeRoot();
     const context = createSmokeRunContext({
       rootDir: root,
@@ -551,27 +641,20 @@ describe("verify-s06 guard helpers", () => {
     });
     const profileId = "11111111-1111-4111-8111-111111111111";
     const appDataRoot = join(context.dataRoot, "Com.ThePrivator.Desktop");
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+    const storePath = join(appDataRoot, "profile-store", "profiles.json");
+    writeJson(storePath, {
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           createdAt: "2026-05-09T10:11:12.000Z",
           updatedAt: "2026-05-09T10:11:12.000Z",
           defaults: {
             browser: "chromium",
             startUrl: "about:blank",
             proxyMode: "fixedServer",
-            fingerprintMode: "disabled",
+            fingerprintMode: "managed",
           },
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
+        }),
       ],
     });
 
@@ -583,7 +666,7 @@ describe("verify-s06 guard helpers", () => {
       appDataRoot: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop",
       profileStore: "src-tauri/target/s06-smoke-data/20260509T101112000Z-persist123/data/Com.ThePrivator.Desktop/profile-store/profiles.json",
       profileId,
-      storeVersion: 3,
+      storeVersion: 4,
       persistedRuntimeFields: 0,
       storage: {
         profileDir: `profile-store/profiles/${profileId}`,
@@ -602,23 +685,34 @@ describe("verify-s06 guard helpers", () => {
         credentialState: "configured",
         summary: "http://proxy.example:8080",
       },
+      organization: {
+        tagCount: 2,
+        notesLength: packagedSmokeOrganization().notes.length,
+        favorite: true,
+        foldered: false,
+        colored: true,
+      },
+      launch: {
+        startupBehavior: "customUrls",
+        startUrlCount: 2,
+        argCount: 2,
+      },
+      lifecycle: {
+        trashed: false,
+        launchCount: 2,
+      },
     });
     expect(JSON.stringify(proof)).not.toContain(root);
     expect(JSON.stringify(proof)).not.toContain("proxy-user-should-not-leak");
     expect(JSON.stringify(proof)).not.toContain("proxy-pass-should-not-leak");
     expect(JSON.stringify(proof)).not.toContain('"credentials"');
+    expect(JSON.stringify(proof)).not.toContain("proxy_user");
+    expect(JSON.stringify(proof)).not.toContain("wss://");
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+    writeJson(storePath, {
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           proxy: {
             proxyVersion: 1,
             mode: "fixedServer",
@@ -630,7 +724,7 @@ describe("verify-s06 guard helpers", () => {
               password: "proxy-pass-should-not-leak",
             },
           },
-        },
+        }),
       ],
     });
     expect(assertPostSmokeProfileStore({ rootDir: root, smokeContext: context }).proxy).toEqual({
@@ -641,124 +735,206 @@ describe("verify-s06 guard helpers", () => {
       summary: "http://proxy.example:8080",
     });
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
-      ],
+    writeJson(storePath, {
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName)],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 2,
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
-      ],
-    });
-    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
-
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
+    writeJson(storePath, {
       storeVersion: 3,
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: defaultIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
-      ],
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName)],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
+
+    writeJson(storePath, {
+      storeVersion: 5,
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName)],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
+
+    writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName, { identity: defaultIdentity() })],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/curated identity preset/i);
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-        },
-      ],
+    writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName, { proxy: undefined })],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/proxy/i);
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+    writeJson(storePath, {
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           storage: {
             profileDir: `profile-store/profiles/${profileId}`,
             userDataDir: `/tmp/theprivator/${profileId}/user-data`,
           },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
+        }),
       ],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/safe relative user-data/i);
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+    writeJson(storePath, {
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           debugPort: 9222,
           proxyAuthExtensionPath: `profile-store/profiles/${profileId}/generated-proxy-auth-extension`,
-        },
+        }),
       ],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/runtime truth/i);
 
-    writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+    writeJson(storePath, {
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           proxy: packagedSmokeProxy({ summary: "http://proxy-user-should-not-leak:proxy-pass-should-not-leak@proxy.example:8080" }),
-        },
+        }),
       ],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/proxy|credential|redaction/i);
+  });
+
+  it("accepts declared launch args while still rejecting captured runtime argv", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "launch123",
+      baseEnv: {},
+    });
+    const profileId = "55555555-5555-4555-8555-555555555555";
+    const storePath = join(context.dataRoot, "theprivator", "profile-store", "profiles.json");
+    const seed = (launchOverrides, profileOverrides = {}) => writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
+          launch: packagedSmokeLaunch(launchOverrides),
+          ...profileOverrides,
+        }),
+      ],
+    });
+
+    seed({ args: ["--disable-features=Translate", "--no-first-run", "--lang=en-GB"] });
+    expect(assertPostSmokeProfileStore({ rootDir: root, smokeContext: context }).launch).toEqual({
+      startupBehavior: "customUrls",
+      startUrlCount: 2,
+      argCount: 3,
+    });
+
+    seed({ args: [] }, { proxyRuntime: { args: ["--proxy-server=http://127.0.0.1:8080"] } });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/runtime truth/i);
+
+    seed({ args: ["not-a-switch"] });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/launch\.args/i);
+
+    seed({ args: [`--lang=${"e".repeat(300)}`] });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/launch\.args/i);
+
+    seed({ args: Array.from({ length: 21 }, (_, index) => `--flag-${index}`) });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/launch\.args/i);
+
+    seed({ args: ["--user-data-dir=/home/someone/profile"] });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/unsafe diagnostic/i);
+
+    for (const startUrls of [
+      ["file:///etc/passwd"],
+      ["javascript:alert(1)"],
+      ["--headless"],
+      ["https://example.invalid/ start"],
+      [`https://example.invalid/${"a".repeat(2100)}`],
+      Array.from({ length: 11 }, (_, index) => `https://example.invalid/${index}`),
+    ]) {
+      seed({ startUrls });
+      expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context }), String(startUrls[0])).toThrow(/startUrls/i);
+    }
+
+    seed({ startupBehavior: "openLastSession" });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/startupBehavior/i);
+  });
+
+  it("bounds organization free text without applying path-shaped redaction to it", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "notes123",
+      baseEnv: {},
+    });
+    const profileId = "66666666-6666-4666-8666-666666666666";
+    const storePath = join(context.dataRoot, "theprivator", "profile-store", "profiles.json");
+    const seed = (organizationOverrides) => writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
+          organization: packagedSmokeOrganization(organizationOverrides),
+        }),
+      ],
+    });
+
+    seed({
+      notes: "See profile-store/profiles/notes: proxy_user rotation, wss://ops.example, C:\\Users\\ops\\manifest.json",
+      tags: ["proxy_pass audit"],
+    });
+    const proof = assertPostSmokeProfileStore({ rootDir: root, smokeContext: context });
+    expect(proof.organization).toMatchObject({ tagCount: 1, favorite: true, colored: true });
+    expect(JSON.stringify(proof)).not.toContain("proxy_user");
+    expect(JSON.stringify(proof)).not.toContain("proxy_pass");
+    expect(assertPostSmokeRedaction({ rootDir: root, smokeContext: context }).profileStore).toBe("redacted");
+
+    seed({ notes: "a".repeat(1501) });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.notes/i);
+
+    seed({ notes: "line one\nline two" });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.notes/i);
+
+    seed({ tags: ["ok", "b".repeat(33)] });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.tags/i);
+
+    seed({ tags: Array.from({ length: 11 }, (_, index) => `tag-${index}`) });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.tags/i);
+
+    seed({ color: "rebeccapurple" });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.color/i);
+
+    seed({ favorite: "yes" });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/organization\.favorite/i);
+  });
+
+  it("rejects a smoke profile left in the profile-store trash", () => {
+    const root = makeRoot();
+    const context = createSmokeRunContext({
+      rootDir: root,
+      now: new Date("2026-05-09T10:11:12.000Z"),
+      nonce: "trash123",
+      baseEnv: {},
+    });
+    const profileId = "77777777-7777-4777-8777-777777777777";
+    const storePath = join(context.dataRoot, "theprivator", "profile-store", "profiles.json");
+
+    writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
+          lifecycle: packagedSmokeLifecycle({ deletedAt: "2026-05-09T10:12:00.000Z" }),
+        }),
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/trash/i);
+
+    writeJson(storePath, {
+      storeVersion: 4,
+      profiles: [
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
+          lifecycle: packagedSmokeLifecycle({ launchCount: -1 }),
+        }),
+      ],
+    });
+    expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/launchCount/i);
   });
 
   it("asserts packaged diagnostics correlation and rejects unsafe diagnostic rows", () => {
@@ -772,26 +948,18 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "22222222-2222-4222-8222-222222222222";
     const appDataRoot = join(context.dataRoot, "theprivator-desktop");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
+      storeVersion: 4,
       profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
+        packagedSmokeStoreProfile(profileId, context.smokeProfileName, {
           createdAt: "2026-05-09T10:11:12.000Z",
           updatedAt: "2026-05-09T10:11:12.000Z",
           defaults: {
             browser: "chromium",
             startUrl: "about:blank",
             proxyMode: "fixedServer",
-            fingerprintMode: "disabled",
+            fingerprintMode: "managed",
           },
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
+        }),
       ],
     });
     const diagnosticsPath = join(appDataRoot, "profile-store", "diagnostics", "events.jsonl");
@@ -982,19 +1150,8 @@ describe("verify-s06 guard helpers", () => {
     const profileId = "33333333-3333-4333-8333-333333333333";
     const appDataRoot = join(context.dataRoot, "theprivator");
     writeJson(join(appDataRoot, "profile-store", "profiles.json"), {
-      storeVersion: 3,
-      profiles: [
-        {
-          id: profileId,
-          name: context.smokeProfileName,
-          storage: {
-            profileDir: `profile-store/profiles/${profileId}`,
-            userDataDir: `profile-store/profiles/${profileId}/user-data`,
-          },
-          identity: packagedSmokeIdentity(),
-          proxy: packagedSmokeProxy(),
-        },
-      ],
+      storeVersion: 4,
+      profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName)],
     });
 
     const profileStore = assertPostSmokeProfileStore({ rootDir: root, smokeContext: context });
