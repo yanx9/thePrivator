@@ -1589,3 +1589,87 @@ def test_registry_write_failure_is_reported_rather_than_swallowed(tmp_path, monk
         chromium.stop(store_root, profile_id)
 
     assert exc_info.value.code == CHROMIUM_STOP_FAILED
+
+
+def test_reconcile_does_not_kill_a_pid_that_is_no_longer_our_bridge(tmp_path, monkeypatch):
+    """A recorded pid is not an identity.
+
+    Reconciliation runs after reboots, when the OS has reused pids freely. Acting
+    on the recorded pid alone would SIGKILL whatever inherited it -- along with
+    its whole process group.
+    """
+    store_root = tmp_path / "store"
+    ready_relative = "profile-store/runtime/proxy-bridges/profile-abc/bridge-1.ready.json"
+    ready_path = store_root / ready_relative
+    ready_path.parent.mkdir(parents=True, exist_ok=True)
+    # The bridge is gone: its ready file survives but nothing holds the lock, and
+    # some unrelated process now owns pid 424242.
+    ready_path.write_text(json.dumps({"bridgeVersion": 1, "host": "127.0.0.1", "port": 1080, "pid": 424242}))
+
+    record = chromium.RuntimeRecord(
+        profile_id="11111111-1111-1111-1111-111111111111",
+        pid=999999,
+        started_at="2026-01-01T00:00:00.000Z",
+        user_data_dir="profile-store/profiles/11111111-1111-1111-1111-111111111111/user-data",
+        owner_token="token",
+        proxy_bridge_pid=424242,
+        proxy_bridge_ready_file=ready_relative,
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(chromium, "_stop_proxy_bridge_pid", lambda pid: killed.append(pid))
+
+    chromium._stop_proxy_bridge_for_record(store_root, record)
+
+    assert killed == [], "reconcile killed a pid it could not prove was still its bridge"
+
+
+def test_reconcile_stops_a_bridge_that_still_holds_its_ready_file(tmp_path, monkeypatch):
+    """The complementary case: a live bridge must still be stopped."""
+    pytest.importorskip("fcntl")
+    import fcntl
+
+    store_root = tmp_path / "store"
+    ready_relative = "profile-store/runtime/proxy-bridges/profile-abc/bridge-1.ready.json"
+    ready_path = store_root / ready_relative
+    ready_path.parent.mkdir(parents=True, exist_ok=True)
+    ready_path.write_text(json.dumps({"bridgeVersion": 1, "host": "127.0.0.1", "port": 1080, "pid": os.getpid()}))
+
+    record = chromium.RuntimeRecord(
+        profile_id="11111111-1111-1111-1111-111111111111",
+        pid=999999,
+        started_at="2026-01-01T00:00:00.000Z",
+        user_data_dir="profile-store/profiles/11111111-1111-1111-1111-111111111111/user-data",
+        owner_token="token",
+        proxy_bridge_pid=os.getpid(),
+        proxy_bridge_ready_file=ready_relative,
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(chromium, "_stop_proxy_bridge_pid", lambda pid: killed.append(pid))
+
+    holder = open(ready_path, "r+", encoding="utf-8")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        chromium._stop_proxy_bridge_for_record(store_root, record)
+    finally:
+        holder.close()
+
+    assert killed == [os.getpid()], "a live bridge was left running"
+
+
+def test_records_written_before_ownership_tracking_are_left_alone(tmp_path, monkeypatch):
+    """An orphan is recoverable; killing someone else's process tree is not."""
+    record = chromium.RuntimeRecord(
+        profile_id="11111111-1111-1111-1111-111111111111",
+        pid=999999,
+        started_at="2026-01-01T00:00:00.000Z",
+        user_data_dir="profile-store/profiles/11111111-1111-1111-1111-111111111111/user-data",
+        owner_token="token",
+        proxy_bridge_pid=424242,
+        proxy_bridge_ready_file=None,
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(chromium, "_stop_proxy_bridge_pid", lambda pid: killed.append(pid))
+
+    chromium._stop_proxy_bridge_for_record(tmp_path, record)
+
+    assert killed == []

@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 from .identity_extension import (
     IdentityExtensionArtifact,
@@ -132,6 +132,10 @@ class RuntimeRecord:
     user_data_dir: str
     owner_token: str
     proxy_bridge_pid: Optional[int] = None
+    # Relative POSIX path to the bridge's ready file. The bridge holds an
+    # exclusive lock on it for its lifetime, so it doubles as proof that the
+    # recorded pid is still that bridge and not a process that reused it.
+    proxy_bridge_ready_file: Optional[str] = None
 
     @classmethod
     def from_dict(cls, payload: Any) -> Optional["RuntimeRecord"]:
@@ -155,6 +159,12 @@ class RuntimeRecord:
         proxy_bridge_pid = payload.get("proxyBridgePid")
         if proxy_bridge_pid is not None and (not isinstance(proxy_bridge_pid, int) or proxy_bridge_pid <= 0):
             return None
+        proxy_bridge_ready_file = payload.get("proxyBridgeReadyFile")
+        if proxy_bridge_ready_file is not None and (
+            not isinstance(proxy_bridge_ready_file, str)
+            or not _is_safe_relative_posix_path(proxy_bridge_ready_file)
+        ):
+            return None
         return cls(
             profile_id=profile_id,
             pid=pid,
@@ -162,6 +172,7 @@ class RuntimeRecord:
             user_data_dir=user_data_dir,
             owner_token=owner_token,
             proxy_bridge_pid=proxy_bridge_pid,
+            proxy_bridge_ready_file=proxy_bridge_ready_file,
         )
 
     def to_dict(self) -> JsonObject:
@@ -174,12 +185,15 @@ class RuntimeRecord:
         }
         if self.proxy_bridge_pid is not None:
             payload["proxyBridgePid"] = self.proxy_bridge_pid
+        if self.proxy_bridge_ready_file is not None:
+            payload["proxyBridgeReadyFile"] = self.proxy_bridge_ready_file
         return payload
 
 @dataclass(frozen=True)
 class ProxyLaunchRuntime:
     launch_args: list[str]
     proxy_bridge_pid: Optional[int] = None
+    proxy_bridge_ready_file: Optional[str] = None
 
 
 class RuntimeRegistry:
@@ -257,7 +271,7 @@ def status(store_root: Union[str, Path]) -> JsonObject:
     store.list()
     registry = RuntimeRegistry(store_root)
     records = registry.read()
-    active, reconciled, changed = _reconcile_records(records)
+    active, reconciled, changed = _reconcile_records(store_root, records)
     if changed:
         registry.write(active)
     return _status_payload(active, reconciled)
@@ -273,7 +287,7 @@ def ensure_profile_stopped_for_portability(store_root: Union[str, Path], profile
     """
     registry = RuntimeRegistry(store_root)
     records = registry.read()
-    active, _reconciled, changed = _reconcile_records(records)
+    active, _reconciled, changed = _reconcile_records(store_root, records)
     if changed:
         registry.write(active)
 
@@ -292,74 +306,19 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     proxy_plan = build_proxy_runtime_plan(profile.proxy)
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
-    records = registry.read()
-    active, _reconciled, changed = _reconcile_records(records)
-    if changed:
-        registry.write(active, error_code=CHROMIUM_LAUNCH_FAILED)
+    active = _reconciled_active_records(registry, error_code=CHROMIUM_LAUNCH_FAILED)
+    _reject_if_already_running(active, profile)
 
-    existing = active.get(profile.id)
-    if existing is not None and is_process_alive(existing.pid):
-        raise SidecarError(
-            code=CHROMIUM_ALREADY_RUNNING,
-            message="Chromium is already running for this profile.",
-        )
-
-    executable = discover_executable()
-    user_data_path = resolve_user_data_path(store_root, profile)
-    try:
-        user_data_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium user data directory could not be prepared.",
-        ) from exc
-
-    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
-    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
-    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
-    owner_token = uuid.uuid4().hex
-    args = build_launch_args(
-        executable,
-        user_data_path,
-        "about:blank",
-        extra_args=[
-            *_runtime_launch_args(identity_plan, extension_artifact, proxy_auth_artifact),
-            *proxy_runtime.launch_args,
-            *_proxy_proof_trust_args(),
-        ],
+    outcome = _launch_registered(
+        store_root,
+        profile,
+        identity_plan,
+        proxy_plan,
+        active=active,
+        registry=registry,
+        error_code=CHROMIUM_LAUNCH_FAILED,
     )
-    if identity_plan.requires_cdp:
-        _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
-    process: subprocess.Popen[Any] | None = None
-    try:
-        process = _spawn_chromium(args, owner_token=owner_token)
-        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
-        if process.poll() is not None or not is_process_alive(process.pid):
-            _reap_if_child(process.pid)
-            raise SidecarError(
-                code=CHROMIUM_LAUNCH_FAILED,
-                message="Chromium exited before it could be registered as running.",
-            )
-
-        _apply_identity_cdp_if_needed(identity_plan, user_data_path)
-
-        record = RuntimeRecord(
-            profile_id=profile.id,
-            pid=process.pid,
-            started_at=utc_now_iso(),
-            user_data_dir=profile.storage.userDataDir,
-            owner_token=owner_token,
-            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
-        )
-        updated = dict(active)
-        updated[profile.id] = record
-        registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
-    except SidecarError:
-        if process is not None:
-            _stop_child_after_failed_launch(process.pid)
-        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
-        raise
-    return {**_running_payload(record), "runningCount": len(updated)}
+    return {**_running_payload(outcome.record), "runningCount": outcome.running_count}
 
 
 def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> JsonObject:
@@ -374,88 +333,26 @@ def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> Json
     proxy_plan = build_proxy_runtime_plan(profile.proxy)
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
-    records = registry.read()
-    active, _reconciled, changed = _reconcile_records(records)
-    if changed:
-        registry.write(active, error_code=CHROMIUM_LAUNCH_FAILED)
+    active = _reconciled_active_records(registry, error_code=CHROMIUM_LAUNCH_FAILED)
+    _reject_if_already_running(active, profile)
 
-    existing = active.get(profile.id)
-    if existing is not None and is_process_alive(existing.pid):
-        raise SidecarError(
-            code=CHROMIUM_ALREADY_RUNNING,
-            message="Chromium is already running for this profile.",
-        )
-
-    executable = discover_executable()
-    user_data_path = resolve_user_data_path(store_root, profile)
-    try:
-        user_data_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium user data directory could not be prepared.",
-        ) from exc
-
-    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
-    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
-    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
-    owner_token = uuid.uuid4().hex
-    args = build_launch_args(
-        executable,
-        user_data_path,
-        "about:blank",
-        extra_args=[
-            *_runtime_launch_args(
-                identity_plan,
-                extension_artifact,
-                proxy_auth_artifact,
-                force_remote_debugging=True,
-            ),
-            *proxy_runtime.launch_args,
-            *_proxy_proof_trust_args(),
-        ],
+    outcome = _launch_registered(
+        store_root,
+        profile,
+        identity_plan,
+        proxy_plan,
+        active=active,
+        registry=registry,
+        error_code=CHROMIUM_LAUNCH_FAILED,
+        force_remote_debugging=True,
+        after_endpoint=_handoff_origin_from_endpoint,
     )
-    _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
-    process: subprocess.Popen[Any] | None = None
-    try:
-        process = _spawn_chromium(args, owner_token=owner_token)
-        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
-        if process.poll() is not None or not is_process_alive(process.pid):
-            _reap_if_child(process.pid)
-            raise SidecarError(
-                code=CHROMIUM_LAUNCH_FAILED,
-                message="Chromium exited before it could be registered as running.",
-            )
-
-        endpoint = discover_devtools_endpoint(
-            user_data_path,
-            timeout_seconds=IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
-        handoff_origin = _handoff_origin_from_endpoint(endpoint)
-
-        record = RuntimeRecord(
-            profile_id=profile.id,
-            pid=process.pid,
-            started_at=utc_now_iso(),
-            user_data_dir=profile.storage.userDataDir,
-            owner_token=owner_token,
-            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
-        )
-        updated = dict(active)
-        updated[profile.id] = record
-        registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
-    except SidecarError:
-        if process is not None:
-            _stop_child_after_failed_launch(process.pid)
-        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
-        raise
     return {
-        "profileId": record.profile_id,
+        "profileId": outcome.record.profile_id,
         "status": "running",
-        "startedAt": record.started_at,
-        "runningCount": len(updated),
-        "handoffOrigin": handoff_origin,
+        "startedAt": outcome.record.started_at,
+        "runningCount": outcome.running_count,
+        "handoffOrigin": outcome.endpoint_result,
     }
 
 
@@ -473,7 +370,7 @@ def open_identity_audit_page(
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
     records = registry.read()
-    active, _reconciled, changed = _reconcile_records(records)
+    active, _reconciled, changed = _reconcile_records(store_root, records)
     if changed:
         registry.write(active, error_code=IDENTITY_AUDIT_FAILED)
 
@@ -514,7 +411,7 @@ def collect_identity_audit_results(
     identity_plan = build_identity_runtime_plan(profile.identity)
     registry = RuntimeRegistry(store_root)
     records = registry.read()
-    active, _reconciled, changed = _reconcile_records(records)
+    active, _reconciled, changed = _reconcile_records(store_root, records)
     if changed:
         registry.write(active, error_code=IDENTITY_AUDIT_FAILED)
 
@@ -556,7 +453,7 @@ def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     updated.pop(profile.id, None)
 
     if not is_process_alive(record.pid):
-        _stop_proxy_bridge_for_record(record)
+        _stop_proxy_bridge_for_record(store_root, record)
         registry.write(updated, error_code=CHROMIUM_STOP_FAILED)
         return _stopped_payload(profile, termination="reconciled", running_count=_active_count(updated))
 
@@ -574,7 +471,7 @@ def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         # reporting it and a retry has something to act on.
         registry.write(records, error_code=CHROMIUM_STOP_FAILED)
         raise
-    _stop_proxy_bridge_for_record(record)
+    _stop_proxy_bridge_for_record(store_root, record)
     return _stopped_payload(profile, termination=termination, running_count=_active_count(updated))
 
 
@@ -670,6 +567,7 @@ def _prepare_proxy_launch_runtime(
         return ProxyLaunchRuntime(
             launch_args=[validate_proxy_server_launch_arg(f"{PROXY_SERVER_ARG_PREFIX}socks5://127.0.0.1:{bridge['port']}")],
             proxy_bridge_pid=bridge["pid"],
+            proxy_bridge_ready_file=bridge["readyFile"],
         )
     return ProxyLaunchRuntime(launch_args=proxy_plan.launch_args)
 
@@ -722,7 +620,11 @@ def _spawn_socks5_proxy_bridge(
         with process.stdin as handle:
             handle.write(json.dumps(config_payload, ensure_ascii=False, sort_keys=True) + "\n")
         ready = _wait_for_proxy_bridge_ready(ready_path, process)
-        return {"pid": process.pid, "port": ready}
+        return {
+            "pid": process.pid,
+            "port": ready,
+            "readyFile": ready_path.relative_to(Path(store_root)).as_posix(),
+        }
     except (SidecarError, OSError, ValueError) as exc:
         _stop_child_after_failed_launch(process.pid)
         if isinstance(exc, SidecarError):
@@ -775,8 +677,73 @@ def _stop_proxy_bridge_pid(pid: Optional[int]) -> None:
         _reap_if_child(pid)
 
 
-def _stop_proxy_bridge_for_record(record: RuntimeRecord) -> None:
+def _stop_proxy_bridge_for_record(store_root: Union[str, Path], record: RuntimeRecord) -> None:
+    """Stop this record's bridge, but only once it is proved to still be ours.
+
+    A pid on its own is not an identity. Reconciliation runs after reboots, when
+    the OS has reused pids freely, so acting on a recorded pid alone can SIGKILL
+    an unrelated process tree. The bridge holds an exclusive lock on its ready
+    file for its whole life and the kernel releases it on death, so being unable
+    to take that lock is what proves the recorded pid is still the bridge.
+    """
+    if record.proxy_bridge_pid is None:
+        return
+    if not _proxy_bridge_is_still_ours(store_root, record):
+        return
     _stop_proxy_bridge_pid(record.proxy_bridge_pid)
+
+
+def _proxy_bridge_is_still_ours(store_root: Union[str, Path], record: RuntimeRecord) -> bool:
+    if record.proxy_bridge_ready_file is None:
+        # Written before ownership was recorded. Refusing to kill risks leaving an
+        # orphan; killing risks taking down someone else's process tree. The
+        # orphan is the recoverable one, and these records age out on their own.
+        return False
+
+    ready_path = Path(store_root) / record.proxy_bridge_ready_file
+    try:
+        payload = json.loads(ready_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # No ready file means the bridge is gone and took its lock with it.
+        return False
+    if not isinstance(payload, Mapping) or payload.get("pid") != record.proxy_bridge_pid:
+        return False
+
+    return _ready_file_is_locked(ready_path)
+
+
+def _ready_file_is_locked(path: Path) -> bool:
+    """Return whether some process still holds the bridge's ready-file lock."""
+    try:
+        handle = open(path, "r+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True  # someone still holds it: the bridge is alive
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return False
+    except ImportError:
+        # No locking primitive available. The recorded pid matched the one the
+        # bridge wrote into its own ready file, which is the best evidence left.
+        return True
+    finally:
+        handle.close()
+    return True
 
 
 def _runtime_launch_args(
@@ -800,20 +767,6 @@ def _runtime_launch_args(
         args.extend([_REMOTE_DEBUGGING_ARG, _REMOTE_ALLOW_ORIGINS_ARG])
     args.extend(identity_plan.launch_flags)
     return _validate_extra_launch_args(args)
-
-
-def _identity_launch_args(
-    identity_plan: IdentityRuntimePlan,
-    extension_artifact: Optional[IdentityExtensionArtifact],
-    *,
-    force_remote_debugging: bool = False,
-) -> list[str]:
-    return _runtime_launch_args(
-        identity_plan,
-        extension_artifact,
-        None,
-        force_remote_debugging=force_remote_debugging,
-    )
 
 
 def _extension_launch_args(extension_dirs: Sequence[Union[str, Path]]) -> list[str]:
@@ -1034,18 +987,138 @@ def capture_audit_page_text(page_endpoint: Any, **kwargs: Any) -> Any:
         )
 
 
-def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_path: Path) -> None:
-    if not identity_plan.requires_cdp:
-        return
-    endpoint = discover_devtools_endpoint(
+@dataclass(frozen=True)
+class LaunchOutcome:
+    """Result of one registered Chromium launch."""
+
+    record: RuntimeRecord
+    running_count: int
+    endpoint_result: Any = None
+
+
+def _launch_registered(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+    proxy_plan: ProxyRuntimePlan,
+    *,
+    active: Mapping[str, RuntimeRecord],
+    registry: RuntimeRegistry,
+    error_code: str,
+    force_remote_debugging: bool = False,
+    discovery_timeout_seconds: float = IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS,
+    after_endpoint: Optional[Callable[[Any], Any]] = None,
+) -> LaunchOutcome:
+    """Spawn Chromium, apply identity, and record it as running -- or roll back.
+
+    This is the one place the launch sequence lives. It previously existed as four
+    near-identical copies (plain launch, automation lease, audit open, audit
+    collect) which had already drifted in which error code they reported, and
+    which is how a single credential-leak fix had to be applied four times.
+
+    The callers differ in only four ways, all parameters here: which error code
+    labels a failure, whether DevTools is forced on, how long endpoint discovery
+    may take, and what to do with the endpoint once it exists.
+    """
+    executable = discover_executable()
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        user_data_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium user data directory could not be prepared.",
+        ) from exc
+
+    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
+    owner_token = uuid.uuid4().hex
+    args = build_launch_args(
+        executable,
         user_data_path,
-        timeout_seconds=IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        "about:blank",
+        extra_args=[
+            *_runtime_launch_args(
+                identity_plan,
+                extension_artifact,
+                proxy_auth_artifact,
+                force_remote_debugging=force_remote_debugging,
+            ),
+            *proxy_runtime.launch_args,
+            *_proxy_proof_trust_args(),
+        ],
     )
-    apply_identity_cdp_overrides(
-        endpoint,
-        identity_plan.cdp_overrides,
-        timeout_seconds=IDENTITY_CDP_APPLY_TIMEOUT_SECONDS,
-    )
+
+    # A stale port file would make discovery read the previous session's port, so
+    # it only matters when something is going to look. Plain launches of a profile
+    # with no CDP overrides never do.
+    needs_endpoint = force_remote_debugging or identity_plan.requires_cdp
+    if needs_endpoint:
+        _remove_stale_devtools_active_port(user_data_path, error_code=error_code)
+
+    process: subprocess.Popen[Any] | None = None
+    try:
+        process = _spawn_chromium(args, owner_token=owner_token)
+        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
+        if process.poll() is not None or not is_process_alive(process.pid):
+            _reap_if_child(process.pid)
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium exited before it could be registered as running.",
+            )
+
+        endpoint_result: Any = None
+        if needs_endpoint:
+            endpoint = discover_devtools_endpoint(
+                user_data_path,
+                timeout_seconds=discovery_timeout_seconds,
+            )
+            _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+            if after_endpoint is not None:
+                endpoint_result = after_endpoint(endpoint)
+
+        record = RuntimeRecord(
+            profile_id=profile.id,
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            user_data_dir=profile.storage.userDataDir,
+            owner_token=owner_token,
+            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
+            proxy_bridge_ready_file=proxy_runtime.proxy_bridge_ready_file,
+        )
+        updated = dict(active)
+        updated[profile.id] = record
+        registry.write(updated, error_code=error_code)
+    except SidecarError:
+        if process is not None:
+            _stop_child_after_failed_launch(process.pid)
+        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
+        raise
+    return LaunchOutcome(record=record, running_count=len(updated), endpoint_result=endpoint_result)
+
+
+def _reconciled_active_records(
+    registry: RuntimeRegistry,
+    *,
+    error_code: str,
+) -> dict[str, RuntimeRecord]:
+    """Read the registry, drop records whose process is gone, and persist that."""
+    records = registry.read()
+    active, _reconciled, changed = _reconcile_records(registry.store_root, records)
+    if changed:
+        registry.write(active, error_code=error_code)
+    return active
+
+
+def _reject_if_already_running(active: Mapping[str, RuntimeRecord], profile: ProfileRecord) -> None:
+    existing = active.get(profile.id)
+    if existing is not None and is_process_alive(existing.pid):
+        raise SidecarError(
+            code=CHROMIUM_ALREADY_RUNNING,
+            message="Chromium is already running for this profile.",
+        )
+
 
 
 def _collect_identity_audit_results_for_running(
@@ -1093,77 +1166,25 @@ def _launch_and_collect_identity_audit_results(
     active: Mapping[str, RuntimeRecord],
     registry: RuntimeRegistry,
 ) -> JsonObject:
-    executable = discover_executable()
-    user_data_path = resolve_user_data_path(store_root, profile)
-    try:
-        user_data_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium user data directory could not be prepared.",
-        ) from exc
-
-    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
-    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
-    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
-    owner_token = uuid.uuid4().hex
-    args = build_launch_args(
-        executable,
-        user_data_path,
-        "about:blank",
-        extra_args=[
-            *_runtime_launch_args(
-                identity_plan,
-                extension_artifact,
-                proxy_auth_artifact,
-                force_remote_debugging=True,
-            ),
-            *proxy_runtime.launch_args,
-            *_proxy_proof_trust_args(),
-        ],
+    outcome = _launch_registered(
+        store_root,
+        profile,
+        identity_plan,
+        proxy_plan,
+        active=active,
+        registry=registry,
+        error_code=IDENTITY_AUDIT_FAILED,
+        force_remote_debugging=True,
+        discovery_timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        after_endpoint=lambda endpoint: _collect_public_audit_targets(endpoint, audit_pages),
     )
-    _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
-    process: subprocess.Popen[Any] | None = None
-    try:
-        process = _spawn_chromium(args, owner_token=owner_token)
-        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
-        if process.poll() is not None or not is_process_alive(process.pid):
-            _reap_if_child(process.pid)
-            raise SidecarError(
-                code=CHROMIUM_LAUNCH_FAILED,
-                message="Chromium exited before it could be registered as running.",
-            )
-
-        endpoint = discover_devtools_endpoint(
-            user_data_path,
-            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
-        page_results = _collect_public_audit_targets(endpoint, audit_pages)
-
-        record = RuntimeRecord(
-            profile_id=profile.id,
-            pid=process.pid,
-            started_at=utc_now_iso(),
-            user_data_dir=profile.storage.userDataDir,
-            owner_token=owner_token,
-            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
-        )
-        updated = dict(active)
-        updated[profile.id] = record
-        registry.write(updated, error_code=IDENTITY_AUDIT_FAILED)
-    except SidecarError:
-        if process is not None:
-            _stop_child_after_failed_launch(process.pid)
-        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
-        raise
     return _audit_collect_payload(
         profile,
         audit_pages,
-        page_results,
+        outcome.endpoint_result,
         audit_version=audit_version,
         launched=True,
-        running_count=len(updated),
+        running_count=outcome.running_count,
     )
 
 
@@ -1211,76 +1232,24 @@ def _launch_and_open_identity_audit_page(
     active: Mapping[str, RuntimeRecord],
     registry: RuntimeRegistry,
 ) -> JsonObject:
-    executable = discover_executable()
-    user_data_path = resolve_user_data_path(store_root, profile)
-    try:
-        user_data_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SidecarError(
-            code=CHROMIUM_LAUNCH_FAILED,
-            message="Chromium user data directory could not be prepared.",
-        ) from exc
-
-    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
-    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
-    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
-    owner_token = uuid.uuid4().hex
-    args = build_launch_args(
-        executable,
-        user_data_path,
-        "about:blank",
-        extra_args=[
-            *_runtime_launch_args(
-                identity_plan,
-                extension_artifact,
-                proxy_auth_artifact,
-                force_remote_debugging=True,
-            ),
-            *proxy_runtime.launch_args,
-            *_proxy_proof_trust_args(),
-        ],
+    outcome = _launch_registered(
+        store_root,
+        profile,
+        identity_plan,
+        proxy_plan,
+        active=active,
+        registry=registry,
+        error_code=IDENTITY_AUDIT_FAILED,
+        force_remote_debugging=True,
+        discovery_timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        after_endpoint=lambda endpoint: _open_public_audit_target(endpoint, audit_page),
     )
-    _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
-    process: subprocess.Popen[Any] | None = None
-    try:
-        process = _spawn_chromium(args, owner_token=owner_token)
-        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
-        if process.poll() is not None or not is_process_alive(process.pid):
-            _reap_if_child(process.pid)
-            raise SidecarError(
-                code=CHROMIUM_LAUNCH_FAILED,
-                message="Chromium exited before it could be registered as running.",
-            )
-
-        endpoint = discover_devtools_endpoint(
-            user_data_path,
-            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
-        _open_public_audit_target(endpoint, audit_page)
-
-        record = RuntimeRecord(
-            profile_id=profile.id,
-            pid=process.pid,
-            started_at=utc_now_iso(),
-            user_data_dir=profile.storage.userDataDir,
-            owner_token=owner_token,
-            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
-        )
-        updated = dict(active)
-        updated[profile.id] = record
-        registry.write(updated, error_code=IDENTITY_AUDIT_FAILED)
-    except SidecarError:
-        if process is not None:
-            _stop_child_after_failed_launch(process.pid)
-        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
-        raise
     return _audit_open_payload(
         profile,
         audit_page,
         audit_version=audit_version,
         launched=True,
-        running_count=len(updated),
+        running_count=outcome.running_count,
     )
 
 
@@ -1894,20 +1863,22 @@ def _stop_process_tree_without_psutil(pid: int) -> str:
 
 
 def _reconcile_records(
-    records: Mapping[str, RuntimeRecord], *, known_profiles: Optional[set[str]] = None
+    store_root: Union[str, Path],
+    records: Mapping[str, RuntimeRecord],
 ) -> Tuple[Dict[str, RuntimeRecord], list[JsonObject], bool]:
+    """Drop records whose browser is gone, stopping each one's proxy bridge.
+
+    Previously took a known_profiles filter that no caller ever passed, so the
+    branch that pruned records for deleted profiles was dead code.
+    """
     active: Dict[str, RuntimeRecord] = {}
     reconciled: list[JsonObject] = []
     changed = False
     for profile_id, record in sorted(records.items(), key=lambda item: item[0]):
-        if known_profiles is not None and profile_id not in known_profiles:
-            _stop_proxy_bridge_for_record(record)
-            changed = True
-            continue
         if is_process_alive(record.pid):
             active[profile_id] = record
         else:
-            _stop_proxy_bridge_for_record(record)
+            _stop_proxy_bridge_for_record(store_root, record)
             reconciled.append(_reconciled_payload(record))
             changed = True
     return active, reconciled, changed

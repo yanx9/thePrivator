@@ -9,6 +9,7 @@ provider. It is a private runtime process and must not log credentials.
 from __future__ import annotations
 
 import json
+import os
 import select
 import socket
 import socketserver
@@ -176,11 +177,59 @@ def _parse_config(payload: Any) -> Socks5BridgeConfig:
 
 
 def _write_ready_file(path: Path, host: str, port: int) -> None:
+    """Publish the bound port, and hold the file locked for this process's life.
+
+    The lock is an ownership token, not a mutual-exclusion device. The parent
+    records this bridge's pid so it can stop it later, but a pid alone is not
+    proof of identity: after a reboot the OS reuses pids freely, and killing a
+    recorded pid that now belongs to something else takes an unrelated process
+    tree down with it. Because the kernel drops an flock when the holder dies,
+    "can I take this lock?" answers "is my bridge still the one running?"
+    without any bookkeeping that can itself go stale.
+
+    The descriptor is deliberately leaked for the process lifetime: closing it
+    would release the lock. It is reclaimed when the bridge exits.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"bridgeVersion": SOCKS5_BRIDGE_VERSION, "host": host, "port": port}, sort_keys=True) + "\n",
-        encoding="utf-8",
+    payload = json.dumps(
+        {
+            "bridgeVersion": SOCKS5_BRIDGE_VERSION,
+            "host": host,
+            "port": port,
+            "pid": os.getpid(),
+        },
+        sort_keys=True,
     )
+    handle = open(path, "w", encoding="utf-8")  # noqa: SIM115 - held for the process lifetime on purpose.
+    _hold_exclusive_lock(handle)
+    handle.write(payload + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+    global _READY_FILE_HANDLE
+    _READY_FILE_HANDLE = handle
+
+
+# Kept alive so the lock taken in _write_ready_file survives until process exit.
+_READY_FILE_HANDLE: Optional[Any] = None
+
+
+def _hold_exclusive_lock(handle: Any) -> None:
+    """Take a best-effort exclusive lock; a platform without one still works.
+
+    Where locking is unavailable the parent falls back to matching the recorded
+    pid, which is weaker but no worse than the behaviour this replaces.
+    """
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except (ImportError, OSError):
+        return
 
 
 def _config_from_server(server: Any) -> Socks5BridgeConfig:

@@ -8,6 +8,7 @@ against real sockets rather than mocks.
 
 import io
 import json
+import os
 import socket
 import socketserver
 import threading
@@ -168,11 +169,33 @@ def _connect_request(host: str, port: int) -> bytes:
     return b"\x05\x01\x00" + address + port.to_bytes(2, "big")
 
 
-def test_ready_file_reports_the_bound_loopback_port(bridge, tmp_path):
+def test_ready_file_reports_the_bound_loopback_port_and_owning_pid(bridge, tmp_path):
+    """The pid is the parent's ownership token; see _proxy_bridge_is_still_ours."""
     server, _upstream = bridge
     payload = json.loads((tmp_path / "bridge.ready.json").read_text(encoding="utf-8"))
 
-    assert payload == {"bridgeVersion": SOCKS5_BRIDGE_VERSION, "host": "127.0.0.1", "port": server.local_port}
+    assert payload == {
+        "bridgeVersion": SOCKS5_BRIDGE_VERSION,
+        "host": "127.0.0.1",
+        "port": server.local_port,
+        "pid": os.getpid(),
+    }
+
+
+def test_ready_file_stays_locked_while_the_bridge_lives(bridge, tmp_path):
+    """The lock is what proves a recorded pid is still this bridge.
+
+    Pids are reused freely across reboots, so killing a recorded pid without
+    proof of identity can take down an unrelated process tree. The kernel drops
+    an flock when its holder dies, which makes the lock a token that cannot go
+    stale on its own.
+    """
+    fcntl = pytest.importorskip("fcntl")
+    _server, _upstream = bridge
+
+    with open(tmp_path / "bridge.ready.json", "r+", encoding="utf-8") as handle:
+        with pytest.raises(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_relays_traffic_and_authenticates_to_the_upstream(bridge):
