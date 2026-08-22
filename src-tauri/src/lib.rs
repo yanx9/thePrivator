@@ -43,6 +43,7 @@ pub fn run() {
             sidecar::proxy_validate,
             sidecar::identity_audit_plan,
             sidecar::identity_audit_open,
+            sidecar::identity_audit_collect,
             sidecar::profiles_identity_apply_preset,
             sidecar::profiles_identity_update,
             sidecar::profiles_proxy_update,

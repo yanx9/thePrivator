@@ -52,6 +52,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return run_from_env(os.environ)
 
+    if args[:1] == ["proxy-bridge"]:
+        from .proxy_bridge import run_bridge_from_config_path
+
+        config_path = args[1] if len(args) > 1 else ""
+        return run_bridge_from_config_path(config_path)
+
     return run(sys.stdin, sys.stdout, sys.stderr)
 
 
@@ -244,6 +250,19 @@ def dispatch_identity_request(request: SidecarRequest) -> JsonObject:
                 "Audit pageId is required.",
             )
             return identity_audit.open_audit_page_for_profile(store_root, profile_id, page_id)
+
+        if request.method == "identity.audit.collect":
+            store_root = require_string_param(
+                request.params,
+                "storeRoot",
+                "Audit storeRoot is required.",
+            )
+            profile_id = require_string_param(
+                request.params,
+                "profileId",
+                "Audit profileId is required.",
+            )
+            return identity_audit.collect_audit_results_for_profile(store_root, profile_id)
 
         raise SidecarError(
             code=UNKNOWN_COMMAND,

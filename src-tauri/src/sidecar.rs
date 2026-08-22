@@ -204,6 +204,16 @@ pub async fn identity_audit_open(
 }
 
 #[tauri::command]
+pub async fn identity_audit_collect(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    identity_audit_collect_with_runner(&runner, store_root, profile_id).await
+}
+
+#[tauri::command]
 pub async fn profiles_identity_apply_preset(
     app: tauri::AppHandle,
     profile_id: String,
@@ -456,6 +466,23 @@ async fn identity_audit_open_with_runner<R: SidecarRunner>(
             "storeRoot": store_root,
             "profileId": profile_id,
             "pageId": page_id,
+        }),
+        CHROMIUM_LAUNCH_TIMEOUT,
+    )
+    .await
+}
+
+async fn identity_audit_collect_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "identity.audit.collect",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
         }),
         CHROMIUM_LAUNCH_TIMEOUT,
     )

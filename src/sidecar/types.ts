@@ -335,12 +335,21 @@ export interface ProxyCheckRouteProof {
   observationCounts: ProxyCheckObservationCounts;
 }
 
+export interface ProxyCheckPublicExitLocation {
+  country: string | null;
+  region: string | null;
+  city: string | null;
+  timezone: string | null;
+  isp: string | null;
+}
+
 export interface ProxyCheckIpHiding {
   status: ProxyCheckIpHidingStatus;
   basis: ProxyCheckIpHidingBasis;
   scope: ProxyCheckProofScope;
-  publicExitIpClaimed: false;
-  publicExitIp: null;
+  publicExitIpClaimed: boolean;
+  publicExitIp: string | null;
+  publicExitLocation: ProxyCheckPublicExitLocation | null;
   localFixtureConclusion: ProxyCheckLocalFixtureConclusion;
 }
 
@@ -537,6 +546,45 @@ export interface IdentityAuditOpenResult {
 }
 
 export interface IdentityAuditOpenSnapshot extends IdentityAuditOpenResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export type IdentityAuditCollectStatus = "collected";
+export type IdentityAuditPageResultStatus = "captured" | "needs-user-action" | "unavailable";
+
+export interface IdentityAuditCollectedRow {
+  label: string;
+  value: string;
+}
+
+export interface IdentityAuditPageResult {
+  id: string;
+  label: string;
+  category: IdentityAuditCategory;
+  url: string;
+  status: IdentityAuditPageResultStatus;
+  capturedAt: string;
+  title: string;
+  summary: string;
+  extractedRows: IdentityAuditCollectedRow[];
+  notes: string[];
+}
+
+export interface IdentityAuditCollectResult {
+  auditVersion: 1;
+  profileId: string;
+  status: IdentityAuditCollectStatus;
+  collectedAt: string;
+  launched: boolean;
+  runningCount: number;
+  pages: IdentityAuditPageResult[];
+}
+
+export interface IdentityAuditCollectSnapshot extends IdentityAuditCollectResult {
   requestId: string;
   rawRequestId: JsonScalar;
   protocolVersion: string;

@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import json
 import math
+import socket
 import threading
 from pathlib import Path
 from typing import Any, Mapping, Sequence, Union
+from urllib.parse import quote
+
+import requests
 
 from .profiles import ProfileStore
 from .protocol import JsonObject, PROXY_PROOF_FAILED, SidecarError
@@ -22,15 +26,18 @@ from .proxy import (
     DIRECT_PROXY_MODE,
     FIXED_SERVER_PROXY_MODE,
     PROXY_VERSION,
+    normalize_proxy_config,
     public_proxy_summary,
 )
 from .proxy_proof import PROXY_PROOF_SCHEMA_VERSION, collect_proxy_proof
-from .proxy_runtime import build_proxy_runtime_plan
 
 PROXY_CHECK_VERSION = 1
 PROXY_CHECK_SCOPE_LOCAL_FIXTURE = "sidecar-managed-local-fixture"
 PROXY_CHECK_PUBLIC_CHECKER_STATUS = "advisory-only"
 PROXY_CHECK_TIMEOUT_SECONDS = 5.0
+_PUBLIC_EXIT_LOOKUP_HOST = "ip-api.com"
+_PUBLIC_EXIT_LOOKUP_PATH = "/json/?fields=status,message,query,country,regionName,city,timezone,isp"
+_PUBLIC_EXIT_LOOKUP_URL = f"http://{_PUBLIC_EXIT_LOOKUP_HOST}{_PUBLIC_EXIT_LOOKUP_PATH}"
 
 _ROUTE_PROOF_KEYS = frozenset(
     {
@@ -53,9 +60,11 @@ _IP_HIDING_KEYS = frozenset(
         "scope",
         "publicExitIpClaimed",
         "publicExitIp",
+        "publicExitLocation",
         "localFixtureConclusion",
     }
 )
+_PUBLIC_EXIT_LOCATION_KEYS = frozenset({"country", "region", "city", "timezone", "isp"})
 _WEBRTC_KEYS = frozenset({"status", "basis", "mode", "policy", "localIpExposure"})
 _PUBLIC_CHECKERS_KEYS = frozenset({"status", "basis", "networkDependency", "pages"})
 _PUBLIC_CHECKER_PAGE_KEYS = frozenset({"id", "label", "url", "surfaces", "advisory"})
@@ -170,7 +179,7 @@ def check_profile_proxy(store_root: Union[str, Path], profile_id: str) -> JsonOb
         if public_proxy["mode"] != FIXED_SERVER_PROXY_MODE:
             raise _proof_failure()
 
-        runtime_plan = build_proxy_runtime_plan(profile.proxy)
+        normalized_proxy = normalize_proxy_config(profile.proxy)
         proof = collect_proxy_proof(
             store_root,
             {
@@ -180,13 +189,14 @@ def check_profile_proxy(store_root: Union[str, Path], profile_id: str) -> JsonOb
             },
             timeout_seconds=PROXY_CHECK_TIMEOUT_SECONDS,
         )
-        proof_summary = _validated_proof_summary(proof, expected_protocol=runtime_plan.protocol)
+        proof_summary = _validated_proof_summary(proof, expected_protocol=normalized_proxy["protocol"])
+        public_exit = _collect_public_exit_observation(profile.proxy)
         result = {
             "proxyCheckVersion": PROXY_CHECK_VERSION,
             "profileId": profile.id,
             "proxy": public_proxy,
             "routeProof": _proved_route_proof(public_proxy, proof_summary),
-            "ipHiding": _proved_ip_hiding(),
+            "ipHiding": _proved_ip_hiding(public_exit),
             "webRtc": web_rtc,
             "publicCheckers": public_checkers,
         }
@@ -241,24 +251,230 @@ def _not_proven_ip_hiding(basis: str) -> JsonObject:
             "scope": "not-applicable",
             "publicExitIpClaimed": False,
             "publicExitIp": None,
+            "publicExitLocation": None,
             "localFixtureConclusion": "not-run",
         },
         _IP_HIDING_KEYS,
     )
 
 
-def _proved_ip_hiding() -> JsonObject:
+def _proved_ip_hiding(public_exit: Mapping[str, Any] | None) -> JsonObject:
+    public_ip = public_exit.get("ip") if isinstance(public_exit, Mapping) else None
+    location = public_exit.get("location") if isinstance(public_exit, Mapping) else None
+    if not isinstance(public_ip, str) or not public_ip:
+        public_ip = None
+        location = None
     return _exact_keys(
         {
             "status": "proved",
             "basis": "route-proof-succeeded",
             "scope": "local-fixture",
-            "publicExitIpClaimed": False,
-            "publicExitIp": None,
+            "publicExitIpClaimed": public_ip is not None,
+            "publicExitIp": public_ip,
+            "publicExitLocation": _public_exit_location(location) if public_ip is not None else None,
             "localFixtureConclusion": "direct target IP hidden from the proof target by the managed fixture",
         },
         _IP_HIDING_KEYS,
     )
+
+
+def _public_exit_location(location: Any) -> JsonObject:
+    if not isinstance(location, Mapping):
+        location = {}
+    return _exact_keys(
+        {
+            "country": _optional_safe_text(location.get("country")),
+            "region": _optional_safe_text(location.get("region")),
+            "city": _optional_safe_text(location.get("city")),
+            "timezone": _optional_safe_text(location.get("timezone")),
+            "isp": _optional_safe_text(location.get("isp")),
+        },
+        _PUBLIC_EXIT_LOCATION_KEYS,
+    )
+
+
+def _optional_safe_text(value: Any, *, max_length: int = 128) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > max_length or any(ord(character) < 32 or ord(character) == 127 for character in text):
+        return None
+    return text
+
+
+def _collect_public_exit_observation(proxy: Mapping[str, Any]) -> JsonObject | None:
+    """Best-effort public exit lookup through the saved proxy.
+
+    This returns only public IP/location metadata. It must never raise for
+    transient public-network failures because the local fixture proof remains
+    the deterministic app-side proof boundary.
+    """
+    try:
+        if not isinstance(proxy, Mapping) or proxy.get("mode") != FIXED_SERVER_PROXY_MODE:
+            return None
+        host = proxy.get("host")
+        if isinstance(host, str) and host.casefold().endswith(".invalid"):
+            return None
+        protocol = proxy.get("protocol")
+        if protocol in {"http", "https"}:
+            payload = _public_exit_via_requests(proxy)
+        elif protocol == "socks5":
+            payload = _public_exit_via_socks5(proxy)
+        else:
+            return None
+        return _public_exit_from_payload(payload)
+    except Exception:
+        return None
+
+
+def _public_exit_via_requests(proxy: Mapping[str, Any]) -> Mapping[str, Any]:
+    protocol = proxy.get("protocol")
+    host = proxy.get("host")
+    port = proxy.get("port")
+    if not isinstance(protocol, str) or not isinstance(host, str) or not isinstance(port, int):
+        raise ValueError("invalid proxy")
+    proxy_url = f"{protocol}://{_proxy_authority(proxy)}{host}:{port}"
+    response = requests.get(
+        _PUBLIC_EXIT_LOOKUP_URL,
+        proxies={"http": proxy_url},
+        timeout=PROXY_CHECK_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, Mapping):
+        raise ValueError("invalid public exit payload")
+    return payload
+
+
+def _public_exit_via_socks5(proxy: Mapping[str, Any]) -> Mapping[str, Any]:
+    host = proxy.get("host")
+    port = proxy.get("port")
+    if not isinstance(host, str) or not isinstance(port, int):
+        raise ValueError("invalid SOCKS5 proxy")
+    credentials = proxy.get("credentials") if isinstance(proxy.get("credentials"), Mapping) else None
+    with socket.create_connection((host, port), timeout=PROXY_CHECK_TIMEOUT_SECONDS) as sock:
+        sock.settimeout(PROXY_CHECK_TIMEOUT_SECONDS)
+        if isinstance(credentials, Mapping):
+            sock.sendall(b"\x05\x02\x00\x02")
+        else:
+            sock.sendall(b"\x05\x01\x00")
+        greeting = _read_exact(sock, 2)
+        if greeting == b"\x05\x02":
+            _socks5_send_username_password(sock, credentials)
+        elif greeting != b"\x05\x00":
+            raise ValueError("SOCKS5 authentication failed")
+
+        target = _PUBLIC_EXIT_LOOKUP_HOST.encode("ascii")
+        sock.sendall(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + (80).to_bytes(2, "big"))
+        _read_socks5_connect_response(sock)
+        request = (
+            f"GET {_PUBLIC_EXIT_LOOKUP_PATH} HTTP/1.1\r\n"
+            f"Host: {_PUBLIC_EXIT_LOOKUP_HOST}\r\n"
+            "Connection: close\r\n"
+            "User-Agent: ThePrivatorProxyCheck/1\r\n\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        raw = _read_http_response(sock)
+    header, _, body = raw.partition(b"\r\n\r\n")
+    if b" 200 " not in header.split(b"\r\n", 1)[0]:
+        raise ValueError("public exit lookup failed")
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("invalid public exit payload")
+    return payload
+
+
+def _socks5_send_username_password(sock: socket.socket, credentials: Any) -> None:
+    if not isinstance(credentials, Mapping):
+        raise ValueError("SOCKS5 credentials required")
+    username = credentials.get("username")
+    password = credentials.get("password")
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise ValueError("SOCKS5 credentials invalid")
+    username_bytes = username.encode("utf-8")
+    password_bytes = password.encode("utf-8")
+    if len(username_bytes) > 255 or len(password_bytes) > 255:
+        raise ValueError("SOCKS5 credentials too long")
+    sock.sendall(b"\x01" + bytes([len(username_bytes)]) + username_bytes + bytes([len(password_bytes)]) + password_bytes)
+    if _read_exact(sock, 2) != b"\x01\x00":
+        raise ValueError("SOCKS5 credentials rejected")
+
+
+def _read_socks5_connect_response(sock: socket.socket) -> None:
+    header = _read_exact(sock, 4)
+    if header[:2] != b"\x05\x00":
+        raise ValueError("SOCKS5 connect failed")
+    atyp = header[3]
+    if atyp == 1:
+        _read_exact(sock, 4)
+    elif atyp == 3:
+        length = _read_exact(sock, 1)[0]
+        _read_exact(sock, length)
+    elif atyp == 4:
+        _read_exact(sock, 16)
+    else:
+        raise ValueError("SOCKS5 connect response malformed")
+    _read_exact(sock, 2)
+
+
+def _proxy_authority(proxy: Mapping[str, Any]) -> str:
+    credentials = proxy.get("credentials")
+    if not isinstance(credentials, Mapping):
+        return ""
+    username = credentials.get("username")
+    password = credentials.get("password")
+    if not isinstance(username, str) or not isinstance(password, str):
+        return ""
+    return f"{quote(username, safe='')}:{quote(password, safe='')}@"
+
+
+def _public_exit_from_payload(payload: Mapping[str, Any]) -> JsonObject | None:
+    if payload.get("status") not in {None, "success"}:
+        return None
+    public_ip = payload.get("query")
+    if not isinstance(public_ip, str) or not public_ip.strip():
+        return None
+    return {
+        "ip": public_ip.strip(),
+        "location": _public_exit_location(
+            {
+                "country": payload.get("country"),
+                "region": payload.get("regionName"),
+                "city": payload.get("city"),
+                "timezone": payload.get("timezone"),
+                "isp": payload.get("isp"),
+            }
+        ),
+    }
+
+
+def _read_exact(sock: socket.socket, length: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ValueError("socket closed")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _read_http_response(sock: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > 65536:
+            raise ValueError("public exit response too large")
+    return b"".join(chunks)
+
 
 
 def _web_rtc_result(identity: Mapping[str, Any]) -> JsonObject:

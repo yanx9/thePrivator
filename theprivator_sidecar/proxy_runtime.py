@@ -32,7 +32,6 @@ from .proxy import (
 
 PROXY_SERVER_ARG_PREFIX = "--proxy-server="
 _HTTP_AUTH_PROTOCOLS = frozenset({"http", "https"})
-_SOCKS_PROTOCOLS = frozenset({"socks4", "socks5"})
 _REJECTED_PROXY_SWITCH_PREFIXES = (
     "--proxy-bypass-list",
     "--proxy-pac-url",
@@ -92,10 +91,10 @@ class ProxyRuntimePlan:
 def build_proxy_runtime_plan(proxy: Any) -> ProxyRuntimePlan:
     """Normalize one private proxy config into safe Chromium launch inputs.
 
-    Unsupported SOCKS credentials fail here so callers can stop before
-    executable discovery, auth-helper generation, extension generation, or
-    process spawn. HTTP(S) credentials are represented as an auth-helper
-    requirement for the follow-up implementation that will fulfill them.
+    HTTP(S) credentials are represented as an auth-helper extension requirement.
+    SOCKS5 credentials are handled by Chromium launch through a local no-auth
+    bridge, while SOCKS4 username/password remains unsupported and fails before
+    executable discovery, extension generation, or process spawn.
     """
     normalized = normalize_proxy_config(proxy)
     mode = normalized["mode"]
@@ -112,10 +111,10 @@ def build_proxy_runtime_plan(proxy: Any) -> ProxyRuntimePlan:
     host = normalized["host"]
     port = normalized["port"]
     has_credentials = isinstance(normalized.get("credentials"), Mapping)
-    if has_credentials and protocol in _SOCKS_PROTOCOLS:
+    if has_credentials and protocol == "socks4":
         raise SidecarError(
             code=PROXY_SOCKS_AUTH_UNSUPPORTED,
-            message="SOCKS proxy credentials cannot be used for Chromium proxy launch.",
+            message="SOCKS4 proxy credentials cannot be used for Chromium proxy launch.",
         )
 
     proxy_server = proxy_server_identifier(protocol, host, port)

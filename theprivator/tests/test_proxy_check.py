@@ -14,8 +14,8 @@ from theprivator_sidecar.protocol import (
     INVALID_REQUEST,
     PROFILE_NOT_FOUND,
     PROXY_CONNECTIVITY_FAILED,
+    PROXY_INVALID,
     PROXY_PROOF_FAILED,
-    PROXY_SOCKS_AUTH_UNSUPPORTED,
     SidecarError,
 )
 from theprivator_sidecar.proxy_check import (
@@ -62,7 +62,7 @@ ROUTE_KEYS = {
     "directFallbackDetected",
     "observationCounts",
 }
-IP_HIDING_KEYS = {"status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "localFixtureConclusion"}
+IP_HIDING_KEYS = {"status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "publicExitLocation", "localFixtureConclusion"}
 WEBRTC_KEYS = {"status", "basis", "mode", "policy", "localIpExposure"}
 PUBLIC_CHECKERS_KEYS = {"status", "basis", "networkDependency", "pages"}
 PUBLIC_CHECKER_PAGE_KEYS = {"id", "label", "url", "surfaces", "advisory"}
@@ -166,6 +166,7 @@ def test_direct_profile_returns_not_run_route_proof_and_not_proven_ip_hiding(tmp
         "scope": "not-applicable",
         "publicExitIpClaimed": False,
         "publicExitIp": None,
+        "publicExitLocation": None,
         "localFixtureConclusion": "not-run",
     }
     assert result["webRtc"] == {
@@ -202,6 +203,7 @@ def test_fixed_server_protocols_return_local_fixture_route_and_ip_hiding_proof(t
         "scope": "local-fixture",
         "publicExitIpClaimed": False,
         "publicExitIp": None,
+        "publicExitLocation": None,
         "localFixtureConclusion": "direct target IP hidden from the proof target by the managed fixture",
     }
     assert result["proxy"]["credentialState"] == ("configured" if protocol in {"http", "https"} else "none")
@@ -261,6 +263,7 @@ def test_curated_identity_fixed_server_proxy_reports_combined_s04_vocabulary(tmp
         "scope": "local-fixture",
         "publicExitIpClaimed": False,
         "publicExitIp": None,
+        "publicExitLocation": None,
         "localFixtureConclusion": "direct target IP hidden from the proof target by the managed fixture",
     }
     assert result["webRtc"] == {
@@ -339,19 +342,32 @@ def test_missing_unknown_and_malformed_profile_inputs_fail_typed(tmp_path):
     assert_public_payload_safe(malformed_exc.value.to_dict())
 
 
-@pytest.mark.parametrize("protocol", ["socks4", "socks5"])
-def test_socks_credentials_fail_before_proof_collection(tmp_path, monkeypatch, protocol):
-    store_root, profile = create_profile(tmp_path, proxy=fixed_proxy(protocol, credentials=True))
+def test_socks4_credentials_fail_before_public_payload_without_secret_leak(tmp_path, monkeypatch):
+    store_root, profile = create_profile(tmp_path, proxy=fixed_proxy("socks4", credentials=True))
 
     def fail_if_called(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
-        raise AssertionError("proof collector should not run for credentialed SOCKS")
+        raise AssertionError("public payload should not be produced for credentialed SOCKS4")
 
-    monkeypatch.setattr("theprivator_sidecar.proxy_check.collect_proxy_proof", fail_if_called)
+    monkeypatch.setattr("theprivator_sidecar.proxy_check._collect_public_exit_observation", fail_if_called)
 
     with pytest.raises(SidecarError) as exc_info:
         check_profile_proxy(store_root, profile["id"])
 
-    assert_sidecar_error(exc_info, PROXY_SOCKS_AUTH_UNSUPPORTED)
+    assert_sidecar_error(exc_info, PROXY_INVALID)
+
+
+def test_socks5_credentials_return_local_proof_without_leaking_secret_values(tmp_path):
+    store_root, profile = create_profile(tmp_path, proxy=fixed_proxy("socks5", credentials=True))
+
+    result = check_profile_proxy(store_root, profile["id"])
+
+    assert_public_shape(result)
+    assert result["routeProof"]["status"] == "proved"
+    assert result["routeProof"]["protocol"] == "socks5"
+    assert result["routeProof"]["credentialState"] == "configured"
+    assert result["proxy"]["credentialState"] == "configured"
+    assert result["ipHiding"]["status"] == "proved"
+    assert_public_payload_safe(result)
 
 
 @pytest.mark.parametrize("code", [PROXY_CONNECTIVITY_FAILED, PROXY_PROOF_FAILED])

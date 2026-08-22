@@ -112,7 +112,7 @@ def test_ipv6_proxy_hosts_are_bracketed_for_chromium(host, expected):
 
 
 @pytest.mark.parametrize("protocol", ["http", "https"])
-def test_http_https_credentials_are_represented_as_auth_helper_requirement_without_argv_leak(protocol):
+def test_auth_helper_credentials_are_represented_without_argv_leak(protocol):
     plan = build_proxy_runtime_plan(
         fixed_proxy(
             protocol=protocol,
@@ -126,12 +126,25 @@ def test_http_https_credentials_are_represented_as_auth_helper_requirement_witho
     assert_no_direct_fallback_or_credentials(plan)
 
 
-@pytest.mark.parametrize("protocol", ["socks4", "socks5"])
-def test_socks_credentials_fail_before_any_launch_artifacts(protocol):
+def test_socks5_credentials_are_redacted_and_left_for_local_launch_bridge():
+    plan = build_proxy_runtime_plan(
+        fixed_proxy(
+            protocol="socks5",
+            credentials={"username": SENTINEL_USERNAME, "password": SENTINEL_PASSWORD},
+        )
+    )
+
+    assert plan.launch_args == [f"{PROXY_SERVER_ARG_PREFIX}socks5://proxy.example.invalid:8080"]
+    assert plan.requires_auth_helper is False
+    assert plan.credential_state == "configured"
+    assert_no_direct_fallback_or_credentials(plan)
+
+
+def test_socks4_credentials_fail_before_any_launch_artifacts():
     with pytest.raises(SidecarError) as exc_info:
         build_proxy_runtime_plan(
             fixed_proxy(
-                protocol=protocol,
+                protocol="socks4",
                 credentials={"username": SENTINEL_USERNAME, "password": SENTINEL_PASSWORD},
             )
         )

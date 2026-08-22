@@ -99,7 +99,7 @@ def assert_sidecar_error(exc_info: pytest.ExceptionInfo[SidecarError], code: str
 
 
 @pytest.mark.parametrize("protocol", ["http", "https"])
-def test_authenticated_http_proxy_generates_redacted_auth_extension_artifact(tmp_path, protocol):
+def test_authenticated_proxy_generates_redacted_auth_extension_artifact(tmp_path, protocol):
     proxy = authenticated_http_proxy(protocol)
     plan = build_proxy_runtime_plan(proxy)
     assert plan.requires_auth_helper is True
@@ -148,13 +148,13 @@ def test_proxy_auth_extension_rejects_mismatched_runtime_plan(tmp_path):
     assert_sidecar_error(exc_info, PROXY_AUTH_HELPER_FAILED)
 
 
-def test_proxy_auth_extension_rejects_missing_credentials_and_socks_proxy(tmp_path):
+def test_proxy_auth_extension_rejects_missing_credentials_and_socks4_proxy(tmp_path):
     plan = build_proxy_runtime_plan(authenticated_http_proxy("http"))
     missing_credentials = authenticated_http_proxy("http")
     missing_credentials.pop("credentials")
-    socks_proxy = authenticated_http_proxy("socks5")
+    socks4_proxy = authenticated_http_proxy("socks4")
 
-    for proxy in (missing_credentials, socks_proxy):
+    for proxy in (missing_credentials, socks4_proxy):
         with pytest.raises(SidecarError) as exc_info:
             generate_proxy_auth_extension(tmp_path, "profile-id", proxy, plan)
 

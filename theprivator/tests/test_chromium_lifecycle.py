@@ -25,7 +25,6 @@ from theprivator_sidecar.protocol import (
     PROXY_AUTH_HELPER_FAILED,
     PROXY_LAUNCH_ARG_UNSAFE,
     PROXY_PROOF_FAILED,
-    PROXY_SOCKS_AUTH_UNSUPPORTED,
     SidecarError,
 )
 
@@ -222,7 +221,7 @@ def assert_composed_extension_allowlist(argv: list[str]) -> list[Path]:
     return extension_dirs
 
 
-def test_socks_proxy_credentials_fail_before_executable_discovery_or_spawn(tmp_path, monkeypatch):
+def test_socks5_proxy_credentials_launch_uses_auth_helper_without_argv_secret_leak(tmp_path, monkeypatch):
     profile = create_profile(tmp_path)
     ProfileStore(tmp_path).update_proxy(
         profile["id"],
@@ -238,28 +237,32 @@ def test_socks_proxy_credentials_fail_before_executable_discovery_or_spawn(tmp_p
             },
         },
     )
+    fake_chromium = make_fake_chromium(tmp_path)
+    argv_capture = tmp_path / "argv.json"
+    monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
+    monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_ARGV", str(argv_capture))
 
-    def fail_discover_executable():
-        raise AssertionError("SOCKS credential failure must happen before executable discovery")
+    launch = chromium.launch(tmp_path, profile["id"])
 
-    def fail_spawn(*args, **kwargs):
-        raise AssertionError("SOCKS credential failure must happen before spawning Chromium")
-
-    monkeypatch.setattr(chromium, "discover_executable", fail_discover_executable)
-    monkeypatch.setattr(chromium, "_spawn_chromium", fail_spawn)
-
-    with pytest.raises(SidecarError) as exc_info:
-        chromium.launch(tmp_path, profile["id"])
-
-    error = assert_sidecar_error(exc_info, PROXY_SOCKS_AUTH_UNSUPPORTED)
-    encoded_error = json.dumps(error.to_dict(), sort_keys=True)
-    assert "proxy-user-sentinel" not in encoded_error
-    assert "proxy-password-sentinel" not in encoded_error
-    assert chromium.RuntimeRegistry(tmp_path).read() == {}
-    assert not (tmp_path / "profile-store" / "runtime").exists()
-    stored_profile = read_profiles_payload(tmp_path)["profiles"][0]
-    assert stored_profile["proxy"]["mode"] == "fixedServer"
-    assert_no_runtime_truth(stored_profile)
+    try:
+        assert launch["status"] == "running"
+        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        joined = "\n".join(argv)
+        proxy_args = [arg for arg in argv if arg.startswith("--proxy-server=")]
+        assert len(proxy_args) == 1
+        assert proxy_args[0].startswith("--proxy-server=socks5://127.0.0.1:")
+        assert "proxy.example.invalid" not in proxy_args[0]
+        assert "@" not in proxy_args[0]
+        assert "proxy-user-sentinel" not in joined
+        assert "proxy-password-sentinel" not in joined
+        assert not [arg for arg in argv if arg.startswith("--load-extension=")]
+        assert not [arg for arg in argv if arg.startswith("--disable-extensions-except=")]
+        records = chromium.RuntimeRegistry(tmp_path).read()
+        record = records[profile["id"]]
+        assert record.proxy_bridge_pid is not None
+        assert chromium.is_process_alive(record.proxy_bridge_pid)
+    finally:
+        chromium.stop(tmp_path, profile["id"])
 
 
 def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_store_clean(

@@ -453,7 +453,7 @@ class Socks4ProxyFixture(BaseProxyFixture):
 
 
 class Socks5ProxyFixture(BaseProxyFixture):
-    """SOCKS5 no-auth proxy fixture."""
+    """SOCKS5 proxy fixture with optional username/password auth."""
 
     kind = "socks5"
 
@@ -575,11 +575,19 @@ class _Socks5ProxyHandler(socketserver.BaseRequestHandler):
                 raise _ProxyFixtureFailure(FAILURE_MALFORMED)
             method_count = _read_exact(self.request, 1)[0]
             methods = _read_exact(self.request, method_count)
-            if 0 not in methods:
-                fixture.record(phase="greeting", status="auth-unsupported")
-                self.request.sendall(b"\x05\xff")
-                return
-            self.request.sendall(b"\x05\x00")
+            if fixture.credentials is not None:
+                if 2 not in methods:
+                    fixture.record(phase="greeting", status="auth-failed")
+                    self.request.sendall(b"\x05\xff")
+                    return
+                self.request.sendall(b"\x05\x02")
+                _handle_socks5_username_password_auth(self.request, fixture)
+            else:
+                if 0 not in methods:
+                    fixture.record(phase="greeting", status="auth-unsupported")
+                    self.request.sendall(b"\x05\xff")
+                    return
+                self.request.sendall(b"\x05\x00")
             if _read_exact(self.request, 1) != b"\x05":
                 raise _ProxyFixtureFailure(FAILURE_MALFORMED)
             command = _read_exact(self.request, 1)
@@ -602,6 +610,21 @@ class _Socks5ProxyHandler(socketserver.BaseRequestHandler):
         finally:
             if upstream is not None:
                 upstream.close()
+
+
+def _handle_socks5_username_password_auth(sock: socket.socket, fixture: BaseProxyFixture) -> None:
+    if _read_exact(sock, 1) != b"\x01":
+        raise _ProxyFixtureFailure(FAILURE_MALFORMED)
+    username_length = _read_exact(sock, 1)[0]
+    username = _read_exact(sock, username_length).decode("utf-8", errors="strict")
+    password_length = _read_exact(sock, 1)[0]
+    password = _read_exact(sock, password_length).decode("utf-8", errors="strict")
+    if fixture.credentials != (username, password):
+        fixture.record(phase="auth", status="auth-failed")
+        sock.sendall(b"\x01\x01")
+        raise _ProxyFixtureFailure(FAILURE_AUTH)
+    fixture.record(phase="auth", status="accepted")
+    sock.sendall(b"\x01\x00")
 
 
 def collect_proxy_proof(
@@ -724,7 +747,12 @@ def create_proxy_fixture(
     if kind == "socks4":
         return Socks4ProxyFixture(target_host=target_host, target_port=target_port, target_address=target_address)
     if kind == "socks5":
-        return Socks5ProxyFixture(target_host=target_host, target_port=target_port, target_address=target_address)
+        return Socks5ProxyFixture(
+            target_host=target_host,
+            target_port=target_port,
+            target_address=target_address,
+            credentials=credentials,
+        )
     raise _invalid_proxy_case_error()
 
 
@@ -883,9 +911,21 @@ def _socks4_client_roundtrip(fixture: Socks4ProxyFixture, proof_case: ProxyProof
 def _socks5_client_roundtrip(fixture: Socks5ProxyFixture, proof_case: ProxyProofCase, *, timeout_seconds: float) -> HTTPStatus:
     with socket.create_connection(fixture.local_address, timeout=max(0.001, timeout_seconds)) as sock:
         sock.settimeout(max(0.001, timeout_seconds))
-        sock.sendall(b"\x05\x01\x00")
-        if _read_exact(sock, 2) != b"\x05\x00":
-            raise _connectivity_error()
+        if fixture.credentials is not None:
+            sock.sendall(b"\x05\x01\x02")
+            if _read_exact(sock, 2) != b"\x05\x02":
+                raise _connectivity_error()
+            username_bytes = fixture.credentials[0].encode("utf-8")
+            password_bytes = fixture.credentials[1].encode("utf-8")
+            if len(username_bytes) > 255 or len(password_bytes) > 255:
+                raise _connectivity_error()
+            sock.sendall(b"\x01" + bytes([len(username_bytes)]) + username_bytes + bytes([len(password_bytes)]) + password_bytes)
+            if _read_exact(sock, 2) != b"\x01\x00":
+                raise _connectivity_error()
+        else:
+            sock.sendall(b"\x05\x01\x00")
+            if _read_exact(sock, 2) != b"\x05\x00":
+                raise _connectivity_error()
         host_bytes = proof_case.target_host.encode("ascii")
         if len(host_bytes) > 255:
             raise _connectivity_error()
@@ -956,7 +996,7 @@ def _credentials_for_case(proof_case: ProxyProofCase) -> Optional[tuple[str, str
     credentials = proof_case.proxy.get("credentials")
     if credentials is None:
         return None
-    if proof_case.kind in _SOCKS_PROXY_KINDS:
+    if proof_case.kind == "socks4":
         raise _invalid_proxy_case_error()
     if not isinstance(credentials, Mapping):
         raise _invalid_proxy_case_error()

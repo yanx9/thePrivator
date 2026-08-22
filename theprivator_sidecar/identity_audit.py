@@ -217,6 +217,24 @@ def open_audit_page_for_profile(store_root: Any, profile_id: str, page_id: str) 
     )
 
 
+def collect_audit_results_for_profile(store_root: Any, profile_id: str) -> JsonObject:
+    """Collect bounded public checker page observations for sidebar display."""
+    profile = ProfileStore(store_root).get(profile_id)
+    plan = build_audit_plan(profile)
+    pages = plan.get("pages") if isinstance(plan, Mapping) else None
+    if not isinstance(pages, list):
+        _raise_audit_failed("Audit plan pages are unavailable.")
+
+    from . import chromium  # Imported lazily to keep catalog helpers cycle-free.
+
+    return chromium.collect_identity_audit_results(
+        store_root,
+        profile.id,
+        pages,
+        audit_version=AUDIT_VERSION,
+    )
+
+
 def build_audit_plan(profile: Any) -> JsonObject:
     """Build a safe, profile-specific manual audit plan.
 
@@ -482,6 +500,7 @@ __all__ = [
     "audit_catalog_payload",
     "audit_plan_for_profile",
     "build_audit_plan",
+    "collect_audit_results_for_profile",
     "get_audit_page",
     "open_audit_page_for_profile",
     "validate_audit_catalog",

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyProfileIdentityPreset,
   checkProfileProxy,
+  collectIdentityAuditResults,
   copyAutomationApiToken,
   createProfile,
   deleteProfile,
@@ -470,6 +471,7 @@ function proxyCheckIpHidingDirect(overrides: Record<string, unknown> = {}) {
     scope: "not-applicable",
     publicExitIpClaimed: false,
     publicExitIp: null,
+    publicExitLocation: null,
     localFixtureConclusion: "not-run",
     ...overrides,
   };
@@ -482,6 +484,7 @@ function proxyCheckIpHidingProved(overrides: Record<string, unknown> = {}) {
     scope: "local-fixture",
     publicExitIpClaimed: false,
     publicExitIp: null,
+    publicExitLocation: null,
     localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
     ...overrides,
   };
@@ -795,6 +798,47 @@ function auditOpenResult(overrides: Record<string, unknown> = {}) {
     launched: false,
     runningCount: 1,
     page: auditPage(),
+    ...overrides,
+  };
+}
+
+function auditPageResult(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "browserleaks-webgl",
+    label: "BrowserLeaks WebGL",
+    category: "browserleaks",
+    url: "https://browserleaks.com/webgl",
+    status: "captured",
+    capturedAt: "2026-05-04T18:08:00.000Z",
+    title: "BrowserLeaks WebGL Report",
+    summary: "WebGL vendor and renderer were visible on the checker page.",
+    extractedRows: [{ label: "WebGL Vendor", value: "Google Inc." }],
+    notes: [],
+    ...overrides,
+  };
+}
+
+function auditCollectResult(overrides: Record<string, unknown> = {}) {
+  const plan = auditPlanResult();
+  const pages = overrides.pages ?? (plan.pages as Array<Record<string, unknown>>).map((page) => auditPageResult({
+    id: page.id,
+    label: page.label,
+    category: page.category,
+    url: page.url,
+    status: page.requiresUserAction ? "needs-user-action" : "captured",
+    title: page.requiresUserAction ? "Manual test required" : `${page.label} result`,
+    summary: page.requiresUserAction ? "Open this checker in the profile and start the site test before reading results." : `${page.label} fields were captured.`,
+    extractedRows: page.requiresUserAction ? [] : [{ label: "Observed", value: "Public checker value" }],
+    notes: page.requiresUserAction ? ["This site requires a user-started public test."] : [],
+  }));
+  return {
+    auditVersion: 1,
+    profileId: AUDIT_PROFILE_ID,
+    status: "collected",
+    collectedAt: "2026-05-04T18:08:30.000Z",
+    launched: false,
+    runningCount: 1,
+    pages,
     ...overrides,
   };
 }
@@ -1268,7 +1312,7 @@ describe("sidecar client", () => {
     ["unknown route status", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofDirect({ status: "maybe" }) }))],
     ["proved route missing fixture", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofProved({ fixture: null }) }))],
     ["direct route has non-zero observations", proxyCheckEnvelope(proxyCheckResult({ routeProof: proxyCheckRouteProofDirect({ observationCounts: { proxy: 1, target: 0 } }) }))],
-    ["ip hiding public claim", proxyCheckEnvelope(proxyCheckResult({ ipHiding: proxyCheckIpHidingProved({ publicExitIpClaimed: true, publicExitIp: "203.0.113.1" }) }))],
+    ["ip hiding public claim", proxyCheckEnvelope(proxyCheckResult({ ipHiding: proxyCheckIpHidingProved({ publicExitIpClaimed: true, publicExitIp: null }) }))],
     ["malformed WebRTC warning", proxyCheckEnvelope(proxyCheckResult({ webRtc: proxyCheckWebRtcRestricted({ policy: "block", localIpExposure: "non-proxied-udp-disabled" }) }))],
     ["HTTP checker URL", () => {
       const result = cloneJson(proxyCheckResult()) as { publicCheckers: { pages: Array<Record<string, unknown>> } };
@@ -2287,8 +2331,28 @@ describe("sidecar client", () => {
     expect(JSON.stringify(existing)).not.toMatch(/pid|userDataDir|targetId|debugPort|webSocketDebuggerUrl|storeRoot|command|extensionDir|ws:\/\//i);
   });
 
+  it("collects bounded audit website results through a safe profile identifier only", async () => {
+    mockInvoke.mockResolvedValueOnce(auditEnvelope(auditCollectResult({ launched: true })));
+
+    const snapshot = await collectIdentityAuditResults(AUDIT_PROFILE_ID);
+
+    expect(mockInvoke).toHaveBeenCalledWith("identity_audit_collect", { profileId: AUDIT_PROFILE_ID });
+    expect(snapshot).toMatchObject({
+      auditVersion: 1,
+      profileId: AUDIT_PROFILE_ID,
+      status: "collected",
+      launched: true,
+      runningCount: 1,
+    });
+    expect(snapshot.pages).toHaveLength(9);
+    expect(snapshot.pages.find((page) => page.id === "cover-your-tracks")?.status).toBe("needs-user-action");
+    expect(snapshot.pages[0].extractedRows[0]).toMatchObject({ label: "Observed", value: "Public checker value" });
+    expect(JSON.stringify(snapshot)).not.toMatch(/pid|userDataDir|targetId|debugPort|webSocketDebuggerUrl|storeRoot|command|extensionDir|ws:\/\//i);
+  });
+
   it.each([
     ["empty profile id", null, () => getIdentityAuditPlan(" ")],
+    ["empty collect profile id", null, () => collectIdentityAuditResults(" ")],
     ["empty page id", null, () => openIdentityAuditPage(AUDIT_PROFILE_ID, "")],
     ["mismatched open profile id", () => auditEnvelope(auditOpenResult({ profileId: "22222222-2222-2222-2222-222222222222" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
     ["mismatched open page id", () => auditEnvelope(auditOpenResult({ pageId: "browserleaks-canvas" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
@@ -2304,6 +2368,13 @@ describe("sidecar client", () => {
       return auditEnvelope(plan);
     }, () => getIdentityAuditPlan(AUDIT_PROFILE_ID)],
     ["unknown audit page field", () => auditEnvelope(auditOpenResult({ targetId: "page-target" })), () => openIdentityAuditPage(AUDIT_PROFILE_ID, "browserleaks-webgl")],
+    ["unknown audit result field", () => auditEnvelope(auditCollectResult({ targetId: "page-target" })), () => collectIdentityAuditResults(AUDIT_PROFILE_ID)],
+    ["mismatched collect profile id", () => auditEnvelope(auditCollectResult({ profileId: "22222222-2222-2222-2222-222222222222" })), () => collectIdentityAuditResults(AUDIT_PROFILE_ID)],
+    ["unsafe audit result string", () => {
+      const result = cloneJson(auditCollectResult()) as unknown as { pages: Array<{ summary: string }> };
+      result.pages[0].summary = "Open ws://127.0.0.1:9222/json for details.";
+      return auditEnvelope(result);
+    }, () => collectIdentityAuditResults(AUDIT_PROFILE_ID)],
     ["unsafe audit guidance string", () => {
       const result = cloneJson(auditOpenResult()) as { page: { expectedRows: Array<Record<string, unknown>> } };
       result.page.expectedRows[0].guidance = "Open ws://127.0.0.1:9222/json for details.";

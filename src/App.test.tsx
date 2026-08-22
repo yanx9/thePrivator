@@ -201,6 +201,7 @@ function proxyCheckIpHidingDirect(overrides: Record<string, unknown> = {}) {
     scope: "not-applicable",
     publicExitIpClaimed: false,
     publicExitIp: null,
+    publicExitLocation: null,
     localFixtureConclusion: "not-run",
     ...overrides,
   };
@@ -213,6 +214,7 @@ function proxyCheckIpHidingProved(overrides: Record<string, unknown> = {}) {
     scope: "local-fixture",
     publicExitIpClaimed: false,
     publicExitIp: null,
+    publicExitLocation: null,
     localFixtureConclusion: "direct target IP hidden from the proof target by the managed fixture",
     ...overrides,
   };

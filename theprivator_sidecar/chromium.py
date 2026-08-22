@@ -10,12 +10,15 @@ lines, browser stdout/stderr, or environment values.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -38,6 +41,7 @@ from .proxy_auth_extension import (
     runtime_proxy_auth_extension_root,
 )
 from .profiles import STORE_DIR, ProfileRecord, ProfileStore, utc_now_iso
+from .proxy import FIXED_SERVER_PROXY_MODE, normalize_proxy_config
 from .protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
@@ -71,6 +75,8 @@ except ImportError:  # pragma: no cover - fallback remains for minimal installs.
 REGISTRY_VERSION = 1
 RUNTIME_DIR = "runtime"
 RUNTIME_FILE = "chromium-processes.json"
+PROXY_BRIDGE_DIR = "proxy-bridges"
+PROXY_BRIDGE_READY_TIMEOUT_SECONDS = 5.0
 GRACEFUL_STOP_TIMEOUT_SECONDS = 3.0
 FORCE_STOP_TIMEOUT_SECONDS = 2.0
 LAUNCH_LIVENESS_SETTLE_SECONDS = 0.05
@@ -111,6 +117,8 @@ IDENTITY_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 IDENTITY_CDP_APPLY_TIMEOUT_SECONDS = 10.0
 AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS = 10.0
 AUDIT_TARGET_OPEN_TIMEOUT_SECONDS = 5.0
+AUDIT_RESULT_CAPTURE_TIMEOUT_SECONDS = 6.0
+AUDIT_RESULT_READY_WAIT_MS = 2500
 _DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort"
 
 
@@ -123,6 +131,7 @@ class RuntimeRecord:
     started_at: str
     user_data_dir: str
     owner_token: str
+    proxy_bridge_pid: Optional[int] = None
 
     @classmethod
     def from_dict(cls, payload: Any) -> Optional["RuntimeRecord"]:
@@ -143,22 +152,34 @@ class RuntimeRecord:
             return None
         if not isinstance(owner_token, str):
             return None
+        proxy_bridge_pid = payload.get("proxyBridgePid")
+        if proxy_bridge_pid is not None and (not isinstance(proxy_bridge_pid, int) or proxy_bridge_pid <= 0):
+            return None
         return cls(
             profile_id=profile_id,
             pid=pid,
             started_at=started_at,
             user_data_dir=user_data_dir,
             owner_token=owner_token,
+            proxy_bridge_pid=proxy_bridge_pid,
         )
 
     def to_dict(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "profileId": self.profile_id,
             "pid": self.pid,
             "startedAt": self.started_at,
             "userDataDir": self.user_data_dir,
             "ownerToken": self.owner_token,
         }
+        if self.proxy_bridge_pid is not None:
+            payload["proxyBridgePid"] = self.proxy_bridge_pid
+        return payload
+
+@dataclass(frozen=True)
+class ProxyLaunchRuntime:
+    launch_args: list[str]
+    proxy_bridge_pid: Optional[int] = None
 
 
 class RuntimeRegistry:
@@ -289,6 +310,7 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
 
     extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
     proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
     args = build_launch_args(
         executable,
@@ -296,14 +318,15 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         "about:blank",
         extra_args=[
             *_runtime_launch_args(identity_plan, extension_artifact, proxy_auth_artifact),
-            *proxy_plan.launch_args,
+            *proxy_runtime.launch_args,
             *_proxy_proof_trust_args(),
         ],
     )
     if identity_plan.requires_cdp:
         _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
-    process = _spawn_chromium(args, owner_token=owner_token)
+    process: subprocess.Popen[Any] | None = None
     try:
+        process = _spawn_chromium(args, owner_token=owner_token)
         time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
         if process.poll() is not None or not is_process_alive(process.pid):
             _reap_if_child(process.pid)
@@ -320,12 +343,15 @@ def launch(store_root: Union[str, Path], profile_id: str) -> JsonObject:
             started_at=utc_now_iso(),
             user_data_dir=profile.storage.userDataDir,
             owner_token=owner_token,
+            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
         )
         updated = dict(active)
         updated[profile.id] = record
         registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
     except SidecarError:
-        _stop_child_after_failed_launch(process.pid)
+        if process is not None:
+            _stop_child_after_failed_launch(process.pid)
+        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
         raise
     return {**_running_payload(record), "runningCount": len(updated)}
 
@@ -366,6 +392,7 @@ def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> Json
 
     extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
     proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
     args = build_launch_args(
         executable,
@@ -378,13 +405,14 @@ def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> Json
                 proxy_auth_artifact,
                 force_remote_debugging=True,
             ),
-            *proxy_plan.launch_args,
+            *proxy_runtime.launch_args,
             *_proxy_proof_trust_args(),
         ],
     )
     _remove_stale_devtools_active_port(user_data_path, error_code=CHROMIUM_LAUNCH_FAILED)
-    process = _spawn_chromium(args, owner_token=owner_token)
+    process: subprocess.Popen[Any] | None = None
     try:
+        process = _spawn_chromium(args, owner_token=owner_token)
         time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
         if process.poll() is not None or not is_process_alive(process.pid):
             _reap_if_child(process.pid)
@@ -406,12 +434,15 @@ def launch_for_automation(store_root: Union[str, Path], profile_id: str) -> Json
             started_at=utc_now_iso(),
             user_data_dir=profile.storage.userDataDir,
             owner_token=owner_token,
+            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
         )
         updated = dict(active)
         updated[profile.id] = record
         registry.write(updated, error_code=CHROMIUM_LAUNCH_FAILED)
     except SidecarError:
-        _stop_child_after_failed_launch(process.pid)
+        if process is not None:
+            _stop_child_after_failed_launch(process.pid)
+        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
         raise
     return {
         "profileId": record.profile_id,
@@ -463,6 +494,48 @@ def open_identity_audit_page(
     )
 
 
+def collect_identity_audit_results(
+    store_root: Union[str, Path],
+    profile_id: str,
+    pages: Sequence[Mapping[str, Any]],
+    *,
+    audit_version: int,
+) -> JsonObject:
+    """Collect bounded observations from curated public checker pages."""
+    profile = _load_profile(store_root, profile_id)
+    proxy_plan = build_proxy_runtime_plan(profile.proxy)
+    audit_pages = [_safe_audit_page_metadata(page) for page in pages]
+    identity_plan = build_identity_runtime_plan(profile.identity)
+    registry = RuntimeRegistry(store_root)
+    records = registry.read()
+    active, _reconciled, changed = _reconcile_records(records)
+    if changed:
+        registry.write(active, error_code=IDENTITY_AUDIT_FAILED)
+
+    existing = active.get(profile.id)
+    if existing is not None and is_process_alive(existing.pid):
+        return _collect_identity_audit_results_for_running(
+            store_root,
+            profile,
+            identity_plan,
+            audit_pages,
+            audit_version=audit_version,
+            launched=False,
+            running_count=len(active),
+        )
+
+    return _launch_and_collect_identity_audit_results(
+        store_root,
+        profile,
+        identity_plan,
+        proxy_plan,
+        audit_pages,
+        audit_version=audit_version,
+        active=active,
+        registry=registry,
+    )
+
+
 
 def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     """Stop only the owned process tree for one stored profile."""
@@ -474,12 +547,14 @@ def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
         return _stopped_payload(profile, termination="already-stopped", running_count=_active_count(records))
 
     if not is_process_alive(record.pid):
+        _stop_proxy_bridge_for_record(record)
         updated = dict(records)
         updated.pop(profile.id, None)
         registry.write(updated)
         return _stopped_payload(profile, termination="reconciled", running_count=_active_count(updated))
 
     termination = _stop_process_tree(record.pid)
+    _stop_proxy_bridge_for_record(record)
     updated = dict(records)
     updated.pop(profile.id, None)
     registry.write(updated)
@@ -551,6 +626,135 @@ def _prepare_proxy_auth_extension(
         return None
     extension_root = runtime_proxy_auth_extension_root(store_root).resolve()
     return generate_proxy_auth_extension(extension_root, profile.id, profile.proxy, proxy_plan)
+
+
+def _prepare_proxy_launch_runtime(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    proxy_plan: ProxyRuntimePlan,
+) -> ProxyLaunchRuntime:
+    normalized = normalize_proxy_config(profile.proxy)
+    credentials = normalized.get("credentials")
+    if (
+        normalized.get("mode") == FIXED_SERVER_PROXY_MODE
+        and normalized.get("protocol") == "socks5"
+        and isinstance(credentials, Mapping)
+    ):
+        host = normalized.get("host")
+        port = normalized.get("port")
+        username = credentials.get("username")
+        password = credentials.get("password")
+        if not isinstance(host, str) or not isinstance(port, int) or not isinstance(username, str) or not isinstance(password, str):
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium proxy launch arguments could not be prepared.",
+            )
+        bridge = _spawn_socks5_proxy_bridge(store_root, profile.id, host, port, username, password)
+        return ProxyLaunchRuntime(
+            launch_args=[validate_proxy_server_launch_arg(f"{PROXY_SERVER_ARG_PREFIX}socks5://127.0.0.1:{bridge['port']}")],
+            proxy_bridge_pid=bridge["pid"],
+        )
+    return ProxyLaunchRuntime(launch_args=proxy_plan.launch_args)
+
+
+def _spawn_socks5_proxy_bridge(
+    store_root: Union[str, Path],
+    profile_id: str,
+    upstream_host: str,
+    upstream_port: int,
+    username: str,
+    password: str,
+) -> dict[str, int]:
+    bridge_root = Path(store_root) / STORE_DIR / RUNTIME_DIR / PROXY_BRIDGE_DIR / _profile_runtime_key(profile_id)
+    bridge_root.mkdir(parents=True, exist_ok=True)
+    nonce = uuid.uuid4().hex
+    config_path = bridge_root / f"bridge-{nonce}.json"
+    ready_path = bridge_root / f"bridge-{nonce}.ready.json"
+    config_payload = {
+        "bridgeVersion": 1,
+        "upstream": {"host": upstream_host, "port": upstream_port},
+        "credentials": {"username": username, "password": password},
+        "readyFile": str(ready_path),
+    }
+    config_path.write_text(json.dumps(config_payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        pass
+
+    args = _sidecar_subprocess_args("proxy-bridge", str(config_path))
+    try:
+        process = subprocess.Popen(  # noqa: S603 - command is this trusted sidecar executable/module.
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=platform.system() != "Windows",
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if platform.system() == "Windows" else 0,
+        )
+    except OSError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium proxy bridge could not be started.",
+        ) from exc
+
+    try:
+        ready = _wait_for_proxy_bridge_ready(ready_path, process)
+        try:
+            config_path.unlink()
+        except OSError:
+            pass
+        return {"pid": process.pid, "port": ready}
+    except SidecarError:
+        _stop_child_after_failed_launch(process.pid)
+        raise
+
+
+def _sidecar_subprocess_args(*args: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, "-m", "theprivator_sidecar", *args]
+
+
+def _wait_for_proxy_bridge_ready(ready_path: Path, process: subprocess.Popen[Any]) -> int:
+    deadline = time.monotonic() + PROXY_BRIDGE_READY_TIMEOUT_SECONDS
+    while time.monotonic() <= deadline:
+        if process.poll() is not None:
+            break
+        if ready_path.is_file():
+            try:
+                payload = json.loads(ready_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                payload = None
+            if isinstance(payload, Mapping) and payload.get("bridgeVersion") == 1:
+                host = payload.get("host")
+                port = payload.get("port")
+                if host == "127.0.0.1" and isinstance(port, int) and 1 <= port <= 65535:
+                    return port
+        time.sleep(0.025)
+    raise SidecarError(
+        code=CHROMIUM_LAUNCH_FAILED,
+        message="Chromium proxy bridge did not become ready.",
+    )
+
+
+def _profile_runtime_key(profile_id: str) -> str:
+    digest = hashlib.sha256(profile_id.encode("utf-8", errors="surrogatepass")).hexdigest()[:16]
+    return f"profile-{digest}"
+
+
+def _stop_proxy_bridge_pid(pid: Optional[int]) -> None:
+    if pid is None:
+        return
+    try:
+        _stop_process_tree(pid)
+    except SidecarError:
+        _reap_if_child(pid)
+
+
+def _stop_proxy_bridge_for_record(record: RuntimeRecord) -> None:
+    _stop_proxy_bridge_pid(record.proxy_bridge_pid)
 
 
 def _runtime_launch_args(
@@ -773,6 +977,41 @@ def create_audit_page_target_endpoint(endpoint: Any, **kwargs: Any) -> Any:
     return _create_page_target_endpoint(endpoint, **kwargs)
 
 
+def close_audit_page_target(endpoint: Any, target_id: str, **kwargs: Any) -> JsonObject:
+    """Lazy CDP close wrapper for audit-created page targets."""
+    try:
+        from .cdp import close_page_target as _close_page_target
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        ) from exc
+    return _close_page_target(endpoint, target_id, **kwargs)
+
+
+def capture_audit_page_text(page_endpoint: Any, **kwargs: Any) -> Any:
+    """Lazy CDP runtime wrapper for bounded public audit page capture."""
+    try:
+        from .cdp import CdpClient, runtime_evaluate
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        ) from exc
+    url = getattr(page_endpoint, "web_socket_debugger_url", None)
+    if not isinstance(url, str):
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP operation failed.",
+        )
+    with CdpClient(url, timeout_seconds=kwargs.get("timeout_seconds", AUDIT_RESULT_CAPTURE_TIMEOUT_SECONDS)) as client:
+        return runtime_evaluate(
+            client,
+            kwargs["expression"],
+            timeout_seconds=kwargs.get("timeout_seconds", AUDIT_RESULT_CAPTURE_TIMEOUT_SECONDS),
+        )
+
+
 def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_path: Path) -> None:
     if not identity_plan.requires_cdp:
         return
@@ -784,6 +1023,125 @@ def _apply_identity_cdp_if_needed(identity_plan: IdentityRuntimePlan, user_data_
         endpoint,
         identity_plan.cdp_overrides,
         timeout_seconds=IDENTITY_CDP_APPLY_TIMEOUT_SECONDS,
+    )
+
+
+def _collect_identity_audit_results_for_running(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+    audit_pages: Sequence[JsonObject],
+    *,
+    audit_version: int,
+    launched: bool,
+    running_count: int,
+) -> JsonObject:
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        endpoint = discover_devtools_endpoint(
+            user_data_path,
+            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+    except SidecarError as exc:
+        if exc.code == IDENTITY_CDP_FAILED:
+            raise SidecarError(
+                code=IDENTITY_AUDIT_FAILED,
+                message="Stop this profile and start the audit again so ThePrivator can attach its internal browser control endpoint.",
+            ) from exc
+        raise
+    _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+    return _audit_collect_payload(
+        profile,
+        audit_pages,
+        _collect_public_audit_targets(endpoint, audit_pages),
+        audit_version=audit_version,
+        launched=launched,
+        running_count=running_count,
+    )
+
+
+def _launch_and_collect_identity_audit_results(
+    store_root: Union[str, Path],
+    profile: ProfileRecord,
+    identity_plan: IdentityRuntimePlan,
+    proxy_plan: ProxyRuntimePlan,
+    audit_pages: Sequence[JsonObject],
+    *,
+    audit_version: int,
+    active: Mapping[str, RuntimeRecord],
+    registry: RuntimeRegistry,
+) -> JsonObject:
+    executable = discover_executable()
+    user_data_path = resolve_user_data_path(store_root, profile)
+    try:
+        user_data_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium user data directory could not be prepared.",
+        ) from exc
+
+    extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
+    proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
+    owner_token = uuid.uuid4().hex
+    args = build_launch_args(
+        executable,
+        user_data_path,
+        "about:blank",
+        extra_args=[
+            *_runtime_launch_args(
+                identity_plan,
+                extension_artifact,
+                proxy_auth_artifact,
+                force_remote_debugging=True,
+            ),
+            *proxy_runtime.launch_args,
+            *_proxy_proof_trust_args(),
+        ],
+    )
+    _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
+    process: subprocess.Popen[Any] | None = None
+    try:
+        process = _spawn_chromium(args, owner_token=owner_token)
+        time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
+        if process.poll() is not None or not is_process_alive(process.pid):
+            _reap_if_child(process.pid)
+            raise SidecarError(
+                code=CHROMIUM_LAUNCH_FAILED,
+                message="Chromium exited before it could be registered as running.",
+            )
+
+        endpoint = discover_devtools_endpoint(
+            user_data_path,
+            timeout_seconds=AUDIT_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
+        page_results = _collect_public_audit_targets(endpoint, audit_pages)
+
+        record = RuntimeRecord(
+            profile_id=profile.id,
+            pid=process.pid,
+            started_at=utc_now_iso(),
+            user_data_dir=profile.storage.userDataDir,
+            owner_token=owner_token,
+            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
+        )
+        updated = dict(active)
+        updated[profile.id] = record
+        registry.write(updated, error_code=IDENTITY_AUDIT_FAILED)
+    except SidecarError:
+        if process is not None:
+            _stop_child_after_failed_launch(process.pid)
+        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
+        raise
+    return _audit_collect_payload(
+        profile,
+        audit_pages,
+        page_results,
+        audit_version=audit_version,
+        launched=True,
+        running_count=len(updated),
     )
 
 
@@ -843,6 +1201,7 @@ def _launch_and_open_identity_audit_page(
 
     extension_artifact = _prepare_identity_extension(store_root, profile, identity_plan)
     proxy_auth_artifact = _prepare_proxy_auth_extension(store_root, profile, proxy_plan)
+    proxy_runtime = _prepare_proxy_launch_runtime(store_root, profile, proxy_plan)
     owner_token = uuid.uuid4().hex
     args = build_launch_args(
         executable,
@@ -855,13 +1214,14 @@ def _launch_and_open_identity_audit_page(
                 proxy_auth_artifact,
                 force_remote_debugging=True,
             ),
-            *proxy_plan.launch_args,
+            *proxy_runtime.launch_args,
             *_proxy_proof_trust_args(),
         ],
     )
     _remove_stale_devtools_active_port(user_data_path, error_code=IDENTITY_AUDIT_FAILED)
-    process = _spawn_chromium(args, owner_token=owner_token)
+    process: subprocess.Popen[Any] | None = None
     try:
+        process = _spawn_chromium(args, owner_token=owner_token)
         time.sleep(LAUNCH_LIVENESS_SETTLE_SECONDS)
         if process.poll() is not None or not is_process_alive(process.pid):
             _reap_if_child(process.pid)
@@ -883,12 +1243,15 @@ def _launch_and_open_identity_audit_page(
             started_at=utc_now_iso(),
             user_data_dir=profile.storage.userDataDir,
             owner_token=owner_token,
+            proxy_bridge_pid=proxy_runtime.proxy_bridge_pid,
         )
         updated = dict(active)
         updated[profile.id] = record
         registry.write(updated, error_code=IDENTITY_AUDIT_FAILED)
     except SidecarError:
-        _stop_child_after_failed_launch(process.pid)
+        if process is not None:
+            _stop_child_after_failed_launch(process.pid)
+        _stop_proxy_bridge_pid(proxy_runtime.proxy_bridge_pid)
         raise
     return _audit_open_payload(
         profile,
@@ -929,6 +1292,286 @@ def _open_public_audit_target(endpoint: Any, audit_page: Mapping[str, Any]) -> N
         allowed_public_urls={url},
         timeout_seconds=AUDIT_TARGET_OPEN_TIMEOUT_SECONDS,
     )
+
+
+def _collect_public_audit_targets(endpoint: Any, audit_pages: Sequence[JsonObject]) -> list[JsonObject]:
+    allowed_urls = {page["url"] for page in audit_pages if isinstance(page.get("url"), str)}
+    return [_collect_public_audit_target(endpoint, page, allowed_urls=allowed_urls) for page in audit_pages]
+
+
+def _collect_public_audit_target(endpoint: Any, audit_page: JsonObject, *, allowed_urls: set[str]) -> JsonObject:
+    page_id = audit_page.get("id")
+    label = audit_page.get("label")
+    category = audit_page.get("category")
+    url = audit_page.get("url")
+    if not all(isinstance(value, str) and value for value in (page_id, label, category, url)):
+        raise _audit_error()
+
+    if audit_page.get("requiresUserAction") is True:
+        return _audit_page_result(
+            audit_page,
+            status="needs-user-action",
+            title="Manual test required",
+            summary="Open this checker in the profile and start the site test before reading results.",
+            rows=[],
+            notes=["This site requires a user-started public test."],
+        )
+
+    target = None
+    try:
+        target = create_audit_page_target_endpoint(
+            endpoint,
+            target_url=url,
+            allowed_public_urls=allowed_urls,
+            timeout_seconds=AUDIT_TARGET_OPEN_TIMEOUT_SECONDS,
+        )
+        capture = capture_audit_page_text(
+            target,
+            expression=_audit_capture_expression(audit_page),
+            timeout_seconds=AUDIT_RESULT_CAPTURE_TIMEOUT_SECONDS,
+        )
+        return _audit_capture_to_page_result(audit_page, capture)
+    except SidecarError:
+        return _audit_page_result(
+            audit_page,
+            status="unavailable",
+            title="No result captured",
+            summary="The checker could not be read safely in this profile session.",
+            rows=[],
+            notes=["Refresh after the profile finishes loading, or open the checker manually."],
+        )
+    finally:
+        target_id = getattr(target, "target_id", None)
+        if isinstance(target_id, str):
+            try:
+                close_audit_page_target(endpoint, target_id, timeout_seconds=1.0)
+            except SidecarError:
+                pass
+
+
+def _audit_capture_expression(audit_page: Mapping[str, Any]) -> str:
+    surfaces = audit_page.get("surfaces") if isinstance(audit_page.get("surfaces"), list) else []
+    keyword_map = {
+        "browser": ["user agent", "browser", "chrome", "chromium"],
+        "clientHints": ["client hints", "platform", "architecture", "bitness", "mobile"],
+        "navigator": ["navigator", "hardware", "device memory", "platform"],
+        "screen": ["screen", "viewport", "resolution", "color depth"],
+        "locale": ["language", "timezone", "locale", "intl"],
+        "canvas": ["canvas", "hash", "signature"],
+        "webgl": ["webgl", "vendor", "renderer", "gpu"],
+        "audio": ["audio", "sample", "hash"],
+        "webrtc": ["webrtc", "rtc", "candidate", "local ip", "public ip"],
+    }
+    keywords: list[str] = []
+    for surface in surfaces:
+        if isinstance(surface, str):
+            keywords.extend(keyword_map.get(surface, []))
+    if not keywords:
+        keywords = ["fingerprint", "browser", "privacy"]
+    keywords_json = json.dumps(sorted(set(keywords)), ensure_ascii=False)
+    ready_wait = int(AUDIT_RESULT_READY_WAIT_MS)
+    return f"""
+(() => new Promise((resolve) => {{
+  const KEYWORDS = {keywords_json};
+  const MAX_ROWS = 14;
+  const MAX_LINES = 8;
+  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  const rows = [];
+  const seen = new Set();
+  const pushRow = (label, value) => {{
+    const safeLabel = clean(label).slice(0, 96);
+    const safeValue = clean(value).slice(0, 360);
+    if (!safeLabel || !safeValue || safeLabel === safeValue) return;
+    const key = `${{safeLabel}}\u0000${{safeValue}}`;
+    if (seen.has(key) || rows.length >= MAX_ROWS) return;
+    seen.add(key);
+    rows.push({{ label: safeLabel, value: safeValue }});
+  }};
+  const collect = () => {{
+    document.querySelectorAll("tr").forEach((row) => {{
+      const cells = Array.from(row.querySelectorAll("th,td")).map((cell) => clean(cell.innerText));
+      if (cells.length >= 2) pushRow(cells[0], cells.slice(1).join(" · "));
+    }});
+    document.querySelectorAll("dl").forEach((list) => {{
+      const terms = Array.from(list.querySelectorAll("dt"));
+      terms.forEach((term) => {{
+        const value = term.nextElementSibling;
+        if (value) pushRow(term.innerText, value.innerText);
+      }});
+    }});
+    const lines = clean(document.body ? document.body.innerText : "")
+      .split(/(?<=[.!?])\\s+|\\n+/)
+      .map(clean)
+      .filter((line) => line.length >= 8 && line.length <= 220);
+    const summaryLines = [];
+    for (const line of lines) {{
+      const lowered = line.toLowerCase();
+      if (KEYWORDS.some((keyword) => lowered.includes(keyword)) && !summaryLines.includes(line)) {{
+        summaryLines.push(line);
+      }}
+      if (summaryLines.length >= MAX_LINES) break;
+    }}
+    resolve({{
+      title: clean(document.title).slice(0, 140),
+      readyState: document.readyState,
+      rows,
+      summaryLines,
+    }});
+  }};
+  let settled = false;
+  const settle = () => {{
+    if (settled) return;
+    settled = true;
+    setTimeout(collect, 350);
+  }};
+  if (document.readyState === "complete" || document.readyState === "interactive") settle();
+  else window.addEventListener("load", settle, {{ once: true }});
+  setTimeout(settle, {ready_wait});
+}}))
+"""
+
+
+def _audit_capture_to_page_result(audit_page: JsonObject, capture: Any) -> JsonObject:
+    if not isinstance(capture, Mapping):
+        return _audit_page_result(
+            audit_page,
+            status="unavailable",
+            title="No result captured",
+            summary="The checker returned no readable public result.",
+            rows=[],
+            notes=["Refresh after the public page finishes loading."],
+        )
+    rows = _audit_capture_rows(capture.get("rows"))
+    summary_lines = _audit_capture_lines(capture.get("summaryLines"))
+    title = _safe_audit_result_text(capture.get("title"), fallback="Checker result")
+    summary = _safe_audit_result_text(" ".join(summary_lines[:2]), fallback="Loaded, but no matching result text was found.", max_length=420)
+    notes = [] if rows or summary_lines else ["No matching fingerprint fields were found on the public page."]
+    return _audit_page_result(
+        audit_page,
+        status="captured" if rows or summary_lines else "unavailable",
+        title=title,
+        summary=summary,
+        rows=rows,
+        notes=notes,
+    )
+
+
+def _audit_capture_rows(value: Any) -> list[JsonObject]:
+    if not isinstance(value, list):
+        return []
+    rows: list[JsonObject] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        label = _safe_audit_result_text(item.get("label"), fallback="")
+        row_value = _safe_audit_result_text(item.get("value"), fallback="", max_length=420)
+        if not label or not row_value:
+            continue
+        rows.append({"label": label, "value": row_value})
+        if len(rows) >= 12:
+            break
+    return rows
+
+
+def _audit_capture_lines(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    lines: list[str] = []
+    for item in value:
+        text = _safe_audit_result_text(item, fallback="", max_length=240)
+        if text and text not in lines:
+            lines.append(text)
+        if len(lines) >= 6:
+            break
+    return lines
+
+
+def _audit_page_result(
+    audit_page: Mapping[str, Any],
+    *,
+    status: str,
+    title: str,
+    summary: str,
+    rows: Sequence[Mapping[str, Any]],
+    notes: Sequence[str],
+) -> JsonObject:
+    page_id = audit_page.get("id")
+    label = audit_page.get("label")
+    category = audit_page.get("category")
+    url = audit_page.get("url")
+    if not all(isinstance(value, str) and value for value in (page_id, label, category, url)):
+        raise _audit_error()
+    return {
+        "id": page_id,
+        "label": label,
+        "category": category,
+        "url": url,
+        "status": status,
+        "capturedAt": utc_now_iso(),
+        "title": _safe_audit_result_text(title, fallback="Checker result"),
+        "summary": _safe_audit_result_text(summary, fallback="No readable public result was captured.", max_length=420),
+        "extractedRows": [dict(row) for row in rows][:12],
+        "notes": [_safe_audit_result_text(note, fallback="Audit note", max_length=180) for note in notes[:4]],
+    }
+
+
+def _safe_audit_result_text(value: Any, *, fallback: str, max_length: int = 160) -> str:
+    if not isinstance(value, str):
+        value = fallback
+    text = value.strip() or fallback
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"wss?://[^\s;\"']+", "[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:127\.0\.0\.1|0\.0\.0\.0|localhost)\b", "[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r":(?:[0-9]{2,5})\b", ":[redacted]", text)
+    text = re.sub(r"(?:/[A-Za-z0-9._-]+){2,}", "[redacted]", text)
+    for marker in (
+        "DevToolsActivePort",
+        "remote-debugging-port",
+        "debug port",
+        "websocket",
+        "target id",
+        "targetId",
+        "raw argv",
+        "user-data-dir",
+        "profile-store",
+        "Traceback",
+        "proxy username",
+        "proxy password",
+        "proxy-username",
+        "proxy-password",
+        "proxyusername",
+        "proxypassword",
+        "credentials",
+        "username=",
+        "password=",
+        "token=",
+        "secret=",
+    ):
+        text = re.sub(re.escape(marker), "[redacted]", text, flags=re.IGNORECASE)
+    text = "".join(character for character in text if ord(character) >= 32 and ord(character) != 127)
+    return text[:max_length].strip() or fallback
+
+
+def _audit_collect_payload(
+    profile: ProfileRecord,
+    audit_pages: Sequence[JsonObject],
+    page_results: Sequence[JsonObject],
+    *,
+    audit_version: int,
+    launched: bool,
+    running_count: int,
+) -> JsonObject:
+    if len(page_results) != len(audit_pages):
+        raise _audit_error()
+    return {
+        "auditVersion": audit_version,
+        "profileId": profile.id,
+        "status": "collected",
+        "collectedAt": utc_now_iso(),
+        "launched": launched,
+        "runningCount": running_count,
+        "pages": [dict(page) for page in page_results],
+    }
 
 
 def _audit_open_payload(
@@ -1212,11 +1855,13 @@ def _reconcile_records(
     changed = False
     for profile_id, record in sorted(records.items(), key=lambda item: item[0]):
         if known_profiles is not None and profile_id not in known_profiles:
+            _stop_proxy_bridge_for_record(record)
             changed = True
             continue
         if is_process_alive(record.pid):
             active[profile_id] = record
         else:
+            _stop_proxy_bridge_for_record(record)
             reconciled.append(_reconciled_payload(record))
             changed = True
     return active, reconciled, changed

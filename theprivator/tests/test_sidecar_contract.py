@@ -610,6 +610,7 @@ def test_profiles_proxy_check_direct_profile_returns_safe_not_proven_contract(tm
         "scope": "not-applicable",
         "publicExitIpClaimed": False,
         "publicExitIp": None,
+        "publicExitLocation": None,
         "localFixtureConclusion": "not-run",
     }
     assert result["publicCheckers"]["status"] == "advisory-only"
@@ -633,9 +634,7 @@ def test_profiles_proxy_check_direct_profile_returns_safe_not_proven_contract(tm
         assert marker not in combined
 
 
-def test_profiles_proxy_check_socks_credentials_fail_with_persisted_diagnostic(tmp_path):
-    from theprivator_sidecar.diagnostics import lookup_by_detail_ref
-
+def test_profiles_proxy_check_socks_credentials_return_safe_success_contract(tmp_path):
     store_root = str(tmp_path / "proxy-check-socks-app-data-should-not-leak")
     create_proc = run_sidecar(
         request_line(
@@ -684,25 +683,22 @@ def test_profiles_proxy_check_socks_credentials_fail_with_persisted_diagnostic(t
 
     response = parse_ndjson(proc.stdout)[0]
     diagnostic = parse_ndjson(proc.stderr)[0]
-    error = assert_error_envelope(response, "PROXY_SOCKS_AUTH_UNSUPPORTED", "proxy-check-socks")
+    assert response["id"] == "proxy-check-socks"
+    assert response["ok"] is True
+    result = response["result"]
+    assert result["routeProof"]["status"] == "proved"
+    assert result["routeProof"]["protocol"] == "socks5"
+    assert result["routeProof"]["credentialState"] == "configured"
+    assert result["proxy"]["credentialState"] == "configured"
+    assert result["ipHiding"]["publicExitLocation"] is None
     assert diagnostic["method"] == "profiles.proxy.check"
-    assert diagnostic["status"] == "error"
-    assert diagnostic["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
-    assert diagnostic["detailRef"] == error["detailRef"]
-    lookup = lookup_by_detail_ref(store_root, error["detailRef"])
-    assert lookup["found"] is True
-    assert len(lookup["entries"]) == 1
-    entry = lookup["entries"][0]
-    assert set(entry) == PERSISTED_REQUEST_DIAGNOSTIC_KEYS
-    assert entry["method"] == "profiles.proxy.check"
-    assert entry["requestId"] == "proxy-check-socks"
-    assert entry["errorCode"] == "PROXY_SOCKS_AUTH_UNSUPPORTED"
-    assert entry["detailRef"] == error["detailRef"]
-    assert not Path(store_root, "profile-store", "runtime").exists()
+    assert diagnostic["status"] == "ok"
+    assert diagnostic["errorCode"] is None
+    assert diagnostic["detailRef"] is None
     combined = create_proc.stdout + create_proc.stderr + update_proc.stdout + update_proc.stderr + proc.stdout + proc.stderr
-    assert_no_proxy_secret_values(combined + json.dumps(lookup, sort_keys=True))
+    assert_no_proxy_secret_values(combined)
     for marker in FORBIDDEN_PROXY_RUNTIME_MARKERS:
-        assert marker not in combined + json.dumps(lookup, sort_keys=True)
+        assert marker not in combined
 
 
 def test_profiles_create_list_update_delete_persist_across_fresh_sidecar_invocations(tmp_path):
@@ -1302,6 +1298,16 @@ def test_profiles_duplicate_invalid_not_found_and_corrupt_store_use_typed_error_
             "method": "identity.audit.open",
             "params": {"storeRoot": "root", "profileId": "profile-id", "pageId": 42},
         },
+        {
+            "id": "audit-collect-missing-store",
+            "method": "identity.audit.collect",
+            "params": {"profileId": "profile-id"},
+        },
+        {
+            "id": "audit-collect-blank-profile",
+            "method": "identity.audit.collect",
+            "params": {"storeRoot": "root", "profileId": "   "},
+        },
     ],
 )
 def test_profiles_malformed_params_return_invalid_request(payload):
@@ -1381,7 +1387,7 @@ def test_proxy_runtime_diagnostics_keep_only_safe_failure_metadata(tmp_path):
         assert marker not in log_text
 
 
-def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnostic(tmp_path):
+def test_socks4_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnostic(tmp_path):
     from theprivator_sidecar.diagnostics import lookup_by_detail_ref
 
     store_root = str(tmp_path / "fixed-proxy-launch-app-data-should-not-leak")
@@ -1406,7 +1412,7 @@ def test_socks_proxy_credentials_chromium_launch_fails_before_spawn_with_diagnos
                     "proxy": {
                         "proxyVersion": 1,
                         "mode": "fixedServer",
-                        "protocol": "socks5",
+                        "protocol": "socks4",
                         "host": "proxy.example.invalid",
                         "port": 9050,
                         "credentials": {

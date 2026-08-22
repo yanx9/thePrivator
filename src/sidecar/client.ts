@@ -40,10 +40,14 @@ import type {
   JsonValue,
   BrowserClientHints,
   IdentityAuditCategory,
+  IdentityAuditCollectResult,
+  IdentityAuditCollectSnapshot,
+  IdentityAuditCollectedRow,
   IdentityAuditExpectedRow,
   IdentityAuditOpenResult,
   IdentityAuditOpenSnapshot,
   IdentityAuditPage,
+  IdentityAuditPageResult,
   IdentityAuditPlanCopy,
   IdentityAuditPlanResult,
   IdentityAuditPlanSnapshot,
@@ -843,6 +847,19 @@ export async function openIdentityAuditPage(profileId: string, pageId: string): 
   }
 }
 
+export async function collectIdentityAuditResults(profileId: string): Promise<IdentityAuditCollectSnapshot> {
+  try {
+    const safeProfileId = requireAuditClientId(profileId, "profileId");
+    const envelope = await invoke<unknown>("identity_audit_collect", { profileId: safeProfileId });
+    return parseIdentityAuditCollectEnvelope(envelope, new Date().toISOString(), safeProfileId);
+  } catch (error) {
+    if (isSidecarClientError(error)) {
+      throw error;
+    }
+    throw normalizeSidecarError(error);
+  }
+}
+
 export async function applyProfileIdentityPreset(
   profileId: string,
   presetId: string,
@@ -1360,6 +1377,24 @@ function parseIdentityAuditOpenEnvelope(
 ): IdentityAuditOpenSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityAuditOpenResult(envelope.result, requestedProfileId, requestedPageId);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseIdentityAuditCollectEnvelope(
+  value: unknown,
+  receivedAt: string,
+  requestedProfileId: string,
+): IdentityAuditCollectSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentityAuditCollectResult(envelope.result, requestedProfileId);
 
   return {
     requestId: formatRequestId(envelope.requestId),
@@ -2144,15 +2179,21 @@ function parseProxyCheckObservationCounts(value: unknown, status: string): Proxy
 function parseProxyCheckIpHiding(value: unknown): ProxyCheckIpHiding {
   const record = requireRecord(value, "The sidecar proxy check ipHiding result must be an object.");
   assertNoForbiddenProxyCheckFields(record, "ipHiding");
-  requireExactProxyCheckKeys(record, ["status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "localFixtureConclusion"], "ipHiding");
+  requireExactProxyCheckKeys(record, ["status", "basis", "scope", "publicExitIpClaimed", "publicExitIp", "publicExitLocation", "localFixtureConclusion"], "ipHiding");
   const status = requireProxyCheckIpHidingStatus(record.status, "ipHiding.status");
   const basis = requireProxyCheckIpHidingBasis(record.basis, "ipHiding.basis");
   const scope = requireProxyCheckScope(record.scope, "ipHiding.scope");
-  const publicExitIpClaimed = requireLiteralBoolean(record.publicExitIpClaimed, "ipHiding.publicExitIpClaimed", false);
-  if (record.publicExitIp !== null) {
-    throw makeProtocolError("The sidecar proxy check ipHiding.publicExitIp must be null because public exit IP is advisory-only.");
-  }
+  const publicExitIpClaimed = requireBoolean(record.publicExitIpClaimed, "ipHiding.publicExitIpClaimed");
+  const publicExitIp = record.publicExitIp === null ? null : requireProxyCheckSafeText(record.publicExitIp, "ipHiding.publicExitIp", { maxLength: 64 });
+  const publicExitLocation = parseProxyCheckPublicExitLocation(record.publicExitLocation);
   const localFixtureConclusion = requireProxyCheckLocalFixtureConclusion(record.localFixtureConclusion, "ipHiding.localFixtureConclusion");
+
+  if (publicExitIpClaimed !== Boolean(publicExitIp)) {
+    throw makeProtocolError("The sidecar proxy check public exit IP claim was malformed.");
+  }
+  if (publicExitLocation !== null && publicExitIp === null) {
+    throw makeProtocolError("The sidecar proxy check public exit location requires a public exit IP.");
+  }
 
   if (status === "not-proven") {
     if (basis !== "direct-profile" || scope !== "not-applicable" || localFixtureConclusion !== "not-run") {
@@ -2167,8 +2208,25 @@ function parseProxyCheckIpHiding(value: unknown): ProxyCheckIpHiding {
     basis,
     scope,
     publicExitIpClaimed,
-    publicExitIp: null,
+    publicExitIp,
+    publicExitLocation,
     localFixtureConclusion,
+  };
+}
+
+function parseProxyCheckPublicExitLocation(value: unknown): ProxyCheckIpHiding["publicExitLocation"] {
+  if (value === null) {
+    return null;
+  }
+  const record = requireRecord(value, "The sidecar proxy check public exit location must be null or an object.");
+  assertNoForbiddenProxyCheckFields(record, "ipHiding.publicExitLocation");
+  requireExactProxyCheckKeys(record, ["country", "region", "city", "timezone", "isp"], "ipHiding.publicExitLocation");
+  return {
+    country: record.country === null ? null : requireProxyCheckSafeText(record.country, "ipHiding.publicExitLocation.country", { maxLength: 128 }),
+    region: record.region === null ? null : requireProxyCheckSafeText(record.region, "ipHiding.publicExitLocation.region", { maxLength: 128 }),
+    city: record.city === null ? null : requireProxyCheckSafeText(record.city, "ipHiding.publicExitLocation.city", { maxLength: 128 }),
+    timezone: record.timezone === null ? null : requireProxyCheckSafeText(record.timezone, "ipHiding.publicExitLocation.timezone", { maxLength: 128 }),
+    isp: record.isp === null ? null : requireProxyCheckSafeText(record.isp, "ipHiding.publicExitLocation.isp", { maxLength: 128 }),
   };
 }
 
@@ -2326,6 +2384,105 @@ function parseIdentityAuditOpenResult(value: unknown, requestedProfileId: string
     runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
     page,
   };
+}
+
+function parseIdentityAuditCollectResult(value: unknown, requestedProfileId: string): IdentityAuditCollectResult {
+  const record = requireRecord(value, "The sidecar identity audit collect result must be an object.");
+  assertNoForbiddenAuditFields(record, "identityAuditCollect");
+  requireExactAuditKeys(
+    record,
+    ["auditVersion", "profileId", "status", "collectedAt", "launched", "runningCount", "pages"],
+    "identityAuditCollect",
+  );
+  requireLiteralNumber(record.auditVersion, "auditVersion", 1);
+  const profileId = requireAuditClientId(record.profileId, "profileId");
+  if (profileId !== requestedProfileId) {
+    throw makeProtocolError("The sidecar identity audit collect profileId did not match the request.");
+  }
+  requireLiteral(record.status, "status", "collected");
+  return {
+    auditVersion: 1,
+    profileId,
+    status: "collected",
+    collectedAt: requireIsoTimestamp(record.collectedAt, "collectedAt"),
+    launched: requireBoolean(record.launched, "launched"),
+    runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
+    pages: parseIdentityAuditPageResults(record.pages),
+  };
+}
+
+function parseIdentityAuditPageResults(value: unknown): IdentityAuditPageResult[] {
+  if (!Array.isArray(value)) {
+    throw makeProtocolError("The sidecar identity audit result pages field must be an array.");
+  }
+  if (value.length !== IDENTITY_AUDIT_CATALOG.length) {
+    throw makeProtocolError("The sidecar identity audit result page count does not match the fixed catalog.");
+  }
+  const seen = new Set<string>();
+  const pages = value.map((item, index) => {
+    const page = parseIdentityAuditPageResult(item, `pages[${index}]`);
+    if (seen.has(page.id)) {
+      throw makeProtocolError("The sidecar identity audit result contains duplicate page ids.");
+    }
+    seen.add(page.id);
+    return page;
+  });
+  for (const expected of IDENTITY_AUDIT_CATALOG) {
+    if (!seen.has(expected.id)) {
+      throw makeProtocolError("The sidecar identity audit result is missing a fixed page id.");
+    }
+  }
+  return pages;
+}
+
+function parseIdentityAuditPageResult(value: unknown, field: string): IdentityAuditPageResult {
+  const record = requireRecord(value, `The sidecar identity audit result field ${field} must be an object.`);
+  assertNoForbiddenAuditFields(record, field);
+  requireExactAuditKeys(record, ["id", "label", "category", "url", "status", "capturedAt", "title", "summary", "extractedRows", "notes"], field);
+  const id = requireAuditClientId(record.id, `${field}.id`);
+  const expected = IDENTITY_AUDIT_CATALOG_BY_ID.get(id);
+  if (!expected) {
+    throw makeProtocolError(`The sidecar identity audit result field ${field}.id is not in the fixed catalog.`);
+  }
+  const category = requireIdentityAuditCategory(record.category, `${field}.category`);
+  if (category !== expected.category) {
+    throw makeProtocolError(`The sidecar identity audit result field ${field}.category does not match the fixed catalog.`);
+  }
+  return {
+    id,
+    label: requireAuditSafeText(record.label, `${field}.label`, { maxLength: 128 }),
+    category,
+    url: requireIdentityAuditUrl(record.url, expected.url, `${field}.url`),
+    status: requireIdentityAuditPageResultStatus(record.status, `${field}.status`),
+    capturedAt: requireIsoTimestamp(record.capturedAt, `${field}.capturedAt`),
+    title: requireAuditSafeText(record.title, `${field}.title`, { maxLength: 160 }),
+    summary: requireAuditSafeText(record.summary, `${field}.summary`, { maxLength: 420 }),
+    extractedRows: parseIdentityAuditCollectedRows(record.extractedRows, `${field}.extractedRows`),
+    notes: parseIdentityAuditResultNotes(record.notes, `${field}.notes`),
+  };
+}
+
+function parseIdentityAuditCollectedRows(value: unknown, field: string): IdentityAuditCollectedRow[] {
+  if (!Array.isArray(value) || value.length > 12) {
+    throw makeProtocolError(`The sidecar identity audit result field ${field} must be a bounded array.`);
+  }
+  return value.map((item, index) => {
+    const rowField = `${field}[${index}]`;
+    const record = requireRecord(item, `The sidecar identity audit result field ${rowField} must be an object.`);
+    assertNoForbiddenAuditFields(record, rowField);
+    requireExactAuditKeys(record, ["label", "value"], rowField);
+    return {
+      label: requireAuditSafeText(record.label, `${rowField}.label`, { maxLength: 160 }),
+      value: requireAuditSafeText(record.value, `${rowField}.value`, { maxLength: 420 }),
+    };
+  });
+}
+
+function parseIdentityAuditResultNotes(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > 4) {
+    throw makeProtocolError(`The sidecar identity audit result field ${field} must be a bounded array.`);
+  }
+  return value.map((item, index) => requireAuditSafeText(item, `${field}[${index}]`, { maxLength: 180 }));
 }
 
 function parseIdentityAuditCopy(value: unknown): IdentityAuditPlanCopy {
@@ -3115,6 +3272,13 @@ function requireIdentityAuditCategory(value: unknown, field: string): IdentityAu
     return value;
   }
   throw makeProtocolError(`The sidecar identity audit field ${field} must be a known category.`);
+}
+
+function requireIdentityAuditPageResultStatus(value: unknown, field: string): "captured" | "needs-user-action" | "unavailable" {
+  if (value === "captured" || value === "needs-user-action" || value === "unavailable") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity audit field ${field} must be a known result status.`);
 }
 
 function requireIdentityAuditUrl(value: unknown, expectedUrl: string, field: string): string {
