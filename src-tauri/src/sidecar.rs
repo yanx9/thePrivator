@@ -1,13 +1,13 @@
 use crate::diagnostics::{DiagnosticStore, StderrPersistOutcome};
+use crate::sidecar_pool::SidecarPool;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
     path::PathBuf,
-    process::{Command as StdCommand, Stdio},
+    process::Command as StdCommand,
     sync::atomic::{AtomicU64, Ordering},
-    thread,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
@@ -115,14 +115,23 @@ pub trait SidecarRunner: Send + Sync {
 pub struct TauriSidecarRunner {
     app: tauri::AppHandle,
     diagnostics_store: Option<DiagnosticStore>,
+    pool: Arc<SidecarPool>,
 }
 
 impl TauriSidecarRunner {
     pub fn new(app: tauri::AppHandle) -> Self {
         let diagnostics_store = DiagnosticStore::from_app_data_dir(app.path().app_data_dir()).ok();
+        // The pool is managed state so workers survive between commands. A
+        // private pool is used if it is missing, which keeps this constructible
+        // outside a fully built app; it just loses the reuse.
+        let pool = app
+            .try_state::<Arc<SidecarPool>>()
+            .map(|state| state.inner().clone())
+            .unwrap_or_else(|| Arc::new(SidecarPool::new()));
         Self {
             app,
             diagnostics_store,
+            pool,
         }
     }
 }
@@ -134,16 +143,23 @@ impl SidecarRunner for TauriSidecarRunner {
         request_line: String,
         timeout: Duration,
     ) -> Result<SidecarProcessOutput, SidecarRunnerError> {
-        let shell_command = self
-            .app
-            .shell()
-            .sidecar(SIDECAR_LOGICAL_NAME)
-            .map_err(|_| SidecarRunnerError::Configuration)?;
-        let command: StdCommand = shell_command.into();
+        // Resolving the sidecar path must happen on the app handle, but the
+        // exchange itself blocks, so the command is built into a factory the
+        // pool calls only if it actually needs a new worker.
+        let app = self.app.clone();
+        let pool = self.pool.clone();
 
-        tokio::task::spawn_blocking(move || run_sidecar_process(command, request_line, timeout))
-            .await
-            .map_err(|_| SidecarRunnerError::Io)?
+        tokio::task::spawn_blocking(move || {
+            let spawn = || -> Result<StdCommand, SidecarRunnerError> {
+                app.shell()
+                    .sidecar(SIDECAR_LOGICAL_NAME)
+                    .map(StdCommand::from)
+                    .map_err(|_| SidecarRunnerError::Configuration)
+            };
+            pool.run(spawn, request_line, timeout)
+        })
+        .await
+        .map_err(|_| SidecarRunnerError::Io)?
     }
 
     fn diagnostics_store(&self) -> Option<&DiagnosticStore> {
@@ -953,61 +969,6 @@ async fn invoke_method_with_params_timeout<R: SidecarRunner>(
         runner.diagnostics_store(),
         bridge_duration_ms,
     )
-}
-
-fn run_sidecar_process(
-    mut command: StdCommand,
-    request_line: String,
-    timeout: Duration,
-) -> Result<SidecarProcessOutput, SidecarRunnerError> {
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command
-        .spawn()
-        .map_err(|_| SidecarRunnerError::Unavailable)?;
-
-    {
-        let mut stdin = child.stdin.take().ok_or(SidecarRunnerError::Io)?;
-        stdin
-            .write_all(request_line.as_bytes())
-            .map_err(|_| SidecarRunnerError::Io)?;
-        stdin.write_all(b"\n").map_err(|_| SidecarRunnerError::Io)?;
-    }
-
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait().map_err(|_| SidecarRunnerError::Io)? {
-            Some(status) => break status,
-            None if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(SidecarRunnerError::Timeout);
-            }
-            None => thread::sleep(Duration::from_millis(10)),
-        }
-    };
-
-    let stdout = read_child_pipe(child.stdout.take())?;
-    let stderr = read_child_pipe(child.stderr.take())?;
-
-    Ok(SidecarProcessOutput {
-        exit_code: status.code(),
-        stdout,
-        stderr,
-    })
-}
-
-fn read_child_pipe<T: Read>(pipe: Option<T>) -> Result<String, SidecarRunnerError> {
-    let Some(mut pipe) = pipe else {
-        return Ok(String::new());
-    };
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)
-        .map_err(|_| SidecarRunnerError::Io)?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[derive(Debug, Deserialize)]

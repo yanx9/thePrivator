@@ -1706,3 +1706,27 @@ def test_audit_collection_reports_skipped_pages_instead_of_overrunning(monkeypat
     assert collected == ["checker-0", "checker-1", "checker-2"], "collection did not stop at the budget"
     assert [result["status"] for result in results] == ["captured", "captured", "captured", "unavailable"]
     assert "ran out of time" in results[-1]["summary"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process sessions are a POSIX concept")
+def test_launched_browser_is_detached_from_the_sidecar_that_started_it(tmp_path, monkeypatch):
+    """The browser must outlive the sidecar process that launched it.
+
+    This used to be incidental -- the sidecar exited moments after launching, so
+    Chromium was reparented anyway. Now that Rust keeps sidecar workers warm and
+    recycles them, the browser is a live child of a process the pool may kill at
+    any time, and only the new session keeps it alive.
+    """
+    monkeypatch.setenv(chromium.CHROMIUM_EXECUTABLE_ENV, str(make_fake_chromium(tmp_path)))
+    store_root = tmp_path / "store"
+    profile = ProfileStore(store_root).create("Detached")["profile"]
+
+    chromium.launch(store_root, profile["id"])
+    record = chromium.RuntimeRegistry(store_root).read()[profile["id"]]
+
+    try:
+        assert os.getsid(record.pid) != os.getsid(os.getpid()), (
+            "the browser shares a session with the sidecar and would die with it"
+        )
+    finally:
+        chromium.stop(store_root, profile["id"])

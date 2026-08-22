@@ -34,12 +34,20 @@ PRODUCT_NAME = "ThePrivator"
 
 
 def run(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
-    """Process NDJSON requests from ``stdin`` until EOF."""
+    """Process NDJSON requests from ``stdin`` until EOF.
+
+    Diagnostics are flushed to stderr *before* the response goes to stdout. The
+    two streams are independent, so nothing observable depends on the order --
+    except for a caller that keeps this process alive across requests. There, the
+    response line is the only marker of where one request ends, so emitting
+    diagnostics first is what lets a reader attribute them to the right request
+    instead of racing them against the next one.
+    """
     for raw_line in stdin:
         response, diagnostics = handle_request_line(raw_line)
-        print(encode_ndjson(response), file=stdout, flush=True)
         for diagnostic in diagnostics:
             print(encode_ndjson(diagnostic), file=stderr, flush=True)
+        print(encode_ndjson(response), file=stdout, flush=True)
 
     return 0
 

@@ -1,6 +1,7 @@
 mod automation_api;
 mod diagnostics;
 mod sidecar;
+mod sidecar_pool;
 
 mod commands {
     use serde::Serialize;
@@ -27,6 +28,9 @@ mod commands {
 pub fn run() {
     tauri::Builder::default()
         .manage(automation_api::AutomationApiSupervisor::new())
+        // Sidecar workers are kept warm between commands, so the pool has to
+        // outlive any single command. Dropping it stops every pooled process.
+        .manage(std::sync::Arc::new(sidecar_pool::SidecarPool::new()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
