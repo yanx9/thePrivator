@@ -2,6 +2,8 @@
 
 import copy
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,6 +27,7 @@ from theprivator_sidecar.profiles import (
     PROFILE_STORE_WRITE_FAILED,
     ProfileRecord,
     ProfileStore,
+    STORE_FILE_MODE,
     STORE_VERSION,
 )
 from theprivator_sidecar.protocol import (
@@ -775,3 +778,38 @@ def test_delete_write_failure_returns_delete_failed_error(tmp_path, monkeypatch)
         store.delete(profile["id"])
 
     assert_profile_error(exc_info, PROFILE_DELETE_FAILED)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are not meaningful on this platform")
+def test_store_file_is_not_readable_by_other_local_accounts(tmp_path):
+    """profiles.json holds proxy credentials in the clear, so it must stay 0600."""
+    store = ProfileStore(tmp_path)
+    store.create("Has Credentials")
+
+    store_file = tmp_path / "profile-store" / "profiles.json"
+    assert stat.S_IMODE(store_file.stat().st_mode) == STORE_FILE_MODE
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are not meaningful on this platform")
+def test_store_file_written_before_the_mode_was_enforced_is_narrowed_on_read(tmp_path):
+    """A store created by an older build stays 0644 until something narrows it."""
+    store = ProfileStore(tmp_path)
+    store.create("Legacy Store")
+
+    store_file = tmp_path / "profile-store" / "profiles.json"
+    os.chmod(store_file, 0o644)
+
+    ProfileStore(tmp_path).list()
+
+    assert stat.S_IMODE(store_file.stat().st_mode) == STORE_FILE_MODE
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are not meaningful on this platform")
+def test_store_rewrite_does_not_widen_the_mode(tmp_path):
+    """os.replace swaps inodes, so every write must carry the restricted mode."""
+    store = ProfileStore(tmp_path)
+    profile = store.create("First")["profile"]
+    store.update(profile["id"], "Renamed")
+
+    store_file = tmp_path / "profile-store" / "profiles.json"
+    assert stat.S_IMODE(store_file.stat().st_mode) == STORE_FILE_MODE

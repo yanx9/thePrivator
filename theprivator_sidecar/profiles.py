@@ -37,6 +37,11 @@ STORE_DIR = "profile-store"
 PROFILES_DIR = "profiles"
 PROFILES_FILE = "profiles.json"
 MAX_PROFILE_NAME_LENGTH = 100
+# profiles.json holds proxy credentials in the clear, so it must never be
+# readable by other local accounts. os.replace preserves the source file's
+# mode, so creating the temp file 0600 makes the swap atomic in permissions
+# as well as contents -- there is no window where the store is world-readable.
+STORE_FILE_MODE = 0o600
 
 _INVALID_PROFILE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_WINDOWS_NAMES = {
@@ -466,6 +471,7 @@ class ProfileStore:
         if not self.store_file.is_file():
             raise_corrupt_store()
 
+        self._restrict_store_file_mode()
         try:
             with self.store_file.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -486,6 +492,28 @@ class ProfileStore:
             self._write_profiles(sorted_profiles)
         return sorted_profiles
 
+    def _restrict_store_file_mode(self) -> None:
+        """Narrow a pre-existing store written before STORE_FILE_MODE existed.
+
+        New writes are already 0600 (see _write_profiles), so this only matters
+        for a store that is read but never mutated. Windows has no POSIX mode
+        bits and chmod there is a documented no-op, so a failure to narrow is
+        not treated as a read failure -- but it is never silent on POSIX, where
+        an unreadable mode means the store root itself is broken and the read
+        below will surface that.
+        """
+        if os.name != "posix":
+            return
+        try:
+            current_mode = self.store_file.stat().st_mode & 0o777
+            if current_mode != STORE_FILE_MODE:
+                self.store_file.chmod(STORE_FILE_MODE)
+        except OSError as exc:
+            raise SidecarError(
+                code=PROFILE_STORE_UNAVAILABLE,
+                message="Profile store is unavailable.",
+            ) from exc
+
     def _write_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
         try:
             self._ensure_write_layout()
@@ -497,7 +525,12 @@ class ProfileStore:
                 f".{self.store_file.name}.{uuid.uuid4().hex}.tmp"
             )
             try:
-                with temp_file.open("w", encoding="utf-8") as handle:
+                descriptor = os.open(
+                    temp_file,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    STORE_FILE_MODE,
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
                     handle.write("\n")
                     handle.flush()

@@ -108,8 +108,16 @@ run(PYTHON, [
   "--onefile",
   "--name",
   SIDECAR_NAME,
+  // Lazily-imported modules PyInstaller's static analysis can miss. cdp and
+  // proxy_bridge are imported inside function bodies (see main.py's subcommand
+  // dispatch); psutil is imported under a try/except so a miss degrades the
+  // process-tree stop path silently instead of failing the build.
   "--hidden-import",
   "theprivator_sidecar.cdp",
+  "--hidden-import",
+  "theprivator_sidecar.proxy_bridge",
+  "--hidden-import",
+  "psutil",
   "--hidden-import",
   "requests",
   "--hidden-import",
