@@ -24,6 +24,17 @@ const LEGACY_IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 // Identity audit open uses the same budget because it may launch Chromium and
 // open a curated page after CDP identity overrides are applied.
 const CHROMIUM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+// Stopping asks the process tree to exit, waits, then forces it. Python allows
+// 3s graceful plus 2s forced, so the generic 5s bridge budget was exactly the
+// worst case with nothing left for spawning the sidecar itself -- a browser that
+// ignored SIGTERM timed out every time. This leaves real headroom.
+const CHROMIUM_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+// Collecting the audit launches Chromium, waits for CDP discovery, then walks
+// nine checker pages one at a time, each of which loads a real remote page over
+// the profile's proxy. Measured runs take 40-90s; the previous 30s budget
+// reported a bridge error while the sidecar kept working, leaving an orphaned
+// browser the UI believed had never started.
+const IDENTITY_AUDIT_COLLECT_TIMEOUT: Duration = Duration::from_secs(120);
 // Profile proxy checks run a deterministic local proof through Chromium-sized
 // machinery, so they need the same bounded long-command budget without allowing
 // unbounded queued UI clicks.
@@ -484,7 +495,7 @@ async fn identity_audit_collect_with_runner<R: SidecarRunner>(
             "storeRoot": store_root,
             "profileId": profile_id,
         }),
-        CHROMIUM_LAUNCH_TIMEOUT,
+        IDENTITY_AUDIT_COLLECT_TIMEOUT,
     )
     .await
 }
@@ -756,13 +767,14 @@ async fn chromium_stop_with_runner<R: SidecarRunner>(
     store_root: String,
     profile_id: String,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
-    invoke_method_with_params(
+    invoke_method_with_params_timeout(
         runner,
         "chromium.stop",
         json!({
             "storeRoot": store_root,
             "profileId": profile_id,
         }),
+        CHROMIUM_STOP_TIMEOUT,
     )
     .await
 }
@@ -1756,6 +1768,18 @@ mod tests {
         ))
     }
 
+    fn run_identity_audit_collect(
+        runner: &FakeRunner,
+        store_root: &str,
+        profile_id: &str,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_audit_collect_with_runner(
+            runner,
+            store_root.to_string(),
+            profile_id.to_string(),
+        ))
+    }
+
     fn run_legacy_scan(
         runner: &FakeRunner,
         store_root: &str,
@@ -2473,6 +2497,36 @@ mod tests {
                 ("profileId", json!("profile-id")),
             ],
         );
+    }
+
+    #[test]
+    fn chromium_stop_budget_exceeds_the_python_graceful_plus_forced_wait() {
+        // Python allows 3s graceful then 2s forced. Under the generic bridge
+        // budget the worst case was exactly 5s with nothing left for spawning
+        // the sidecar, so a browser ignoring SIGTERM timed out every time.
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_chromium_stop(&runner, "/app/data/root", "profile-id")
+            .expect("chromium stop reaches sidecar");
+
+        assert_eq!(runner.last_timeout(), CHROMIUM_STOP_TIMEOUT);
+        assert!(runner.last_timeout() > BRIDGE_TIMEOUT);
+        assert!(runner.last_timeout() >= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn identity_audit_collect_budget_covers_a_full_checker_walk() {
+        // Launch, CDP discovery, then nine remote checker pages one at a time.
+        // Measured runs take 40-90s; the previous launch-sized budget reported a
+        // bridge error while the sidecar kept working.
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_identity_audit_collect(&runner, "/app/data/root", "profile-id")
+            .expect("audit collect reaches sidecar");
+
+        assert_eq!(runner.last_timeout(), IDENTITY_AUDIT_COLLECT_TIMEOUT);
+        assert!(runner.last_timeout() > CHROMIUM_LAUNCH_TIMEOUT);
+        assert!(runner.last_timeout() >= Duration::from_secs(90));
     }
 
     #[test]

@@ -214,7 +214,15 @@ class RuntimeRegistry:
                 records[record.profile_id] = record
         return records
 
-    def write(self, records: Mapping[str, RuntimeRecord], *, error_code: Optional[str] = None) -> None:
+    def write(self, records: Mapping[str, RuntimeRecord], *, error_code: str = CHROMIUM_LAUNCH_FAILED) -> None:
+        """Persist the runtime registry, raising if the write does not land.
+
+        error_code used to be optional, and callers that omitted it -- status(),
+        stop(), and the portability guard -- had their OSError swallowed. A failed
+        write there is not cosmetic: the registry still claims a stopped profile
+        is running, so the UI shows it running forever and refuses to launch it
+        again. A status that errors is recoverable; a status that lies is not.
+        """
         payload = {
             "registryVersion": REGISTRY_VERSION,
             "processes": {
@@ -236,8 +244,6 @@ class RuntimeRegistry:
                 if temp_file.exists():
                     temp_file.unlink()
         except OSError as exc:
-            if error_code is None:
-                return
             raise SidecarError(
                 code=error_code,
                 message="Chromium runtime bookkeeping failed.",
@@ -546,18 +552,29 @@ def stop(store_root: Union[str, Path], profile_id: str) -> JsonObject:
     if record is None:
         return _stopped_payload(profile, termination="already-stopped", running_count=_active_count(records))
 
-    if not is_process_alive(record.pid):
-        _stop_proxy_bridge_for_record(record)
-        updated = dict(records)
-        updated.pop(profile.id, None)
-        registry.write(updated)
-        return _stopped_payload(profile, termination="reconciled", running_count=_active_count(updated))
-
-    termination = _stop_process_tree(record.pid)
-    _stop_proxy_bridge_for_record(record)
     updated = dict(records)
     updated.pop(profile.id, None)
-    registry.write(updated)
+
+    if not is_process_alive(record.pid):
+        _stop_proxy_bridge_for_record(record)
+        registry.write(updated, error_code=CHROMIUM_STOP_FAILED)
+        return _stopped_payload(profile, termination="reconciled", running_count=_active_count(updated))
+
+    # Mark first, then kill. The registry write is what the UI reads, and it is
+    # the step that can fail on a full or read-only disk; doing it after the kill
+    # meant a failed write left the registry insisting a dead browser was still
+    # running, with no way back. Recording the stop first means the worst case is
+    # an orphaned process the next reconcile pass collects, rather than a profile
+    # the user can never launch again.
+    registry.write(updated, error_code=CHROMIUM_STOP_FAILED)
+    try:
+        termination = _stop_process_tree(record.pid)
+    except SidecarError:
+        # The process outlived both signals. Put the record back so status keeps
+        # reporting it and a retry has something to act on.
+        registry.write(records, error_code=CHROMIUM_STOP_FAILED)
+        raise
+    _stop_proxy_bridge_for_record(record)
     return _stopped_payload(profile, termination=termination, running_count=_active_count(updated))
 
 
@@ -1520,38 +1537,62 @@ def _audit_page_result(
     }
 
 
+# Must stay a superset of the TypeScript client's containsUnsafeAuditText reject
+# list (src/sidecar/client.ts). The client independently hard-rejects unsafe audit
+# copy, and it rejects the *whole* nine-page snapshot -- so a marker this side
+# fails to redact does not leak, it destroys the entire audit result. The two
+# lists having drifted is exactly how that happened.
+# test_identity_audit.py::test_python_audit_redaction_covers_the_client_reject_list
+# parses the client's list and proves the superset relation mechanically.
+_AUDIT_FORBIDDEN_MARKERS = (
+    "DevToolsActivePort",
+    "remote-debugging-port",
+    "debug port",
+    "websocket",
+    "target id",
+    "targetId",
+    "raw argv",
+    "user-data-dir",
+    "profile-store",
+    "Traceback",
+    "proxy username",
+    "proxy password",
+    "proxy-username",
+    "proxy-password",
+    "proxyusername",
+    "proxypassword",
+    "proxy_user",
+    "proxy_pass",
+    "proxyuser",
+    "proxypass",
+    "authcredentials",
+    "credentials",
+    "username=",
+    "password=",
+    "token=",
+    "secret=",
+    # Marketing absolutes a checker page might carry. Neither side may repeat a
+    # claim this product deliberately never makes.
+    "guaranteed undetectability",
+    "guaranteed green",
+    "guaranteed pass",
+)
+
+
 def _safe_audit_result_text(value: Any, *, fallback: str, max_length: int = 160) -> str:
     if not isinstance(value, str):
         value = fallback
     text = value.strip() or fallback
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"wss?://[^\s;\"']+", "[redacted]", text, flags=re.IGNORECASE)
+    # Schemes are redacted with the separator, and without requiring a path after
+    # it: a bare "ws://" is itself one of the client's reject markers.
+    text = re.sub(r"\b(?:file|ws|wss)://\S*", "[redacted]", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:127\.0\.0\.1|0\.0\.0\.0|localhost)\b", "[redacted]", text, flags=re.IGNORECASE)
     text = re.sub(r":(?:[0-9]{2,5})\b", ":[redacted]", text)
     text = re.sub(r"(?:/[A-Za-z0-9._-]+){2,}", "[redacted]", text)
-    for marker in (
-        "DevToolsActivePort",
-        "remote-debugging-port",
-        "debug port",
-        "websocket",
-        "target id",
-        "targetId",
-        "raw argv",
-        "user-data-dir",
-        "profile-store",
-        "Traceback",
-        "proxy username",
-        "proxy password",
-        "proxy-username",
-        "proxy-password",
-        "proxyusername",
-        "proxypassword",
-        "credentials",
-        "username=",
-        "password=",
-        "token=",
-        "secret=",
-    ):
+    # Windows drive paths, which the POSIX-path rule above cannot match.
+    text = re.sub(r"\b[A-Za-z]:[\\/]\S*", "[redacted]", text)
+    for marker in _AUDIT_FORBIDDEN_MARKERS:
         text = re.sub(re.escape(marker), "[redacted]", text, flags=re.IGNORECASE)
     text = "".join(character for character in text if ord(character) >= 32 and ord(character) != 127)
     return text[:max_length].strip() or fallback

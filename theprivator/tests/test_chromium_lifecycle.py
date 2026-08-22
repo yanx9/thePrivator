@@ -17,6 +17,7 @@ from theprivator_sidecar.protocol import (
     CHROMIUM_ALREADY_RUNNING,
     CHROMIUM_EXECUTABLE_NOT_FOUND,
     CHROMIUM_LAUNCH_FAILED,
+    CHROMIUM_STOP_FAILED,
     IDENTITY_AUDIT_FAILED,
     IDENTITY_CDP_FAILED,
     IDENTITY_EXTENSION_FAILED,
@@ -1523,3 +1524,68 @@ def test_stop_already_stopped_profile_is_successful_and_safe(tmp_path):
     assert result["runningCount"] == 0
     assert result["userDataDir"] == profile["storage"]["userDataDir"]
     assert result["stoppedAt"].endswith("Z")
+
+
+def _launched_profile(tmp_path, monkeypatch):
+    """Launch a profile against the fake browser and return (store_root, id)."""
+    monkeypatch.setenv(chromium.CHROMIUM_EXECUTABLE_ENV, str(make_fake_chromium(tmp_path)))
+    store_root = tmp_path / "store"
+    profile = ProfileStore(store_root).create("Stop Discipline")["profile"]
+    chromium.launch(store_root, profile["id"])
+    return store_root, profile["id"]
+
+
+def test_stop_records_the_stop_before_killing_the_process(tmp_path, monkeypatch):
+    """The registry write must land first, because it is the step that can fail.
+
+    Killing first meant a failed write left the registry insisting a dead browser
+    was still running, and the UI would then refuse to launch that profile again.
+    """
+    store_root, profile_id = _launched_profile(tmp_path, monkeypatch)
+    registry_path = chromium.RuntimeRegistry(store_root).path
+    observed_at_kill: dict[str, Any] = {}
+
+    real_stop_tree = chromium._stop_process_tree
+
+    def observing_stop_tree(pid: int) -> str:
+        observed_at_kill["records"] = json.loads(registry_path.read_text(encoding="utf-8"))["processes"]
+        return real_stop_tree(pid)
+
+    monkeypatch.setattr(chromium, "_stop_process_tree", observing_stop_tree)
+    chromium.stop(store_root, profile_id)
+
+    assert profile_id not in observed_at_kill["records"], "registry still claimed the profile was running during the kill"
+
+
+def test_stop_restores_the_record_when_the_process_survives(tmp_path, monkeypatch):
+    """A profile that refuses both signals must stay visible to status and retry."""
+    store_root, profile_id = _launched_profile(tmp_path, monkeypatch)
+
+    def refuse_to_die(_pid: int) -> str:
+        raise SidecarError(code=CHROMIUM_STOP_FAILED, message="Chromium stop failed.")
+
+    monkeypatch.setattr(chromium, "_stop_process_tree", refuse_to_die)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.stop(store_root, profile_id)
+
+    assert exc_info.value.code == CHROMIUM_STOP_FAILED
+    assert profile_id in chromium.RuntimeRegistry(store_root).read(), "the surviving process was dropped from the registry"
+
+    monkeypatch.setattr(chromium, "_stop_process_tree", lambda pid: "forced")
+    chromium.stop(store_root, profile_id)
+
+
+def test_registry_write_failure_is_reported_rather_than_swallowed(tmp_path, monkeypatch):
+    """A silent bookkeeping failure leaves status lying about a stopped profile."""
+    store_root, profile_id = _launched_profile(tmp_path, monkeypatch)
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated registry write failure")
+
+    monkeypatch.setattr(chromium.os, "replace", fail_replace)
+
+    with pytest.raises(SidecarError) as exc_info:
+        chromium.stop(store_root, profile_id)
+
+    assert exc_info.value.code == CHROMIUM_STOP_FAILED

@@ -2,6 +2,8 @@
 
 import copy
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,7 @@ from theprivator_sidecar.identity_audit import (
     open_audit_page_for_profile,
     validate_audit_catalog,
 )
+from theprivator_sidecar.chromium import _safe_audit_result_text
 from theprivator_sidecar.profiles import ProfileRecord, ProfileStore
 from theprivator_sidecar.protocol import (
     IDENTITY_AUDIT_FAILED,
@@ -261,3 +264,71 @@ def test_open_audit_page_for_profile_unknown_page_id_is_typed_and_does_not_open(
 
     assert_sidecar_error(exc_info, IDENTITY_AUDIT_PAGE_NOT_FOUND)
     assert not (tmp_path / "profile-store" / "runtime").exists()
+
+
+# --- Redaction drift between the sidecar and the TypeScript client -----------
+#
+# The client independently hard-rejects unsafe audit copy, and it rejects the
+# whole nine-page snapshot rather than the offending field. So a marker the
+# sidecar fails to redact does not leak -- it destroys the entire audit result
+# for the user. These tests prove the sidecar's redaction is a superset of the
+# client's reject list by reading that list out of client.ts, so the two cannot
+# drift apart silently again.
+
+CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "src" / "sidecar" / "client.ts"
+
+
+def client_audit_reject_markers() -> list[str]:
+    source = CLIENT_SOURCE.read_text(encoding="utf-8")
+    assert "function containsUnsafeAuditText" in source, "client.ts no longer defines the audit reject list"
+    block = source.split("function containsUnsafeAuditText", 1)[1].split("].some((marker)", 1)[0]
+    markers = re.findall(r'"([^"]+)"', block)
+    assert len(markers) >= 20, f"parsed too few markers from client.ts ({len(markers)}); the parser is stale"
+    return markers
+
+
+def client_would_reject(value: str) -> bool:
+    """Mirror of containsUnsafeAuditText in src/sidecar/client.ts."""
+    lowered = value.lower()
+    if any(marker in lowered for marker in client_audit_reject_markers()):
+        return True
+    if re.search(r"\b(?:file|ws|wss)://", value, re.IGNORECASE):
+        return True
+    if re.search(r"(?:^|\s)(?:/[A-Za-z0-9._-]+){2,}", value) or re.search(r"[A-Za-z]:[\\/][^\s]+", value):
+        return True
+    return False
+
+
+def test_python_audit_redaction_covers_the_client_reject_list():
+    for marker in client_audit_reject_markers():
+        captured = f"checker page reported {marker} in its output"
+        redacted = _safe_audit_result_text(captured, fallback="Result unavailable.")
+
+        assert not client_would_reject(redacted), (
+            f"sidecar left {marker!r} un-redacted as {redacted!r}; "
+            "the client would reject the entire audit snapshot"
+        )
+
+
+@pytest.mark.parametrize(
+    "captured",
+    [
+        "path C:\\Windows\\System32\\drivers",
+        "path D:/data/profile",
+        "see file:///etc/passwd",
+        "ws://127.0.0.1:9222/devtools/browser",
+        "endpoint at /usr/share/app/data",
+        "bare scheme ws://",
+    ],
+)
+def test_python_audit_redaction_covers_the_client_path_and_scheme_rules(captured):
+    redacted = _safe_audit_result_text(captured, fallback="Result unavailable.")
+
+    assert not client_would_reject(redacted), f"{captured!r} survived as {redacted!r}"
+
+
+def test_audit_redaction_keeps_ordinary_checker_copy_readable():
+    """Redaction must not be so broad that a normal result becomes unusable."""
+    captured = "Canvas fingerprint matches the masked profile value."
+
+    assert _safe_audit_result_text(captured, fallback="Result unavailable.") == captured
