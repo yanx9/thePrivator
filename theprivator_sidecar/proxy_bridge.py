@@ -21,7 +21,12 @@ from typing import Any, Mapping, Optional
 
 SOCKS5_BRIDGE_VERSION = 1
 LOCAL_HOST = "127.0.0.1"
+# Bounds the SOCKS5 handshake only. Once the tunnel is established the sockets
+# go back to blocking mode -- see _tunnel_pair.
 SOCKET_TIMEOUT_SECONDS = 10.0
+# How long select() waits before looping. Not a deadline: an idle tunnel simply
+# polls again. Bounded so a closed peer is noticed reasonably promptly.
+TUNNEL_SELECT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,7 @@ class _ThreadingTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 class _BridgeSocks5Handler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         upstream: Optional[socket.socket] = None
+        replied = False
         try:
             config = _config_from_server(self.server)
             self.request.settimeout(SOCKET_TIMEOUT_SECONDS)
@@ -99,17 +105,33 @@ class _BridgeSocks5Handler(socketserver.BaseRequestHandler):
             target_host, target_port = _read_chromium_connect_request(self.request)
             upstream = _connect_upstream(config, target_host, target_port)
             _send_success_response(self.request)
+            replied = True
             _tunnel_pair(self.request, upstream)
         except Exception:
-            _safe_send(self.request, b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
+            # Only meaningful before the success reply. Sending it afterwards
+            # appends ten bytes of SOCKS5 framing to whatever the page was
+            # already reading, corrupting the response instead of reporting a
+            # failure. Deliberately never logged: config holds credentials.
+            if not replied:
+                _safe_send(self.request, b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
         finally:
             if upstream is not None:
                 upstream.close()
 
 
-def run_bridge_from_config_path(config_path: str) -> int:
+def run_bridge_from_stdin(stream: Any = None) -> int:
+    """Read one JSON config line from stdin and serve until killed.
+
+    The config carries the upstream proxy password, so it is handed over through
+    the pipe rather than written to a file. A file would have to be created,
+    chmod'ed, and deleted on every exit path -- and the paths that raise before
+    the delete are exactly the ones that leave plaintext credentials on disk.
+    A pipe has no such failure mode, and the credentials never touch the
+    filesystem at all.
+    """
     try:
-        config = _read_config(Path(config_path))
+        source = sys.stdin if stream is None else stream
+        config = _read_config_payload(source.readline())
         with Socks5BridgeServer(config) as server:
             server.serve_forever()
         return 0
@@ -122,8 +144,13 @@ def run_bridge_from_config_path(config_path: str) -> int:
         return 1
 
 
-def _read_config(path: Path) -> Socks5BridgeConfig:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def _read_config_payload(raw: str) -> Socks5BridgeConfig:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("missing bridge config")
+    return _parse_config(json.loads(raw))
+
+
+def _parse_config(payload: Any) -> Socks5BridgeConfig:
     if not isinstance(payload, Mapping) or payload.get("bridgeVersion") != SOCKS5_BRIDGE_VERSION:
         raise ValueError("invalid bridge config")
     upstream = payload.get("upstream")
@@ -234,13 +261,32 @@ def _read_upstream_connect_response(sock: socket.socket) -> None:
 
 
 def _read_socks5_address(sock: socket.socket, atyp: bytes) -> str:
+    """Read one SOCKS5 address, keeping domains exactly as they arrived.
+
+    Domains are deliberately not decoded. Python's "idna" codec implements
+    IDNA-2003, which rejects names Chromium legitimately sends -- a label longer
+    than 63 characters, or a punycode name that does not round-trip, such as
+    xn--fa-hia.de. Worse, decode-then-re-encode can rewrite a name into a
+    different one: xn--80ak6aa92e.com becomes a Cyrillic homoglyph of apple.com.
+
+    A proxy has no business interpreting hostnames. The bytes are validated as
+    ASCII and length-bounded, then forwarded verbatim to the upstream, which is
+    the party that actually resolves them.
+    """
     if atyp == b"\x01":
         return socket.inet_ntoa(_read_exact(sock, 4))
     if atyp == b"\x03":
         length = _read_exact(sock, 1)[0]
         if length == 0:
             raise ValueError("empty domain")
-        return _read_exact(sock, length).decode("idna")
+        raw = _read_exact(sock, length)
+        try:
+            host = raw.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("non-ascii domain") from exc
+        if "\x00" in host:
+            raise ValueError("invalid domain")
+        return host
     if atyp == b"\x04":
         return socket.inet_ntop(socket.AF_INET6, _read_exact(sock, 16))
     raise ValueError("unsupported address type")
@@ -255,28 +301,67 @@ def _socks5_address_bytes(host: str) -> bytes:
         return b"\x04" + socket.inet_pton(socket.AF_INET6, host)
     except OSError:
         pass
-    encoded = host.encode("idna")
-    if not encoded or len(encoded) > 255:
+    try:
+        encoded = host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("invalid domain") from exc
+    if not encoded or len(encoded) > 255 or b"\x00" in encoded:
         raise ValueError("invalid domain")
     return b"\x03" + bytes([len(encoded)]) + encoded
 
 
 def _tunnel_pair(left: socket.socket, right: socket.socket) -> None:
-    sockets = [left, right]
-    for sock in sockets:
-        sock.settimeout(SOCKET_TIMEOUT_SECONDS)
-    while sockets:
-        readable, _, errored = select.select(sockets, [], sockets, SOCKET_TIMEOUT_SECONDS)
+    """Relay bytes between the two sockets until both directions have closed.
+
+    Three things this must not do, each of which it used to:
+
+    - Treat an idle period as fatal. A tunnelled WebSocket, SSE stream, or
+      keep-alive connection is legitimately silent for minutes; tearing it down
+      after the handshake timeout made those look like ERR_CONNECTION_RESET.
+      The handshake deadline does not apply once the tunnel is established.
+
+    - Close both directions when one reports EOF. A peer that finishes sending
+      and half-closes while the other side is still uploading must have its
+      write side shut down, not the whole pair -- otherwise the upload truncates.
+
+    - Leave the sockets in timeout mode. sendall() on a timeout-mode socket can
+      raise after a partial write, silently corrupting the stream; blocking mode
+      makes a short write impossible.
+    """
+    for sock in (left, right):
+        sock.settimeout(None)
+
+    readable_sockets = [left, right]
+    while readable_sockets:
+        try:
+            readable, _, errored = select.select(readable_sockets, [], readable_sockets, TUNNEL_SELECT_TIMEOUT_SECONDS)
+        except (OSError, ValueError):
+            return
         if errored:
             return
         if not readable:
-            return
+            # No traffic within the poll window. That is normal for an idle
+            # tunnel, so keep waiting rather than closing a healthy connection.
+            continue
         for source in readable:
             target = right if source is left else left
-            data = source.recv(65536)
-            if not data:
+            try:
+                data = source.recv(65536)
+            except OSError:
                 return
-            target.sendall(data)
+            if not data:
+                # One direction is done. Signal EOF downstream and stop reading
+                # this side, but let the opposite direction keep flowing.
+                readable_sockets.remove(source)
+                try:
+                    target.shutdown(socket.SHUT_WR)
+                except OSError:
+                    return
+                continue
+            try:
+                target.sendall(data)
+            except OSError:
+                return
 
 
 def _read_exact(sock: socket.socket, length: int) -> bytes:
@@ -299,4 +384,4 @@ def _safe_send(sock: socket.socket, data: bytes) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through sidecar CLI integration.
-    raise SystemExit(run_bridge_from_config_path(sys.argv[1] if len(sys.argv) > 1 else ""))
+    raise SystemExit(run_bridge_from_stdin())

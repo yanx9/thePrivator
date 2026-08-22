@@ -668,27 +668,28 @@ def _spawn_socks5_proxy_bridge(
     bridge_root = Path(store_root) / STORE_DIR / RUNTIME_DIR / PROXY_BRIDGE_DIR / _profile_runtime_key(profile_id)
     bridge_root.mkdir(parents=True, exist_ok=True)
     nonce = uuid.uuid4().hex
-    config_path = bridge_root / f"bridge-{nonce}.json"
     ready_path = bridge_root / f"bridge-{nonce}.ready.json"
+    # Handed to the child over its stdin pipe, never written to a file and never
+    # placed on argv. A config file would need creating, chmod'ing, and deleting
+    # on every exit path, and the paths that raise before the delete are exactly
+    # the ones that would strand the upstream password on disk. The ready file
+    # below stays a file because it carries no secrets.
     config_payload = {
         "bridgeVersion": 1,
         "upstream": {"host": upstream_host, "port": upstream_port},
         "credentials": {"username": username, "password": password},
         "readyFile": str(ready_path),
     }
-    config_path.write_text(json.dumps(config_payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-    try:
-        config_path.chmod(0o600)
-    except OSError:
-        pass
 
-    args = _sidecar_subprocess_args("proxy-bridge", str(config_path))
+    args = _sidecar_subprocess_args("proxy-bridge")
     try:
         process = subprocess.Popen(  # noqa: S603 - command is this trusted sidecar executable/module.
             args,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
             close_fds=True,
             start_new_session=platform.system() != "Windows",
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if platform.system() == "Windows" else 0,
@@ -700,15 +701,19 @@ def _spawn_socks5_proxy_bridge(
         ) from exc
 
     try:
+        assert process.stdin is not None
+        with process.stdin as handle:
+            handle.write(json.dumps(config_payload, ensure_ascii=False, sort_keys=True) + "\n")
         ready = _wait_for_proxy_bridge_ready(ready_path, process)
-        try:
-            config_path.unlink()
-        except OSError:
-            pass
         return {"pid": process.pid, "port": ready}
-    except SidecarError:
+    except (SidecarError, OSError, ValueError) as exc:
         _stop_child_after_failed_launch(process.pid)
-        raise
+        if isinstance(exc, SidecarError):
+            raise
+        raise SidecarError(
+            code=CHROMIUM_LAUNCH_FAILED,
+            message="Chromium proxy bridge could not be started.",
+        ) from exc
 
 
 def _sidecar_subprocess_args(*args: str) -> list[str]:

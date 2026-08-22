@@ -53,10 +53,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_from_env(os.environ)
 
     if args[:1] == ["proxy-bridge"]:
-        from .proxy_bridge import run_bridge_from_config_path
+        from .proxy_bridge import run_bridge_from_stdin
 
-        config_path = args[1] if len(args) > 1 else ""
-        return run_bridge_from_config_path(config_path)
+        # Config arrives on stdin, never as an argv path: it carries the upstream
+        # proxy password, and argv is world-readable through /proc.
+        return run_bridge_from_stdin()
 
     return run(sys.stdin, sys.stdout, sys.stderr)
 
