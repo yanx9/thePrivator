@@ -116,6 +116,20 @@ import type {
   ChromiumBulkStopResult,
   ChromiumBulkStopSnapshot,
   BulkFailure,
+  SyncAction,
+  SyncAppliedEntry,
+  SyncConflictResolution,
+  SyncFailureEntry,
+  SyncLockReleaseResult,
+  SyncPlanEntry,
+  SyncPlanResult,
+  SyncPlanSnapshot,
+  SyncPrepareResult,
+  SyncResolveResult,
+  SyncRunResult,
+  SyncRunSnapshot,
+  SyncStatusResult,
+  SyncStatusSnapshot,
   ProfileMutationResult,
   ProfileMutationSnapshot,
   ProfileRecord,
@@ -1128,6 +1142,102 @@ export async function bulkStopChromiumProfiles(profileIds?: string[]): Promise<C
   }
 }
 
+export async function getSyncStatus(): Promise<SyncStatusSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("sync_status");
+    return withEnvelope(envelope, parseSyncStatusResult);
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function configureSync(options: {
+  enabled: boolean;
+  folder?: string;
+  deviceLabel?: string;
+}): Promise<SyncStatusSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("sync_configure", {
+      enabled: options.enabled,
+      folder: options.folder ?? null,
+      deviceLabel: options.deviceLabel ?? null,
+    });
+    return withEnvelope(envelope, parseSyncStatusResult);
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function planSync(): Promise<SyncPlanSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("sync_plan");
+    return withEnvelope(envelope, parseSyncPlanResult);
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function runSync(): Promise<SyncRunSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("sync_run");
+    return withEnvelope(envelope, parseSyncRunResult);
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function resolveSyncConflict(
+  profileId: string,
+  resolution: SyncConflictResolution,
+): Promise<SyncResolveResult> {
+  try {
+    const envelope = await invoke<unknown>("sync_resolve", { profileId, resolution });
+    const record = requireRecord(parseSuccessEnvelope(envelope).result, "The sidecar sync resolve result must be an object.");
+    requireExactKeys(record, ["resolved", "resolution"], "syncResolve");
+    return {
+      resolved: parseSyncAppliedEntry(record.resolved, "resolved"),
+      resolution: requireSyncResolution(record.resolution),
+    };
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function prepareSyncedProfile(profileId: string): Promise<SyncPrepareResult> {
+  try {
+    const envelope = await invoke<unknown>("sync_prepare", { profileId });
+    const record = requireRecord(parseSuccessEnvelope(envelope).result, "The sidecar sync prepare result must be an object.");
+    const prepared = record.prepared;
+    if (typeof prepared !== "boolean") {
+      throw makeProtocolError("The sidecar sync prepare result must say whether it prepared anything.");
+    }
+    return prepared
+      ? { prepared, ...parseSyncAppliedEntry(record, "prepare") }
+      : { prepared, reason: requireNonBlankString(record.reason, "reason") };
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function forceReleaseSyncLock(
+  profileId: string,
+  confirmDeviceLabel: string,
+): Promise<SyncLockReleaseResult> {
+  try {
+    const envelope = await invoke<unknown>("sync_force_release_lock", { profileId, confirmDeviceLabel });
+    const record = requireRecord(parseSuccessEnvelope(envelope).result, "The sidecar sync lock result must be an object.");
+    const released = record.released;
+    if (typeof released !== "boolean") {
+      throw makeProtocolError("The sidecar sync lock result must say whether it released anything.");
+    }
+    return released
+      ? { released, previousHolder: requireNonBlankString(record.previousHolder, "previousHolder") }
+      : { released, reason: requireNonBlankString(record.reason, "reason") };
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
 export function normalizeSidecarError(error: unknown): SidecarClientError {
   if (isCommandErrorEnvelope(error)) {
     const source = sourceForCode(error.code);
@@ -1864,6 +1974,196 @@ function parseChromiumBulkStopResult(value: unknown): ChromiumBulkStopResult {
     stopped,
     failed: parseBulkFailures(record.failed, "failed"),
     runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
+  };
+}
+
+const SYNC_ACTIONS: readonly SyncAction[] = [
+  "nothing",
+  "push",
+  "pull",
+  "conflict",
+  "deleteLocal",
+  "deleteRemote",
+];
+
+const SYNC_RESOLUTIONS: readonly SyncConflictResolution[] = ["keepLocal", "keepRemote", "keepBoth"];
+
+const MAX_SYNC_PLAN_ENTRIES = 5000;
+const MAX_SYNC_TEXT_LENGTH = 400;
+
+/** Wrap a parsed result in the bridge envelope fields every snapshot carries. */
+function withEnvelope<T>(value: unknown, parse: (result: unknown) => T): T & {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+} {
+  const envelope = parseSuccessEnvelope(value);
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt: new Date().toISOString(),
+    ...parse(envelope.result),
+  };
+}
+
+function requireSyncAction(value: unknown, field: string): SyncAction {
+  if (typeof value !== "string" || !SYNC_ACTIONS.includes(value as SyncAction)) {
+    throw makeProtocolError(`The sidecar sync field ${field} is not an action this build understands.`);
+  }
+  return value as SyncAction;
+}
+
+function requireSyncResolution(value: unknown): SyncConflictResolution {
+  if (typeof value !== "string" || !SYNC_RESOLUTIONS.includes(value as SyncConflictResolution)) {
+    throw makeProtocolError("The sidecar sync resolution is not one this build understands.");
+  }
+  return value as SyncConflictResolution;
+}
+
+/**
+ * A folder name, never a path.
+ *
+ * The sync root is the one absolute path the frontend supplies, and the sidecar
+ * reports it back by name on purpose. A separator arriving here means the
+ * redaction perimeter has a hole, so the response is rejected rather than
+ * rendered.
+ */
+function requireFolderName(value: unknown): string | null {
+  if (value === null) {
+    return null;
+  }
+  const name = requireNonBlankString(value, "folderName");
+  if (name.includes("/") || name.includes("\\") || name.length > MAX_SYNC_TEXT_LENGTH) {
+    throw makeProtocolError("The sidecar sync status returned a path where a folder name was expected.");
+  }
+  return name;
+}
+
+function parseSyncStatusResult(value: unknown): SyncStatusResult {
+  const record = requireRecord(value, "The sidecar sync status result must be an object.");
+  requireExactKeys(
+    record,
+    ["enabled", "configured", "folderName", "deviceLabel", "lastRunAt", "trackedProfiles", "reachable", "writable", "detail"],
+    "syncStatus",
+  );
+
+  for (const flag of ["enabled", "configured", "reachable", "writable"] as const) {
+    if (typeof record[flag] !== "boolean") {
+      throw makeProtocolError(`The sidecar sync status field ${flag} must be a boolean.`);
+    }
+  }
+
+  return {
+    enabled: record.enabled as boolean,
+    configured: record.configured as boolean,
+    folderName: requireFolderName(record.folderName),
+    deviceLabel: requireBoundedText(record.deviceLabel, "deviceLabel"),
+    lastRunAt: record.lastRunAt === null ? null : requireIsoTimestamp(record.lastRunAt, "lastRunAt"),
+    trackedProfiles: requireNonNegativeInteger(record.trackedProfiles, "trackedProfiles"),
+    reachable: record.reachable as boolean,
+    writable: record.writable as boolean,
+    detail: requireBoundedText(record.detail, "detail"),
+  };
+}
+
+function requireBoundedText(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (text.length > MAX_SYNC_TEXT_LENGTH || containsControlCharactersOrDelete(text)) {
+    throw makeProtocolError(`The sidecar sync field ${field} is not printable bounded text.`);
+  }
+  return text;
+}
+
+function parseSyncPlanEntry(value: unknown, field: string): SyncPlanEntry {
+  const record = requireRecord(value, `The sidecar sync field ${field} must be an object.`);
+  requireExactKeys(
+    record,
+    ["profileId", "name", "action", "reason", "localRevision", "remoteRevision", "baseRevision"],
+    field,
+  );
+  return {
+    profileId: requireNonBlankString(record.profileId, `${field}.profileId`),
+    name: requireBoundedText(record.name, `${field}.name`),
+    action: requireSyncAction(record.action, `${field}.action`),
+    reason: requireBoundedText(record.reason, `${field}.reason`),
+    localRevision: requireNullableRevision(record.localRevision, `${field}.localRevision`),
+    remoteRevision: requireNullableRevision(record.remoteRevision, `${field}.remoteRevision`),
+    baseRevision: requireNullableRevision(record.baseRevision, `${field}.baseRevision`),
+  };
+}
+
+function requireNullableRevision(value: unknown, field: string): number | null {
+  return value === null ? null : requireNonNegativeInteger(value, field);
+}
+
+function parseSyncPlanEntryArray(value: unknown, field: string): SyncPlanEntry[] {
+  if (!Array.isArray(value) || value.length > MAX_SYNC_PLAN_ENTRIES) {
+    throw makeProtocolError(`The sidecar sync field ${field} must be a bounded array.`);
+  }
+  return value.map((entry, index) => parseSyncPlanEntry(entry, `${field}[${index}]`));
+}
+
+function parseSyncPlanResult(value: unknown): SyncPlanResult {
+  const record = requireRecord(value, "The sidecar sync plan result must be an object.");
+  requireExactKeys(record, ["plans", "counts"], "syncPlan");
+  const counts = requireRecord(record.counts, "The sidecar sync plan counts must be an object.");
+  requireExactKeys(counts, [...SYNC_ACTIONS], "syncPlan.counts");
+
+  const parsedCounts = {} as Record<SyncAction, number>;
+  for (const action of SYNC_ACTIONS) {
+    parsedCounts[action] = requireNonNegativeInteger(counts[action], `counts.${action}`);
+  }
+
+  return { plans: parseSyncPlanEntryArray(record.plans, "plans"), counts: parsedCounts };
+}
+
+function parseSyncAppliedEntry(value: unknown, field: string): SyncAppliedEntry {
+  const record = requireRecord(value, `The sidecar sync field ${field} must be an object.`);
+  const keptCopyAs = record.keptCopyAs;
+  if (keptCopyAs !== null && keptCopyAs !== undefined) {
+    // A path here would put a location on screen that the perimeter forbids.
+    requireFolderName(keptCopyAs);
+  }
+  return {
+    profileId: requireNonBlankString(record.profileId, `${field}.profileId`),
+    name: requireBoundedText(record.name, `${field}.name`),
+    action: requireBoundedText(record.action, `${field}.action`),
+    keptCopyAs: typeof keptCopyAs === "string" ? keptCopyAs : null,
+  };
+}
+
+function parseSyncFailureEntry(value: unknown, field: string): SyncFailureEntry {
+  const record = requireRecord(value, `The sidecar sync field ${field} must be an object.`);
+  requireExactKeys(record, ["profileId", "name", "code"], field);
+  return {
+    profileId: requireNonBlankString(record.profileId, `${field}.profileId`),
+    name: requireBoundedText(record.name, `${field}.name`),
+    code: requireNonBlankString(record.code, `${field}.code`),
+  };
+}
+
+function parseSyncRunResult(value: unknown): SyncRunResult {
+  const record = requireRecord(value, "The sidecar sync run result must be an object.");
+  requireExactKeys(record, ["applied", "conflicts", "failures", "status"], "syncRun");
+
+  const applied = record.applied;
+  const failures = record.failures;
+  if (!Array.isArray(applied) || applied.length > MAX_SYNC_PLAN_ENTRIES) {
+    throw makeProtocolError("The sidecar sync run field applied must be a bounded array.");
+  }
+  if (!Array.isArray(failures) || failures.length > MAX_SYNC_PLAN_ENTRIES) {
+    throw makeProtocolError("The sidecar sync run field failures must be a bounded array.");
+  }
+
+  return {
+    applied: applied.map((entry, index) => parseSyncAppliedEntry(entry, `applied[${index}]`)),
+    conflicts: parseSyncPlanEntryArray(record.conflicts, "conflicts"),
+    failures: failures.map((entry, index) => parseSyncFailureEntry(entry, `failures[${index}]`)),
+    status: parseSyncStatusResult(record.status),
   };
 }
 

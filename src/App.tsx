@@ -5,6 +5,7 @@ import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
 import { ProfilesPage } from "./features/profiles/ProfilesPage";
+import { SyncSettings } from "./features/sync/SyncSettings";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
 import type { StatusTile } from "./shell/StatusBar";
@@ -73,6 +74,9 @@ function renderDestination(route: Route, context: DestinationContext) {
         onNewProfile={context.onNewProfile}
       />
     );
+  }
+  if (route.name === "settings" && route.section === "sync") {
+    return <SyncSettings />;
   }
   if (route.name === "profile" || route.name === "profile-new") {
     return (

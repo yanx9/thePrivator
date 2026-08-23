@@ -53,6 +53,15 @@ const COOKIE_PORTABILITY_TIMEOUT: Duration = Duration::from_secs(30);
 // Profile packages may include sanitized Chromium user-data payload copies, so
 // they get a bounded long-command budget without granting unbounded renderer IO.
 const PROFILE_PACKAGE_TIMEOUT: Duration = Duration::from_secs(120);
+// Sync moves whole profile directories through a folder another program is
+// still uploading, so its budgets are the portability ones rather than the CRUD
+// ones. Status and configure only touch small files and stay short, which keeps
+// a mistyped folder from taking two minutes to report itself.
+const SYNC_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+const SYNC_PLAN_TIMEOUT: Duration = Duration::from_secs(60);
+const SYNC_RUN_TIMEOUT: Duration = Duration::from_secs(600);
+const SYNC_RESOLVE_TIMEOUT: Duration = Duration::from_secs(300);
+const SYNC_PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_PROFILE_PACKAGE_ARGUMENT_CHARS: usize = 4096;
 
 const COOKIE_FORMAT_NETSCAPE: &str = "netscape";
@@ -419,6 +428,85 @@ pub async fn chromium_launch(
     let result = chromium_launch_with_runner(&runner, store_root, profile_id).await;
     events::notify_on_success(&app, &result, events::CHROMIUM_STATUS_CHANGED, "chromium.launch");
     result
+}
+
+#[tauri::command]
+pub async fn sync_status(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    sync_status_with_runner(&runner, store_root).await
+}
+
+#[tauri::command]
+pub async fn sync_configure(
+    app: tauri::AppHandle,
+    enabled: bool,
+    folder: Option<String>,
+    device_label: Option<String>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    sync_configure_with_runner(&runner, store_root, enabled, folder, device_label).await
+}
+
+#[tauri::command]
+pub async fn sync_plan(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    sync_plan_with_runner(&runner, store_root).await
+}
+
+#[tauri::command]
+pub async fn sync_run(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = sync_run_with_runner(&runner, store_root).await;
+    // A run can create, update, or trash profiles on this device, so the table
+    // has to reload rather than wait for its next poll.
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "sync.run");
+    result
+}
+
+#[tauri::command]
+pub async fn sync_resolve(
+    app: tauri::AppHandle,
+    profile_id: String,
+    resolution: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = sync_resolve_with_runner(&runner, store_root, profile_id, resolution).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "sync.resolve");
+    result
+}
+
+#[tauri::command]
+pub async fn sync_prepare(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = sync_prepare_with_runner(&runner, store_root, profile_id).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "sync.prepare");
+    result
+}
+
+#[tauri::command]
+pub async fn sync_force_release_lock(
+    app: tauri::AppHandle,
+    profile_id: String,
+    confirm_device_label: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app);
+    sync_force_release_lock_with_runner(&runner, store_root, profile_id, confirm_device_label).await
 }
 
 #[tauri::command]
@@ -902,6 +990,116 @@ async fn chromium_launch_with_runner<R: SidecarRunner>(
             "profileId": profile_id,
         }),
         CHROMIUM_LAUNCH_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_status_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.status",
+        json!({ "storeRoot": store_root }),
+        SYNC_STATUS_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_configure_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    enabled: bool,
+    folder: Option<String>,
+    device_label: Option<String>,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.configure",
+        json!({
+            "storeRoot": store_root,
+            "enabled": enabled,
+            "folder": folder,
+            "deviceLabel": device_label,
+        }),
+        SYNC_STATUS_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_plan_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.plan",
+        json!({ "storeRoot": store_root }),
+        SYNC_PLAN_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_run_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    // The longest budget in the bridge: a first run uploads or downloads every
+    // profile in the library, and each one is a whole browser directory.
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.run",
+        json!({ "storeRoot": store_root }),
+        SYNC_RUN_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_resolve_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    resolution: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.resolve",
+        json!({ "storeRoot": store_root, "profileId": profile_id, "resolution": resolution }),
+        SYNC_RESOLVE_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_prepare_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.prepare",
+        json!({ "storeRoot": store_root, "profileId": profile_id }),
+        SYNC_PREPARE_TIMEOUT,
+    )
+    .await
+}
+
+async fn sync_force_release_lock_with_runner<R: SidecarRunner>(
+    runner: &R,
+    store_root: String,
+    profile_id: String,
+    confirm_device_label: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_method_with_params_timeout(
+        runner,
+        "sync.lock.forceRelease",
+        json!({
+            "storeRoot": store_root,
+            "profileId": profile_id,
+            "confirmDeviceLabel": confirm_device_label,
+        }),
+        SYNC_STATUS_TIMEOUT,
     )
     .await
 }
@@ -2060,6 +2258,136 @@ mod tests {
         for (key, value) in expected {
             assert_eq!(params.get(*key), Some(value), "param {key} mismatch");
         }
+    }
+
+    #[test]
+    fn sync_commands_send_their_method_and_the_store_root() {
+        let cases: Vec<(&str, Box<dyn Fn(&FakeRunner) -> Result<SidecarCommandSuccess, SidecarCommandError>>)> = vec![
+            (
+                "sync.status",
+                Box::new(|runner| {
+                    tauri::async_runtime::block_on(sync_status_with_runner(runner, "/store".into()))
+                }),
+            ),
+            (
+                "sync.plan",
+                Box::new(|runner| {
+                    tauri::async_runtime::block_on(sync_plan_with_runner(runner, "/store".into()))
+                }),
+            ),
+            (
+                "sync.run",
+                Box::new(|runner| {
+                    tauri::async_runtime::block_on(sync_run_with_runner(runner, "/store".into()))
+                }),
+            ),
+        ];
+
+        for (method, call) in cases {
+            let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "ok": true })));
+            call(&runner).expect("command succeeds");
+            let request = runner.last_request();
+
+            assert_eq!(request["method"], method);
+            assert_eq!(request["params"]["storeRoot"], "/store");
+        }
+    }
+
+    #[test]
+    fn sync_configure_passes_the_folder_and_label_through_unchanged() {
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "enabled": true })));
+
+        tauri::async_runtime::block_on(sync_configure_with_runner(
+            &runner,
+            "/store".into(),
+            true,
+            Some("/home/user/Drive/ThePrivator".into()),
+            Some("Laptop A".into()),
+        ))
+        .expect("configure succeeds");
+        let request = runner.last_request();
+
+        assert_eq!(request["method"], "sync.configure");
+        assert_eq!(request["params"]["enabled"], true);
+        assert_eq!(request["params"]["folder"], "/home/user/Drive/ThePrivator");
+        assert_eq!(request["params"]["deviceLabel"], "Laptop A");
+    }
+
+    #[test]
+    fn disabling_sync_sends_no_folder_rather_than_an_empty_one() {
+        // An empty string is a value the sidecar would have to reject; absent is
+        // the honest way to say "not changing the folder".
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "enabled": false })));
+
+        tauri::async_runtime::block_on(sync_configure_with_runner(
+            &runner,
+            "/store".into(),
+            false,
+            None,
+            None,
+        ))
+        .expect("configure succeeds");
+
+        assert!(runner.last_request()["params"]["folder"].is_null());
+    }
+
+    #[test]
+    fn sync_resolve_and_prepare_carry_their_profile_id() {
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "resolved": {} })));
+        tauri::async_runtime::block_on(sync_resolve_with_runner(
+            &runner,
+            "/store".into(),
+            "profile-1".into(),
+            "keepRemote".into(),
+        ))
+        .expect("resolve succeeds");
+        assert_eq!(runner.last_request()["params"]["profileId"], "profile-1");
+        assert_eq!(runner.last_request()["params"]["resolution"], "keepRemote");
+
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "prepared": true })));
+        tauri::async_runtime::block_on(sync_prepare_with_runner(
+            &runner,
+            "/store".into(),
+            "profile-2".into(),
+        ))
+        .expect("prepare succeeds");
+        assert_eq!(runner.last_request()["method"], "sync.prepare");
+        assert_eq!(runner.last_request()["params"]["profileId"], "profile-2");
+    }
+
+    #[test]
+    fn taking_over_a_lock_carries_the_typed_confirmation() {
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({ "released": true })));
+
+        tauri::async_runtime::block_on(sync_force_release_lock_with_runner(
+            &runner,
+            "/store".into(),
+            "profile-1".into(),
+            "Laptop A".into(),
+        ))
+        .expect("release succeeds");
+        let request = runner.last_request();
+
+        assert_eq!(request["method"], "sync.lock.forceRelease");
+        assert_eq!(request["params"]["confirmDeviceLabel"], "Laptop A");
+    }
+
+    #[test]
+    fn a_sync_run_gets_a_far_longer_budget_than_a_status_check() {
+        // A first run uploads or downloads every profile in the library, each a
+        // whole browser directory; a status check only reads small files, and a
+        // mistyped folder must not take minutes to report itself.
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({})));
+        tauri::async_runtime::block_on(sync_run_with_runner(&runner, "/store".into())).expect("run");
+        let run_budget = runner.last_timeout();
+
+        let runner = FakeRunner::new(FakeMode::SuccessResult(json!({})));
+        tauri::async_runtime::block_on(sync_status_with_runner(&runner, "/store".into())).expect("status");
+        let status_budget = runner.last_timeout();
+
+        assert!(run_budget >= Duration::from_secs(600));
+        assert!(status_budget <= Duration::from_secs(30));
+        assert!(run_budget > status_budget);
     }
 
     #[test]

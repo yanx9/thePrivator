@@ -76,9 +76,17 @@ describe("App", () => {
     navigate("#/profiles/abc123");
     expect(screen.getByRole("navigation", { name: /profile folders and views/i })).toBeInTheDocument();
 
-    navigate("#/settings/sync");
+    navigate("#/settings/diagnostics");
     expect(screen.queryByRole("navigation", { name: /profile folders/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("opens the synchronization page from its own settings section", () => {
+    render(<App />);
+
+    navigate("#/settings/sync");
+
+    expect(screen.getByRole("heading", { name: /profile synchronization/i })).toBeInTheDocument();
   });
 
   it("falls back to profiles for a hash that names no destination", () => {

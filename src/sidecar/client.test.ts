@@ -2,6 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyProfileIdentityPreset,
+  configureSync,
+  forceReleaseSyncLock,
+  getSyncStatus,
+  planSync,
+  prepareSyncedProfile,
+  resolveSyncConflict,
+  runSync,
   bulkLaunchChromiumProfiles,
   bulkStopChromiumProfiles,
   checkProfileProxy,
@@ -3294,5 +3301,195 @@ describe("bulk chromium commands", () => {
     );
 
     await expect(bulkLaunchChromiumProfiles([FIRST])).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+});
+
+describe("sync commands", () => {
+  function status(overrides: Record<string, unknown> = {}) {
+    return {
+      enabled: true,
+      configured: true,
+      folderName: "ThePrivator",
+      deviceLabel: "Laptop A",
+      lastRunAt: "2026-05-04T18:00:00.000Z",
+      trackedProfiles: 3,
+      reachable: true,
+      writable: true,
+      detail: "The sync folder is readable and writable.",
+      ...overrides,
+    };
+  }
+
+  function planEntry(overrides: Record<string, unknown> = {}) {
+    return {
+      profileId: "11111111-1111-1111-1111-111111111111",
+      name: "Banking",
+      action: "push",
+      reason: "Only this device changed the profile.",
+      localRevision: 4,
+      remoteRevision: 3,
+      baseRevision: 3,
+      ...overrides,
+    };
+  }
+
+  function counts(overrides: Record<string, number> = {}) {
+    return { nothing: 0, push: 0, pull: 0, conflict: 0, deleteLocal: 0, deleteRemote: 0, ...overrides };
+  }
+
+  it("reads the status without asking for a store root of its own", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(status()));
+
+    const snapshot = await getSyncStatus();
+
+    expect(mockInvoke).toHaveBeenCalledWith("sync_status");
+    expect(snapshot.folderName).toBe("ThePrivator");
+    expect(snapshot.deviceLabel).toBe("Laptop A");
+    expect(snapshot.trackedProfiles).toBe(3);
+  });
+
+  it("rejects a status that returns a path where a folder name belongs", async () => {
+    // The sync root is the one absolute path the frontend supplies, and the
+    // sidecar reports it back by name on purpose. A separator arriving here
+    // means the redaction perimeter has a hole.
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(status({ folderName: "/home/someone/Drive" })));
+
+    await expect(getSyncStatus()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a status carrying an unexpected key", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(status({ syncRoot: "/home/someone/Drive" })));
+
+    await expect(getSyncStatus()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("sends the folder and label when enabling, and null when disabling", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(status()));
+    await configureSync({ enabled: true, folder: "/home/someone/Drive", deviceLabel: "Laptop A" });
+    expect(mockInvoke).toHaveBeenCalledWith("sync_configure", {
+      enabled: true,
+      folder: "/home/someone/Drive",
+      deviceLabel: "Laptop A",
+    });
+
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(status({ enabled: false })));
+    await configureSync({ enabled: false });
+    expect(mockInvoke).toHaveBeenLastCalledWith("sync_configure", {
+      enabled: false,
+      folder: null,
+      deviceLabel: null,
+    });
+  });
+
+  it("reads a plan with its per-action counts", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ plans: [planEntry()], counts: counts({ push: 1 }) }),
+    );
+
+    const snapshot = await planSync();
+
+    expect(snapshot.plans[0].action).toBe("push");
+    expect(snapshot.counts.push).toBe(1);
+    expect(snapshot.counts.conflict).toBe(0);
+  });
+
+  it("rejects a plan whose counts omit an action this build knows about", async () => {
+    // A missing key would read as zero and quietly hide a whole category.
+    const partial = counts();
+    delete (partial as Record<string, number>).conflict;
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ plans: [], counts: partial }));
+
+    await expect(planSync()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a plan entry with an action this build does not understand", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ plans: [planEntry({ action: "rebase" })], counts: counts() }),
+    );
+
+    await expect(planSync()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("reads a run's applied, conflicted and failed profiles separately", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        applied: [{ profileId: "a", name: "Banking", action: "uploaded", keptCopyAs: null }],
+        conflicts: [planEntry({ action: "conflict" })],
+        failures: [{ profileId: "b", name: "Shopping", code: "SYNC_PROFILE_BUSY" }],
+        status: status(),
+      }),
+    );
+
+    const snapshot = await runSync();
+
+    expect(snapshot.applied[0].action).toBe("uploaded");
+    expect(snapshot.conflicts[0].action).toBe("conflict");
+    expect(snapshot.failures[0].code).toBe("SYNC_PROFILE_BUSY");
+  });
+
+  it("rejects a kept copy reported as a path rather than a name", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        applied: [{ profileId: "a", name: "Banking", action: "updated", keptCopyAs: "/store/conflicts/a" }],
+        conflicts: [],
+        failures: [],
+        status: status(),
+      }),
+    );
+
+    await expect(runSync()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("carries a conflict resolution to the bridge and reads the outcome back", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        resolved: { profileId: "a", name: "Banking", action: "updated", keptCopyAs: "a-20260504" },
+        resolution: "keepRemote",
+      }),
+    );
+
+    const result = await resolveSyncConflict("a", "keepRemote");
+
+    expect(mockInvoke).toHaveBeenCalledWith("sync_resolve", { profileId: "a", resolution: "keepRemote" });
+    expect(result.resolved.keptCopyAs).toBe("a-20260504");
+  });
+
+  it("rejects a resolution the sidecar invented", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        resolved: { profileId: "a", name: "Banking", action: "updated", keptCopyAs: null },
+        resolution: "mergeFields",
+      }),
+    );
+
+    await expect(resolveSyncConflict("a", "keepRemote")).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+    });
+  });
+
+  it("distinguishes a prepare that fetched data from one that had nothing to fetch", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ prepared: true, profileId: "a", name: "Banking", action: "updated", keptCopyAs: null }),
+    );
+    expect((await prepareSyncedProfile("a")).prepared).toBe(true);
+
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ prepared: false, reason: "This profile has nothing waiting on the other devices." }),
+    );
+    const nothing = await prepareSyncedProfile("a");
+    expect(nothing.prepared).toBe(false);
+    expect(nothing.reason).toMatch(/nothing waiting/i);
+  });
+
+  it("reports who held a lock that was taken over", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ released: true, previousHolder: "Old laptop" }));
+
+    const result = await forceReleaseSyncLock("a", "Old laptop");
+
+    expect(mockInvoke).toHaveBeenCalledWith("sync_force_release_lock", {
+      profileId: "a",
+      confirmDeviceLabel: "Old laptop",
+    });
+    expect(result.previousHolder).toBe("Old laptop");
   });
 });

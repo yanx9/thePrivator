@@ -812,6 +812,103 @@ export interface ProfileLaunchDraft {
   args: string[];
 }
 
+export type SyncAction = "nothing" | "push" | "pull" | "conflict" | "deleteLocal" | "deleteRemote";
+
+export type SyncConflictResolution = "keepLocal" | "keepRemote" | "keepBoth";
+
+export interface SyncStatusResult {
+  enabled: boolean;
+  configured: boolean;
+  /** The folder's own name. The full path never crosses the bridge. */
+  folderName: string | null;
+  deviceLabel: string;
+  lastRunAt: string | null;
+  trackedProfiles: number;
+  reachable: boolean;
+  writable: boolean;
+  detail: string;
+}
+
+export interface SyncPlanEntry {
+  profileId: string;
+  name: string;
+  action: SyncAction;
+  reason: string;
+  localRevision: number | null;
+  remoteRevision: number | null;
+  baseRevision: number | null;
+}
+
+export interface SyncPlanResult {
+  plans: SyncPlanEntry[];
+  counts: Record<SyncAction, number>;
+}
+
+export interface SyncAppliedEntry {
+  profileId: string;
+  name: string;
+  action: string;
+  /** A folder name under conflicts/, never a path. */
+  keptCopyAs: string | null;
+}
+
+export interface SyncFailureEntry {
+  profileId: string;
+  name: string;
+  code: string;
+}
+
+export interface SyncRunResult {
+  applied: SyncAppliedEntry[];
+  conflicts: SyncPlanEntry[];
+  failures: SyncFailureEntry[];
+  status: SyncStatusResult;
+}
+
+export interface SyncResolveResult {
+  resolved: SyncAppliedEntry;
+  resolution: SyncConflictResolution;
+}
+
+export interface SyncPrepareResult {
+  prepared: boolean;
+  reason?: string;
+  profileId?: string;
+  name?: string;
+  action?: string;
+  keptCopyAs?: string | null;
+}
+
+export interface SyncLockReleaseResult {
+  released: boolean;
+  previousHolder?: string;
+  reason?: string;
+}
+
+export interface SyncStatusSnapshot extends SyncStatusResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface SyncPlanSnapshot extends SyncPlanResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface SyncRunSnapshot extends SyncRunResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface ProfileTrashListResult {
   storeVersion: 4;
   profiles: ProfileRecord[];

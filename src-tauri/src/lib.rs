@@ -72,6 +72,13 @@ pub fn run() {
             sidecar::profiles_trash_list,
             sidecar::profiles_trash_restore,
             sidecar::profiles_trash_purge,
+            sidecar::sync_status,
+            sidecar::sync_configure,
+            sidecar::sync_plan,
+            sidecar::sync_run,
+            sidecar::sync_resolve,
+            sidecar::sync_prepare,
+            sidecar::sync_force_release_lock,
             sidecar::legacy_scan_profiles,
             sidecar::legacy_import_profiles
         ])
