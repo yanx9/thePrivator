@@ -21,6 +21,7 @@ from theprivator_sidecar.profile_package import (
     COOKIE_MEMBER,
     MANIFEST_MEMBER,
     PACKAGE_FORMAT,
+    PACKAGE_KIND_PORTABLE,
     PACKAGE_VERSION,
     PAYLOAD_PREFIX,
     export_profile_package,
@@ -247,6 +248,9 @@ def minimal_manifest(**overrides: Any) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "format": PACKAGE_FORMAT,
         "version": PACKAGE_VERSION,
+        # Version 3 packages say what they are for. A package handed to another
+        # person is portable; only a sync payload names a profile id.
+        "kind": PACKAGE_KIND_PORTABLE,
         "createdAt": "2026-01-01T00:00:00.000Z",
         "profile": {
             "name": "Imported",

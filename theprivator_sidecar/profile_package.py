@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from . import chromium, cookies
+from .profile_sections import normalize_launch, normalize_organization
 from .profiles import (
     MAX_PROFILE_NAME_LENGTH,
     ProfileRecord,
@@ -50,11 +51,25 @@ from .proxy import is_proxy_secret_key, normalize_proxy_config, public_proxy_sum
 PACKAGE_FORMAT = "theprivator.profile-package"
 # Bumped with identity v2: a package carrying a v2 identity while claiming
 # version 1 is a format that lies about its own contents.
-PACKAGE_VERSION = 2
-# Version 1 packages still import. Their identity is upgraded on read like any
-# other v1 identity, so refusing them would strand every package exported before
-# this release -- and a package is exactly the artifact a user keeps around.
-SUPPORTED_PACKAGE_VERSIONS = frozenset({1, PACKAGE_VERSION})
+# Bumped again for sync: a package now says what it is for. A sync payload
+# carries the profile id and revision it belongs to, which a package handed to
+# another person must not.
+PACKAGE_VERSION = 3
+# Versions 1 and 2 still import, as portable packages. Their identity is
+# upgraded on read like any other older identity, so refusing them would strand
+# every package exported before this release -- and a package is exactly the
+# artifact a user keeps around.
+SUPPORTED_PACKAGE_VERSIONS = frozenset({1, 2, PACKAGE_VERSION})
+
+# What a package is for.
+#
+# "portable" is the artifact a user exports to move a profile or hand it to
+# someone else, and it deliberately carries no identifiers tying it to a store.
+# "sync" is machinery: it names the profile id and revision it represents, so the
+# engine can tell which local record it corresponds to without guessing by name.
+PACKAGE_KIND_PORTABLE = "portable"
+PACKAGE_KIND_SYNC = "sync"
+SUPPORTED_PACKAGE_KINDS = frozenset({PACKAGE_KIND_PORTABLE, PACKAGE_KIND_SYNC})
 PACKAGE_FILE_SUFFIX = ".tpkg"
 MANIFEST_MEMBER = "manifest.json"
 COOKIE_MEMBER = "cookies/theprivator-cookies.json"
@@ -72,6 +87,10 @@ MAX_MEMBER_COMPRESSION_RATIO = 100
 MIN_SUSPICIOUS_COMPRESSED_BYTES = 1024
 
 _MANIFEST_FIELDS = frozenset({"format", "version", "createdAt", "profile", "cookies", "payload", "warnings"})
+# Version 3 adds the discriminator and, for sync payloads only, the section that
+# says which profile and revision the payload is.
+_MANIFEST_FIELDS_V3 = _MANIFEST_FIELDS | {"kind", "sync"}
+_SYNC_FIELDS = frozenset({"profileId", "revision", "deviceId", "organization", "launch"})
 _PROFILE_FIELDS = frozenset({"name", "identity", "proxy", "proxySummary"})
 _RESERVED_WINDOWS_PATH_SEGMENTS = frozenset(
     {
@@ -350,11 +369,13 @@ def _build_manifest(
     payload_files: Sequence[PayloadFile],
     payload_byte_count: int,
     warnings: Sequence[Mapping[str, Any]],
+    kind: str = PACKAGE_KIND_PORTABLE,
 ) -> JsonObject:
     cookie_sha256 = hashlib.sha256(cookie_payload.content).hexdigest()
-    return {
+    manifest: JsonObject = {
         "format": PACKAGE_FORMAT,
         "version": PACKAGE_VERSION,
+        "kind": kind,
         "createdAt": utc_now_iso(),
         "profile": {
             "name": profile.name,
@@ -387,6 +408,21 @@ def _build_manifest(
         },
         "warnings": [dict(warning) for warning in warnings],
     }
+
+    if kind == PACKAGE_KIND_SYNC:
+        # Only a sync payload carries these. A portable package is something a
+        # user may hand to another person, and a store-local id plus a device id
+        # is exactly the kind of correlatable identifier this product exists to
+        # avoid handing out.
+        manifest["sync"] = {
+            "profileId": profile.id,
+            "revision": int(profile.sync.get("revision", 1)),
+            "deviceId": str(profile.sync.get("updatedBy", "")),
+            "organization": dict(profile.organization),
+            "launch": dict(profile.launch),
+        }
+
+    return manifest
 
 
 def _write_package_archive(
@@ -640,8 +676,6 @@ def _read_manifest(archive: zipfile.ZipFile, by_name: Mapping[str, zipfile.ZipIn
 def _validate_manifest(
     manifest: Mapping[str, Any]
 ) -> tuple[str, JsonObject, JsonObject, JsonObject, list[PayloadManifestEntry], list[JsonObject]]:
-    if frozenset(manifest.keys()) != _MANIFEST_FIELDS:
-        _raise_invalid_package()
     if manifest.get("format") != PACKAGE_FORMAT:
         _raise_invalid_package()
     version = manifest.get("version")
@@ -652,6 +686,23 @@ def _validate_manifest(
             code=PORTABILITY_PACKAGE_UNSUPPORTED_VERSION,
             message="Profile package version is not supported.",
         )
+
+    keys = frozenset(manifest.keys())
+    if version < 3:
+        # Older packages predate the discriminator and are portable by
+        # definition -- there was nothing else to be.
+        if keys != _MANIFEST_FIELDS:
+            _raise_invalid_package()
+        kind = PACKAGE_KIND_PORTABLE
+    else:
+        kind = manifest.get("kind")
+        if kind not in SUPPORTED_PACKAGE_KINDS:
+            _raise_invalid_package()
+        expected = _MANIFEST_FIELDS_V3 if kind == PACKAGE_KIND_SYNC else (_MANIFEST_FIELDS | {"kind"})
+        if keys != expected:
+            _raise_invalid_package()
+        if kind == PACKAGE_KIND_SYNC:
+            _validate_sync_manifest(manifest.get("sync"))
     created_at = manifest.get("createdAt")
     if not isinstance(created_at, str) or not is_utc_iso_timestamp(created_at):
         _raise_invalid_package()
@@ -680,6 +731,46 @@ def _validate_manifest(
     payload_entries = _validate_payload_manifest(manifest.get("payload"))
     warnings = _validate_manifest_warnings(manifest.get("warnings", []))
     return profile_name, identity, proxy, cookie_meta, payload_entries, warnings
+
+
+def _validate_sync_manifest(raw: Any) -> JsonObject:
+    """The sync section, checked as strictly as everything else in a manifest.
+
+    This arrives from a shared folder, which is to say from another machine that
+    may be running a different build -- or from whatever else can write to that
+    directory.
+    """
+    if not isinstance(raw, Mapping) or frozenset(raw.keys()) != _SYNC_FIELDS:
+        _raise_invalid_package()
+
+    profile_id = raw.get("profileId")
+    if not isinstance(profile_id, str) or not profile_id or len(profile_id) > 64:
+        _raise_invalid_package()
+
+    revision = raw.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        _raise_invalid_package()
+
+    device_id = raw.get("deviceId")
+    if not isinstance(device_id, str) or len(device_id) > 64:
+        _raise_invalid_package()
+
+    try:
+        organization = normalize_organization(raw.get("organization"))
+        launch = normalize_launch(raw.get("launch"))
+    except SidecarError as exc:
+        raise PackageValidationError(
+            code=PORTABILITY_PACKAGE_INVALID,
+            message="Profile package manifest is invalid.",
+        ) from exc
+
+    return {
+        "profileId": profile_id,
+        "revision": revision,
+        "deviceId": device_id,
+        "organization": organization,
+        "launch": launch,
+    }
 
 
 def _validate_cookie_manifest(raw: Any) -> JsonObject:
