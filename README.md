@@ -1,4 +1,4 @@
-# ThePrivator
+# ThePrivator 3.0
 
 A desktop manager for isolated browser profiles. Each profile is its own browser
 identity — separate cookies and storage, its own proxy, and a fingerprint you
