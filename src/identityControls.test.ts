@@ -449,3 +449,66 @@ function seedValues(savedIdentity: ProfileIdentity): IdentityDraftFieldValues {
     "ports.allowedPorts": savedIdentity.ports.mode === "custom" ? savedIdentity.ports.allowedPorts.join(", ") : "",
   };
 }
+
+describe("descriptor and parser bounds", () => {
+  /**
+   * The bounds live twice: once in the descriptor the form renders from, once in
+   * the parser that validates what comes back. A form offering a range the
+   * parser rejects turns a legal value into an error message the user cannot
+   * act on -- so the two are compared against each other rather than trusted.
+   */
+  const numericFields = IDENTITY_DRAFT_FIELD_DESCRIPTORS.filter(
+    (descriptor) =>
+      (descriptor.kind === "integer" || descriptor.kind === "number") &&
+      descriptor.min !== undefined &&
+      descriptor.max !== undefined,
+  );
+
+  /**
+   * Put the surface into a mode where the field is actually parsed.
+   *
+   * A surface left in "real" mode ignores its fields entirely, so a draft built
+   * without this step reports no error for any value -- which would make the
+   * whole suite pass while checking nothing.
+   */
+  function draftWithField(field: (typeof numericFields)[number], value: string) {
+    const withMode = updateIdentityDraftSurfaceMode(
+      createIdentityDraftState(identity()),
+      field.surface,
+      field.modes[0],
+    );
+    return updateIdentityDraftField(withMode, field.path, value);
+  }
+
+  it("finds numeric fields to check, so this suite cannot pass vacuously", () => {
+    expect(numericFields.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("puts each surface in a mode that actually parses its field", () => {
+    // The guard for the vacuity above: a value far outside every range must be
+    // rejected for every field this suite covers.
+    for (const field of numericFields) {
+      expect(draftWithField(field, "-999999999").errors[field.path], field.path).toBeDefined();
+    }
+  });
+
+  it("accepts the exact minimum and maximum every descriptor advertises", () => {
+    for (const field of numericFields) {
+      for (const bound of [field.min, field.max]) {
+        expect(draftWithField(field, String(bound)).errors[field.path], `${field.path} at ${bound}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("rejects one step outside every advertised bound", () => {
+    for (const field of numericFields) {
+      const step = field.kind === "integer" ? 1 : 0.01;
+      for (const outside of [(field.min as number) - step, (field.max as number) + step]) {
+        expect(
+          draftWithField(field, String(outside)).errors[field.path],
+          `${field.path} at ${outside}`,
+        ).toBeDefined();
+      }
+    }
+  });
+});

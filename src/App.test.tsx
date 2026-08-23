@@ -3,12 +3,14 @@ import { fireEvent, render, screen } from "@testing-library/react";
 
 // The profile surfaces have their own suites; here they stand in for themselves
 // so this file stays a test of routing rather than a second slow copy of both.
-vi.mock("./legacy/LegacyApp", () => ({
-  LegacyApp: () => <div data-testid="legacy-editor" />,
-}));
-
 vi.mock("./features/profiles/ProfilesPage", () => ({
   ProfilesPage: ({ view }: { view: string }) => <div data-testid="profiles-table">{view}</div>,
+}));
+
+vi.mock("./features/profiles/ProfileEditor", () => ({
+  ProfileEditor: ({ profileId }: { profileId: string | null }) => (
+    <div data-testid="profile-editor">{profileId ?? "new"}</div>
+  ),
 }));
 
 vi.mock("./windowControls", () => ({
@@ -49,15 +51,14 @@ describe("App", () => {
     expect(screen.getByTestId("profiles-table")).toHaveTextContent("trash");
   });
 
-  it("still opens the editor for a single profile while it is being ported", () => {
-    // The strangler seam: the list is the new table, editing is not yet.
+  it("opens the editor for one profile, and the create flow for a new one", () => {
     render(<App />);
 
     navigate("#/profiles/abc123");
-    expect(screen.getByTestId("legacy-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-editor")).toHaveTextContent("abc123");
 
     navigate("#/profiles/new");
-    expect(screen.getByTestId("legacy-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-editor")).toHaveTextContent("new");
   });
 
   it("follows the hash to another destination without a reload", () => {

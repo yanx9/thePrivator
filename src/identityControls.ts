@@ -598,10 +598,13 @@ export const IDENTITY_DRAFT_FIELD_DESCRIPTORS: IdentityDraftFieldDescriptor[] = 
     path: "mediaDevices.audioInputs",
     label: "Audio inputs",
     kind: "integer",
+    // Zero is a real configuration -- a device with no microphone -- which the
+    // sidecar permits and warns about. A minimum of one made it unreachable from
+    // the form while the validator went on accepting it.
     description: "Number of microphones enumerated by mediaDevices.",
     modes: CUSTOM_ONLY,
     required: true,
-    min: 1,
+    min: 0,
     max: 4,
   },
   {
@@ -1222,7 +1225,7 @@ function buildMediaDevicesSurface(
     audioInputs: parseIntegerValue(values["mediaDevices.audioInputs"], {
       path: "mediaDevices.audioInputs",
       label: "Audio inputs",
-      min: 1,
+      min: 0,
       max: 4,
       errors,
     }),

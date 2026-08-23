@@ -3,8 +3,8 @@ import { useCallback, useMemo, useState } from "react";
 import { Placeholder } from "./app/Placeholder";
 import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
+import { ProfileEditor } from "./features/profiles/ProfileEditor";
 import { ProfilesPage } from "./features/profiles/ProfilesPage";
-import { LegacyApp } from "./legacy/LegacyApp";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
 import type { StatusTile } from "./shell/StatusBar";
@@ -58,16 +58,9 @@ interface DestinationContext {
   folderNames: ReadonlyMap<string, string>;
   onOpenProfile: (id: string) => void;
   onNewProfile: () => void;
+  onCloseEditor: () => void;
 }
 
-/**
- * The strangler seam.
- *
- * The profile list is the new table; creating and editing a profile is still the
- * previous UI, until the editor lands. Splitting on the route rather than on a
- * flag means both halves are reachable and testable at every commit, instead of
- * a long period where one of them only exists in a branch.
- */
 function renderDestination(route: Route, context: DestinationContext) {
   if (route.name === "profiles") {
     return (
@@ -82,7 +75,13 @@ function renderDestination(route: Route, context: DestinationContext) {
     );
   }
   if (route.name === "profile" || route.name === "profile-new") {
-    return <LegacyApp />;
+    return (
+      <ProfileEditor
+        profileId={route.name === "profile" ? route.id : null}
+        onClose={context.onCloseEditor}
+        onSaved={context.onCloseEditor}
+      />
+    );
   }
   return destinationFor(context.destination);
 }
@@ -105,6 +104,10 @@ export function App() {
 
   const openProfile = useCallback((id: string) => navigate({ name: "profile", id }), [navigate]);
   const newProfile = useCallback(() => navigate({ name: "profile-new" }), [navigate]);
+  const closeEditor = useCallback(
+    () => navigate({ name: "profiles", view: "all", folderId: null }),
+    [navigate],
+  );
 
   return (
     <AppShell
@@ -124,6 +127,7 @@ export function App() {
         folderNames,
         onOpenProfile: openProfile,
         onNewProfile: newProfile,
+        onCloseEditor: closeEditor,
       })}
     </AppShell>
   );

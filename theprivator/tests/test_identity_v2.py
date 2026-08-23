@@ -6,6 +6,8 @@ about the cross-surface warnings as about each surface's own bounds.
 """
 
 import copy
+import re
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,8 @@ from theprivator_sidecar.identity import (
 )
 from theprivator_sidecar.identity_runtime import build_identity_runtime_plan
 from theprivator_sidecar.protocol import IDENTITY_INVALID, IDENTITY_UNSUPPORTED_MODE, SidecarError
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 V2_SURFACES = ("geolocation", "mediaDevices", "ports")
 
@@ -208,3 +212,87 @@ def test_the_described_contract_matches_the_normalizer():
     assert {surface["id"] for surface in described["surfaces"]} == set(SUPPORTED_MODES_BY_SURFACE)
     for surface in described["surfaces"]:
         assert sorted(SUPPORTED_MODES_BY_SURFACE[surface["id"]]) == surface["modes"]
+
+
+def _ui_descriptor_table() -> dict[str, dict[str, object]]:
+    """The frontend's field table, read out of its source.
+
+    A vitest test cannot call Python and a pytest cannot run TypeScript, so the
+    only place the two contracts can be compared is here, by reading the table
+    the UI actually builds its form from. Parsing source is unpleasant; shipping
+    a form whose bounds disagree with the validator is worse, because the
+    disagreement shows up as a save that the sidecar rejects after the user has
+    filled the field in.
+    """
+    source = (REPO_ROOT / "src" / "identityControls.ts").read_text(encoding="utf-8")
+    start = source.index("export const IDENTITY_DRAFT_FIELD_DESCRIPTORS")
+    end = source.index("\n];", start)
+    body = source[start:end]
+
+    table: dict[str, dict[str, object]] = {}
+    for entry in re.findall(r"\{(.*?)\n  \}", body, flags=re.DOTALL):
+        path = re.search(r'path:\s*"([^"]+)"', entry)
+        if path is None:
+            continue
+        descriptor: dict[str, object] = {}
+        for bound in ("maxLength", "min", "max"):
+            # TypeScript numeric separators are legal here: 1_000_000 must read
+            # as a million, not as a one.
+            found = re.search(rf"\b{bound}:\s*(-?[\d_.]+)", entry)
+            if found is not None:
+                text = found.group(1).replace("_", "")
+                descriptor[bound] = float(text) if "." in text else int(text)
+        descriptor["required"] = "required: true" in entry
+        table[path.group(1)] = descriptor
+
+    if len(table) < 20:
+        raise AssertionError(
+            "The frontend identity descriptor table is no longer where this test reads it."
+        )
+    return table
+
+
+def test_the_frontend_form_agrees_with_the_validator_about_every_bound():
+    """A form that offers a wider range than the validator accepts turns a typo
+    into a rejected save; a narrower one hides a value the profile may already
+    hold. Either way the disagreement surfaces to the user, not to us."""
+    described = describe_surfaces()
+    ui = _ui_descriptor_table()
+
+    checked = 0
+    for surface in described["surfaces"]:
+        for field in surface["fields"]:
+            # The UI paths are dotted; a few fields sit under a nested object.
+            candidates = [
+                path
+                for path in ui
+                if path == f"{surface['id']}.{field['name']}"
+                or path.startswith(f"{surface['id']}.")
+                and path.rsplit(".", 1)[-1] == field["name"]
+            ]
+            if not candidates:
+                continue
+            descriptor = ui[candidates[0]]
+            for bound in ("maxLength", "min", "max"):
+                if bound in field:
+                    assert descriptor.get(bound) == field[bound], (
+                        f"{surface['id']}.{field['name']} {bound}: "
+                        f"sidecar {field[bound]} vs UI {descriptor.get(bound)}"
+                    )
+                    checked += 1
+
+    assert checked >= 25, f"only {checked} bounds compared; the parse is not finding the table"
+
+
+def test_the_frontend_knows_about_every_surface_the_sidecar_describes():
+    source = (REPO_ROOT / "src" / "identityControls.ts").read_text(encoding="utf-8")
+    start = source.index("export const IDENTITY_SURFACE_ORDER")
+    end = source.index("\n];", start)
+    ui_surfaces = set(re.findall(r'"([a-zA-Z]+)"', source[start:end]))
+
+    described = {surface["id"] for surface in describe_surfaces()["surfaces"]}
+
+    assert ui_surfaces == described, (
+        f"only the sidecar knows about {described - ui_surfaces}; "
+        f"only the UI knows about {ui_surfaces - described}"
+    )
