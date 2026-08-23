@@ -8,8 +8,10 @@ import {
 } from "../../identityControls";
 import { type ProxyDraftState, createProxyDraftState, parseProxyDraftState } from "../../proxyControls";
 import {
+  applyProfileIdentityPreset,
   createProfile,
   getChromiumStatus,
+  listIdentityPresets,
   listProfiles,
   normalizeSidecarError,
   updateProfile,
@@ -20,6 +22,7 @@ import {
 } from "../../sidecar/client";
 import type {
   IdentityWarning,
+  ProfileIdentity,
   ProfileLaunchDraft,
   ProfileOrganizationDraft,
   ProfileRecord,
@@ -109,6 +112,9 @@ export function ProfileEditor({ profileId, running: runningProp, onClose, onSave
   // browser is live, and a stale "stopped" would let them corrupt it.
   const [runningHere, setRunningHere] = useState(false);
   const running = runningProp ?? runningHere;
+  // Loaded when the fingerprint tab is first opened rather than on mount: most
+  // visits to this editor never touch it, and the list costs a round trip.
+  const [presets, setPresets] = useState<ProfileIdentity[] | null>(null);
 
   useEffect(() => {
     if (profileId === null) {
@@ -166,6 +172,50 @@ export function ProfileEditor({ profileId, running: runningProp, onClose, onSave
       cancelled = true;
     };
   }, [profileId, runningProp]);
+
+  useEffect(() => {
+    if (section !== "fingerprint" || presets !== null) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snapshot = await listIdentityPresets();
+        if (!cancelled) {
+          setPresets(snapshot.presets);
+        }
+      } catch {
+        // A preset list that will not load is not worth blocking the form for;
+        // every surface can still be set by hand.
+        if (!cancelled) {
+          setPresets([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [section, presets]);
+
+  const applyPreset = useCallback(
+    (presetId: string) => {
+      if (profile === null) {
+        return;
+      }
+      void (async () => {
+        try {
+          const applied = await applyProfileIdentityPreset(profile.id, presetId);
+          setProfile(applied.profile);
+          setDraft((current) => ({ ...current, identity: createIdentityDraftState(applied.profile) }));
+          setWarnings(applied.warnings);
+          setError(null);
+        } catch (caught) {
+          setError(normalizeSidecarError(caught).message);
+        }
+      })();
+    },
+    [profile],
+  );
 
   const sectionErrorCount = useMemo(
     () => ({
@@ -321,7 +371,9 @@ export function ProfileEditor({ profileId, running: runningProp, onClose, onSave
           <FingerprintForm
             draft={draft.identity}
             warnings={warnings}
+            presets={profile === null ? undefined : (presets ?? undefined)}
             onChange={(identity) => setDraft((current) => ({ ...current, identity }))}
+            onApplyPreset={applyPreset}
           />
         ) : section === "extra" ? (
           <StartupForm

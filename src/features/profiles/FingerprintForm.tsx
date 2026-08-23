@@ -8,13 +8,16 @@ import {
   updateIdentityDraftLabel,
   updateIdentityDraftSurfaceMode,
 } from "../../identityControls";
-import type { IdentityWarning } from "../../sidecar/types";
+import type { IdentityWarning, ProfileIdentity } from "../../sidecar/types";
 import styles from "./FingerprintForm.module.css";
 
 interface FingerprintFormProps {
   draft: IdentityDraftState;
   warnings: readonly IdentityWarning[];
+  /** Curated starting points, loaded lazily by the editor. */
+  presets?: readonly ProfileIdentity[];
   onChange: (draft: IdentityDraftState) => void;
+  onApplyPreset?: (presetId: string) => void;
 }
 
 /**
@@ -25,9 +28,16 @@ interface FingerprintFormProps {
  * edits in six places, and forgetting any of them shipped a surface the user
  * could not see or set.
  */
-export function FingerprintForm({ draft, warnings, onChange }: FingerprintFormProps) {
+export function FingerprintForm({
+  draft,
+  warnings,
+  presets,
+  onChange,
+  onApplyPreset,
+}: FingerprintFormProps) {
   const controls = getIdentitySurfaceControls(draft.identity);
   const labelId = useId();
+  const presetId = useId();
 
   const warningsBySurface = new Map<string, IdentityWarning[]>();
   for (const warning of warnings) {
@@ -41,6 +51,34 @@ export function FingerprintForm({ draft, warnings, onChange }: FingerprintFormPr
 
   return (
     <div className={styles.form}>
+      {presets !== undefined && presets.length > 0 && onApplyPreset !== undefined ? (
+        <div className={styles.labelRow}>
+          <label htmlFor={presetId}>Start from a preset</label>
+          <select
+            id={presetId}
+            value={draft.identity.presetId ?? ""}
+            onChange={(event) => {
+              if (event.target.value !== "") {
+                onApplyPreset(event.target.value);
+              }
+            }}
+          >
+            {/* The empty option is not "no preset" as a choice -- it is what a
+                hand-edited identity reads as, and picking it would be a no-op
+                that looks like it reverted something. */}
+            <option value="">Custom</option>
+            {presets.map((preset) => (
+              <option key={preset.presetId ?? preset.label} value={preset.presetId ?? ""}>
+                {preset.label}
+              </option>
+            ))}
+          </select>
+          <p className={styles.hint}>
+            A preset sets every surface at once. Editing any field afterwards makes the identity custom.
+          </p>
+        </div>
+      ) : null}
+
       <div className={styles.labelRow}>
         <label htmlFor={labelId}>Identity label</label>
         <input

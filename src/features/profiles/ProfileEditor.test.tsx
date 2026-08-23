@@ -89,10 +89,22 @@ function respond(handlers: Record<string, () => unknown>) {
   });
 }
 
+function presetList() {
+  return envelope({
+    identityVersion: 2,
+    presets: [
+      { ...identity(), label: "Balanced desktop", presetId: "balanced-desktop" },
+      { ...identity(), label: "Hardened", presetId: "hardened" },
+    ],
+    count: 2,
+  });
+}
+
 function allSaveCommandsSucceed(profile = record()) {
   respond({
     profiles_list: () => envelope({ storeVersion: 4, profiles: [profile], count: 1 }),
     chromium_status: () => envelope({ runningCount: 0, profiles: [], reconciled: [] }),
+    identity_presets_list: presetList,
     profiles_create: () => mutation(profile),
     profiles_update: () => mutation(profile),
     profiles_organization_update: () => mutation(profile),
@@ -414,5 +426,86 @@ describe("ProfileEditor, creating a profile", () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(mockInvoke).not.toHaveBeenCalledWith("profiles_create", expect.anything());
+  });
+});
+
+describe("ProfileEditor, curated presets", () => {
+  it("loads presets only when the fingerprint tab is opened", async () => {
+    // Most visits never touch that tab, and the list costs a round trip.
+    allSaveCommandsSucceed();
+
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await screen.findByLabelText("Name");
+    expect(mockInvoke).not.toHaveBeenCalledWith("identity_presets_list");
+
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
+  });
+
+  it("offers the presets the sidecar returned", async () => {
+    allSaveCommandsSucceed();
+
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await screen.findByLabelText("Name");
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+
+    const select = await screen.findByLabelText(/start from a preset/i);
+    expect(within(select).getByRole("option", { name: "Balanced desktop" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Hardened" })).toBeInTheDocument();
+  });
+
+  it("applies the chosen preset through the sidecar rather than locally", async () => {
+    // A preset applied only in the form would show surfaces the sidecar never
+    // validated, and its warnings would never appear.
+    const applied = record({ identity: identity({ presetId: "hardened", label: "Hardened" }) });
+    allSaveCommandsSucceed();
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "profiles_identity_apply_preset") {
+        return Promise.resolve(mutation(applied, { warnings: [] })) as ReturnType<typeof invoke>;
+      }
+      if (command === "identity_presets_list") {
+        return Promise.resolve(presetList()) as ReturnType<typeof invoke>;
+      }
+      if (command === "profiles_list") {
+        return Promise.resolve(envelope({ storeVersion: 4, profiles: [record()], count: 1 })) as ReturnType<typeof invoke>;
+      }
+      return Promise.resolve(envelope({ runningCount: 0, profiles: [], reconciled: [] })) as ReturnType<typeof invoke>;
+    });
+
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await screen.findByLabelText("Name");
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+    const select = await screen.findByLabelText(/start from a preset/i);
+
+    fireEvent.change(select, { target: { value: "hardened" } });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_apply_preset", {
+        profileId: PROFILE_ID,
+        presetId: "hardened",
+      }),
+    );
+  });
+
+  it("says a hand-edited identity is custom rather than pretending a preset is active", async () => {
+    allSaveCommandsSucceed();
+
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await screen.findByLabelText("Name");
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+    const select = (await screen.findByLabelText(/start from a preset/i)) as HTMLSelectElement;
+
+    expect(select.value).toBe("");
+    expect(within(select).getByRole("option", { name: "Custom" })).toBeInTheDocument();
+  });
+
+  it("offers no presets in the create flow, where there is no profile to apply one to", () => {
+    allSaveCommandsSucceed();
+
+    render(<ProfileEditor profileId={null} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+
+    expect(screen.queryByLabelText(/start from a preset/i)).not.toBeInTheDocument();
   });
 });
