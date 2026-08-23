@@ -266,7 +266,7 @@ export interface ProfilePackageWarning {
 
 export interface ProfilePackageExportResult {
   portabilityVersion: 1;
-  packageVersion: 2;
+  packageVersion: 3;
   operation: Extract<ProfilePackageOperation, "export">;
   profileId: string;
   profileName: string;
@@ -288,7 +288,7 @@ export interface ProfilePackageExportSnapshot extends ProfilePackageExportResult
 
 export interface ProfilePackageImportResult {
   portabilityVersion: 1;
-  packageVersion: 2;
+  packageVersion: 3;
   operation: Extract<ProfilePackageOperation, "import">;
   importedProfileId: string;
   importedProfileName: string;

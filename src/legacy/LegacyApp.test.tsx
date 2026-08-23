@@ -419,7 +419,7 @@ function packageWarning(overrides: Record<string, unknown> = {}) {
 
 function packageExportResult(overrides: Record<string, unknown> = {}) {
   return {
-    packageVersion: 2,
+    packageVersion: 3,
     format: "theprivator.profile-package",
     operation: "export",
     profileId: "11111111-1111-1111-1111-111111111111",
@@ -438,7 +438,7 @@ function packageImportResult(overrides: Record<string, unknown> = {}) {
   const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "22222222-2222-2222-2222-222222222222";
   const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research copy";
   return {
-    packageVersion: 2,
+    packageVersion: 3,
     format: "theprivator.profile-package",
     operation: "import",
     profileId,

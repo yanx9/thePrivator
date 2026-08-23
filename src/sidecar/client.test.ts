@@ -125,7 +125,7 @@ function profilePackageWarning(overrides: Record<string, unknown> = {}) {
 
 function profilePackageExportResult(overrides: Record<string, unknown> = {}) {
   return {
-    packageVersion: 2,
+    packageVersion: 3,
     format: "theprivator.profile-package",
     operation: "export",
     profileId: PACKAGE_PROFILE_ID,
@@ -157,7 +157,7 @@ function profilePackageImportResult(overrides: Record<string, unknown> = {}) {
   const profileId = typeof overrides.profileId === "string" ? overrides.profileId : IMPORTED_PACKAGE_PROFILE_ID;
   const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research Copy";
   return {
-    packageVersion: 2,
+    packageVersion: 3,
     format: "theprivator.profile-package",
     operation: "import",
     profileId,
@@ -1807,7 +1807,7 @@ describe("sidecar client", () => {
     }
     expect(exported).toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 2,
+      packageVersion: 3,
       operation: "export",
       profileId: PACKAGE_PROFILE_ID,
       profileName: "Research",
@@ -1823,7 +1823,7 @@ describe("sidecar client", () => {
     });
     expect(imported).toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 2,
+      packageVersion: 3,
       operation: "import",
       importedProfileId: IMPORTED_PACKAGE_PROFILE_ID,
       importedProfileName: "Research Copy",
@@ -1851,7 +1851,7 @@ describe("sidecar client", () => {
 
     await expect(callClient()).resolves.toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 2,
+      packageVersion: 3,
     });
   });
 
@@ -1872,7 +1872,7 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["wrong package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 3 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["wrong package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 2 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["superseded package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 1 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["wrong package format", () => profilePackageEnvelope(profilePackageExportResult({ format: "zip" })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["missing payload count", () => profilePackageEnvelope(profilePackageExportResult({ payloadFileCount: undefined })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],

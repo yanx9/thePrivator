@@ -6,7 +6,7 @@ import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
 import { ProfilesPage } from "./features/profiles/ProfilesPage";
 import { AutomationPage } from "./features/automation/AutomationPage";
-import { SyncSettings } from "./features/sync/SyncSettings";
+import { SettingsPage } from "./features/settings/SettingsPage";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
 import type { StatusTile } from "./shell/StatusBar";
@@ -40,12 +40,8 @@ function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
     case "automation":
       return <AutomationPage />;
     default:
-      return (
-        <Placeholder
-          title="Settings"
-          description="Appearance, profile synchronization, diagnostics and import live here."
-        />
-      );
+      // Every destination above is handled; settings is routed before this.
+      return null;
   }
 }
 
@@ -71,8 +67,8 @@ function renderDestination(route: Route, context: DestinationContext) {
       />
     );
   }
-  if (route.name === "settings" && route.section === "sync") {
-    return <SyncSettings />;
+  if (route.name === "settings") {
+    return <SettingsPage section={route.section} />;
   }
   if (route.name === "profile" || route.name === "profile-new") {
     return (

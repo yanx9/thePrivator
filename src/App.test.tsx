@@ -78,7 +78,7 @@ describe("App", () => {
 
     navigate("#/settings/diagnostics");
     expect(screen.queryByRole("navigation", { name: /profile folders/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Diagnostics" })).toBeInTheDocument();
   });
 
   it("opens the synchronization page from its own settings section", () => {

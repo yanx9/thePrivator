@@ -510,7 +510,7 @@ const FORBIDDEN_COOKIE_PORTABILITY_TEXT_MARKERS = [
 ];
 
 const PROFILE_PACKAGE_FORMAT = "theprivator.profile-package";
-const PROFILE_PACKAGE_VERSION = 2;
+const PROFILE_PACKAGE_VERSION = 3;
 const MAX_PROFILE_PACKAGE_WARNINGS = 20;
 
 const PROFILE_PACKAGE_PAYLOAD_SKIP_WARNING_CODES = new Set([
@@ -4530,7 +4530,9 @@ function requireDialogPathString(value: unknown, field: string): string {
   return path;
 }
 
-function requireProfilePackageVersion(value: unknown, field: string): 2 {
+function requireProfilePackageVersion(value: unknown, field: string): 3 {
+  // The sidecar writes version 3 packages; it still reads 1 and 2, but it never
+  // reports them back as the version it just produced.
   return requireLiteralNumber(value, field, PROFILE_PACKAGE_VERSION);
 }
 

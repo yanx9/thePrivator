@@ -12,12 +12,19 @@
  * already knows which folder they just picked.
  */
 
+interface FileFilter {
+  name: string;
+  extensions: string[];
+}
+
 type DialogModule = {
   open?: (options: {
     directory?: boolean;
     multiple?: boolean;
     title?: string;
+    filters?: FileFilter[];
   }) => Promise<string | string[] | null>;
+  save?: (options: { title?: string; filters?: FileFilter[] }) => Promise<string | null>;
 };
 
 /** Ask for a directory. Null when the user cancelled, which is not an error. */
@@ -35,3 +42,33 @@ export async function pickDirectory(title: string): Promise<string | null> {
     return null;
   }
 }
+
+/** Ask for one existing file. Null when the user cancelled. */
+export async function pickFile(title: string, filters?: FileFilter[]): Promise<string | null> {
+  try {
+    const module = (await import("@tauri-apps/plugin-dialog")) as DialogModule;
+    if (typeof module.open !== "function") {
+      return null;
+    }
+    const selection = await module.open({ multiple: false, title, filters });
+    return typeof selection === "string" ? selection : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask where to write a file. Null when the user cancelled. */
+export async function pickSaveTarget(title: string, filters?: FileFilter[]): Promise<string | null> {
+  try {
+    const module = (await import("@tauri-apps/plugin-dialog")) as DialogModule;
+    if (typeof module.save !== "function") {
+      return null;
+    }
+    const selection = await module.save({ title, filters });
+    return typeof selection === "string" ? selection : null;
+  } catch {
+    return null;
+  }
+}
+
+export type { FileFilter };
