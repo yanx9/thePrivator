@@ -1,0 +1,36 @@
+@layer components {
+  .shell {
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .body {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    min-height: 0;
+  }
+
+  .main {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    background: var(--color-bg-app);
+  }
+
+  .skipLink {
+    position: absolute;
+    left: -9999px;
+    z-index: var(--z-modal);
+  }
+
+  .skipLink:focus {
+    left: var(--space-3);
+    top: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-md);
+  }
+}

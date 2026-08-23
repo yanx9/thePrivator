@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ThePrivator",
+  "version": "2.1.0",
+  "identifier": "com.theprivator.desktop",
+  "build": {
+    "beforeDevCommand": "npm run sidecar:build && npm run dev",
+    "beforeBuildCommand": "npm run build && npm run sidecar:build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ThePrivator",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm"],
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/theprivator-sidecar"],
+    "shortDescription": "ThePrivator desktop shell",
+    "longDescription": "A Tauri 2 desktop shell for ThePrivator's typed Rust and Python sidecar rewrite spine."
+  }
+}

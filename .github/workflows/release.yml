@@ -1,0 +1,139 @@
+name: Release
+
+# Three runners, because the sidecar decides.
+#
+# scripts/build-sidecar.mjs packs the Python sidecar with PyInstaller and names
+# the binary after `rustc --print host-tuple`. PyInstaller bundles the host's
+# interpreter and its native libraries -- it has no cross-compilation mode at
+# all. A macOS sidecar can therefore only be produced on macOS and a Windows one
+# only on Windows, whatever the Rust side could manage. That is the constraint
+# this matrix exists for, not a preference.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish under, e.g. v2.2.0. Leave blank to build artifacts only."
+        required: false
+        type: string
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other two: a macOS signing
+      # problem should still leave usable Linux and Windows artifacts.
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux (deb, rpm, AppImage)
+            os: ubuntu-22.04
+            # The config pins deb and rpm because scripts/verify-m005-s04.mjs
+            # asserts exactly that pair. AppImage is added here rather than
+            # there so the verifier's contract stays untouched.
+            bundles: deb,rpm,appimage
+            artifact: linux
+          - label: macOS (Apple silicon)
+            os: macos-14
+            bundles: app,dmg
+            artifact: macos-aarch64
+          - label: macOS (Intel)
+            os: macos-13
+            bundles: app,dmg
+            artifact: macos-x86_64
+          - label: Windows (msi, nsis)
+            os: windows-latest
+            bundles: msi,nsis
+            artifact: windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.artifact }}
+
+      # Tauri needs the WebKitGTK stack to compile at all on Linux, and patchelf
+      # to produce an AppImage.
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - run: npm ci
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # The gates that would have caught the last two broken releases. Building
+      # an installer from a tree that fails them wastes everyone's afternoon.
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Frontend tests
+        run: npx vitest run
+
+      - name: Sidecar tests
+        run: python -m pytest tests/ -q
+
+      - name: Build the sidecar binary
+        run: npm run sidecar:build
+
+      # Proves the packed binary answers before it is sealed inside an
+      # installer. A sidecar that only works from source is the failure mode
+      # this repo has hit before -- proxy_bridge was missing from the packed
+      # build and no test caught it.
+      - name: Verify the packed sidecar
+        run: npm run verify:sidecar
+
+      - name: Build the application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Passed on the command line rather than written into
+          # tauri.conf.json, whose bundle.targets a verifier asserts.
+          args: --bundles ${{ matrix.bundles }}
+          # tauri-action creates a release only when it is given a tag, so an
+          # empty tagName is what makes a manual run build artifacts and publish
+          # nothing. There is no separate switch for it.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}
+          releaseName: ${{ (startsWith(github.ref, 'refs/tags/') || inputs.tag) && format('ThePrivator {0}', startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag) || '' }}
+          releaseDraft: true
+          prerelease: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: theprivator-${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe

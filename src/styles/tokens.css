@@ -1,0 +1,200 @@
+/*
+ * Design tokens.
+ *
+ * The stylesheet this replaces had three passes stacked on top of each other,
+ * each redefining the same :root variables, with only the last one actually in
+ * use. The cascade layers declared in index.css make that impossible to repeat:
+ * a later import can no longer win by accident, only by being in a later layer.
+ *
+ * Semantic names only. A token called --color-surface can be restyled; one called
+ * --grey-800 has to be found and replaced everywhere it was used for the wrong
+ * reason.
+ */
+
+@layer tokens {
+  :root {
+    color-scheme: light;
+
+    /* Neutrals ---------------------------------------------------------- */
+    --color-bg-app: #f6f7f9;
+    --color-bg-surface: #ffffff;
+    --color-bg-raised: #ffffff;
+    --color-bg-hover: #f0f2f5;
+    --color-bg-selected: #e8eeff;
+    --color-bg-overlay: rgba(15, 18, 24, 0.45);
+    --color-border: #dfe3e9;
+    --color-border-strong: #c3c9d2;
+
+    /* Text -------------------------------------------------------------- */
+    --color-text: #14181f;
+    --color-text-muted: #5a6472;
+    --color-text-subtle: #8a94a3;
+    --color-text-inverse: #ffffff;
+
+    /* Accent ------------------------------------------------------------ */
+    --color-accent: #4c5ce0;
+    --color-accent-hover: #3f4ecb;
+    --color-accent-fg: #ffffff;
+    --color-accent-subtle: #edefff;
+
+    /* Status ------------------------------------------------------------ */
+    --color-success: #16794a;
+    --color-success-bg: #e6f5ee;
+    --color-warning: #8a5a00;
+    --color-warning-bg: #fdf1dc;
+    --color-danger: #b3261e;
+    --color-danger-bg: #fdeceb;
+    --color-info: #14608a;
+    --color-info-bg: #e4f2f9;
+
+    /* Tag hues, chosen to stay legible on both surfaces ------------------ */
+    --color-tag-1: #4c5ce0;
+    --color-tag-2: #16794a;
+    --color-tag-3: #8a5a00;
+    --color-tag-4: #a03060;
+    --color-tag-5: #14608a;
+    --color-tag-6: #6b4bb5;
+
+    /* Shape and rhythm --------------------------------------------------- */
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-pill: 999px;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+
+    /* A dense data grid: these drive the whole shell's geometry. */
+    --row-height: 40px;
+    --chrome-height: 36px;
+    --topnav-height: 48px;
+    --grid-header-height: 36px;
+    --statusbar-height: 30px;
+    --sidebar-width: 224px;
+    --sidebar-width-collapsed: 52px;
+
+    --font-ui: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --text-xs: 11px;
+    --text-sm: 12px;
+    --text-base: 13px;
+    --text-lg: 15px;
+    --text-xl: 20px;
+
+    --shadow-1: 0 1px 2px rgba(15, 18, 24, 0.08);
+    --shadow-2: 0 4px 12px rgba(15, 18, 24, 0.12);
+    --shadow-3: 0 12px 32px rgba(15, 18, 24, 0.18);
+
+    --z-sticky: 10;
+    --z-dropdown: 100;
+    --z-modal: 1000;
+    --z-toast: 2000;
+
+    --duration-fast: 120ms;
+    --ease-out: cubic-bezier(0.2, 0, 0, 1);
+    --focus-ring: 0 0 0 2px var(--color-bg-surface), 0 0 0 4px var(--color-accent);
+  }
+
+  /*
+   * Three theme states, and the order matters. "System" sets no attribute, so
+   * only the media query separates it; an explicit choice stamps data-theme and
+   * must win in both directions, which is why the attribute rules come last.
+   */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+
+      --color-bg-app: #0f1216;
+      --color-bg-surface: #171b21;
+      --color-bg-raised: #1e232b;
+      --color-bg-hover: #232932;
+      --color-bg-selected: #23304d;
+      --color-bg-overlay: rgba(0, 0, 0, 0.6);
+      --color-border: #2a303a;
+      --color-border-strong: #3b434f;
+
+      --color-text: #e7eaef;
+      --color-text-muted: #a3abb8;
+      --color-text-subtle: #6f7885;
+      --color-text-inverse: #0f1216;
+
+      --color-accent: #7c8cff;
+      --color-accent-hover: #94a1ff;
+      --color-accent-fg: #0f1216;
+      --color-accent-subtle: #1d2340;
+
+      --color-success: #4ed492;
+      --color-success-bg: #11291f;
+      --color-warning: #e0a33c;
+      --color-warning-bg: #2b2114;
+      --color-danger: #ff7b72;
+      --color-danger-bg: #2e1a19;
+      --color-info: #5cc0f5;
+      --color-info-bg: #12252e;
+
+      --color-tag-1: #7c8cff;
+      --color-tag-2: #4ed492;
+      --color-tag-3: #e0a33c;
+      --color-tag-4: #ef7bab;
+      --color-tag-5: #5cc0f5;
+      --color-tag-6: #a892f0;
+
+      --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+      --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+      --focus-ring: 0 0 0 2px var(--color-bg-surface), 0 0 0 4px var(--color-accent);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+
+    --color-bg-app: #0f1216;
+    --color-bg-surface: #171b21;
+    --color-bg-raised: #1e232b;
+    --color-bg-hover: #232932;
+    --color-bg-selected: #23304d;
+    --color-bg-overlay: rgba(0, 0, 0, 0.6);
+    --color-border: #2a303a;
+    --color-border-strong: #3b434f;
+
+    --color-text: #e7eaef;
+    --color-text-muted: #a3abb8;
+    --color-text-subtle: #6f7885;
+    --color-text-inverse: #0f1216;
+
+    --color-accent: #7c8cff;
+    --color-accent-hover: #94a1ff;
+    --color-accent-fg: #0f1216;
+    --color-accent-subtle: #1d2340;
+
+    --color-success: #4ed492;
+    --color-success-bg: #11291f;
+    --color-warning: #e0a33c;
+    --color-warning-bg: #2b2114;
+    --color-danger: #ff7b72;
+    --color-danger-bg: #2e1a19;
+    --color-info: #5cc0f5;
+    --color-info-bg: #12252e;
+
+    --color-tag-1: #7c8cff;
+    --color-tag-2: #4ed492;
+    --color-tag-3: #e0a33c;
+    --color-tag-4: #ef7bab;
+    --color-tag-5: #5cc0f5;
+    --color-tag-6: #a892f0;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+    --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+}

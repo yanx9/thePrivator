@@ -1,0 +1,352 @@
+"""Map canonical profile identity JSON into launch-time runtime contracts."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+import re
+from typing import Any, Mapping, Optional
+
+from .identity import IDENTITY_VERSION, normalize_identity
+from .protocol import IDENTITY_CDP_FAILED, JsonObject, SidecarError
+
+RUNTIME_PLAN_SCHEMA_VERSION = 2
+WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+
+
+@dataclass(frozen=True)
+class IdentityRuntimePlan:
+    """Deterministic identity artifacts needed by Chromium launch integration."""
+
+    identity_version: int
+    preset_id: Optional[str]
+    extension_config: JsonObject
+    cdp_overrides: JsonObject
+    launch_flags: list[str]
+
+    @property
+    def requires_extension(self) -> bool:
+        return bool(self.extension_config)
+
+    @property
+    def requires_cdp(self) -> bool:
+        return bool(self.cdp_overrides)
+
+    def to_dict(self) -> JsonObject:
+        """Return a JSON-safe, public-safe plan summary without profile labels."""
+        return {
+            "identityVersion": self.identity_version,
+            "presetId": self.preset_id,
+            "requiresExtension": self.requires_extension,
+            "requiresCdp": self.requires_cdp,
+            "extensionConfig": _json_copy(self.extension_config),
+            "cdpOverrides": _json_copy(self.cdp_overrides),
+            "launchFlags": list(self.launch_flags),
+        }
+
+
+def build_identity_runtime_plan(identity: Any) -> IdentityRuntimePlan:
+    """Normalize one profile identity into extension, CDP, and launch artifacts."""
+    normalized = normalize_identity(identity)
+    try:
+        extension_config = _build_extension_config(normalized)
+        cdp_overrides = _build_cdp_overrides(normalized)
+        launch_flags = _build_launch_flags(normalized)
+        return IdentityRuntimePlan(
+            identity_version=IDENTITY_VERSION,
+            preset_id=normalized.get("presetId") if isinstance(normalized.get("presetId"), str) else None,
+            extension_config=extension_config,
+            cdp_overrides=cdp_overrides,
+            launch_flags=launch_flags,
+        )
+    except SidecarError:
+        raise
+    except Exception as exc:
+        raise SidecarError(
+            code=IDENTITY_CDP_FAILED,
+            message="Identity CDP overrides could not be prepared.",
+        ) from exc
+
+
+def _build_extension_config(identity: Mapping[str, Any]) -> JsonObject:
+    config: JsonObject = {}
+
+    browser = identity["browser"]
+    navigator = identity["navigator"]
+    navigator_config: JsonObject = {}
+    if navigator.get("mode") != "real":
+        navigator_config.update(
+            {
+                "platform": navigator["platform"],
+                "hardwareConcurrency": navigator["hardwareConcurrency"],
+                "deviceMemory": navigator["deviceMemory"],
+            }
+        )
+    user_agent_metadata = _browser_user_agent_metadata(browser, navigator)
+    if user_agent_metadata:
+        navigator_config["userAgentData"] = user_agent_metadata
+    if navigator_config:
+        config["navigator"] = navigator_config
+
+    locale = identity["locale"]
+    if locale.get("mode") != "real":
+        config["locale"] = {
+            "locale": locale["locale"],
+            "languages": list(locale["languages"]),
+            "timezoneId": locale["timezoneId"],
+        }
+
+    screen = identity["screen"]
+    if screen.get("mode") != "real":
+        config["screen"] = {
+            "width": screen["width"],
+            "height": screen["height"],
+            "viewportWidth": screen["viewportWidth"],
+            "viewportHeight": screen["viewportHeight"],
+            "colorDepth": screen["colorDepth"],
+            "pixelRatio": screen["pixelRatio"],
+        }
+
+    canvas = identity["canvas"]
+    if canvas.get("mode") == "noise":
+        config["canvas"] = {"enabled": True, "noiseSeed": canvas["noiseSeed"]}
+
+    audio = identity["audio"]
+    if audio.get("mode") == "noise":
+        config["audio"] = {"enabled": True, "noiseSeed": audio["noiseSeed"]}
+
+    webgl = identity["webgl"]
+    if webgl.get("mode") != "real":
+        webgl_config: JsonObject = {
+            "enabled": True,
+            "vendor": webgl["vendor"],
+            "renderer": webgl["renderer"],
+        }
+        if "noiseSeed" in webgl:
+            webgl_config["noiseSeed"] = webgl["noiseSeed"]
+        config["webgl"] = webgl_config
+
+    webrtc = identity["webrtc"]
+    if webrtc.get("policy") != "real":
+        config["webrtc"] = {"policy": webrtc["policy"]}
+
+    geolocation = identity["geolocation"]
+    if geolocation.get("mode") != "real" or geolocation.get("permission") != "prompt":
+        geolocation_config: JsonObject = {"permission": geolocation.get("permission", "prompt")}
+        if geolocation.get("mode") == "custom":
+            geolocation_config.update(
+                {
+                    "latitude": geolocation["latitude"],
+                    "longitude": geolocation["longitude"],
+                    "accuracy": geolocation["accuracy"],
+                    "altitude": geolocation.get("altitude"),
+                }
+            )
+        config["geolocation"] = geolocation_config
+
+    media = identity["mediaDevices"]
+    if media.get("mode") != "real":
+        config["mediaDevices"] = _media_device_config(media)
+
+    ports = identity["ports"]
+    if ports.get("mode") != "real":
+        config["ports"] = {
+            "mode": ports["mode"],
+            "allowedPorts": list(ports.get("allowedPorts", [])),
+        }
+
+    if not config:
+        return {}
+    return {"schemaVersion": RUNTIME_PLAN_SCHEMA_VERSION, **config}
+
+
+def _media_device_config(media: Mapping[str, Any]) -> JsonObject:
+    """Device counts plus the seed the page-side ids derive from.
+
+    Masked mode derives its counts from the seed so a profile keeps the same
+    hardware across sessions. A device list that changes on every launch is a
+    stronger signal than an unusual one that stays put.
+    """
+    if media.get("mode") == "masked":
+        seed = int(media.get("noiseSeed", 0))
+        return {
+            "seed": seed,
+            "videoInputs": seed % 2,
+            "audioInputs": 1 + (seed // 2) % 2,
+            "audioOutputs": 1 + (seed // 4) % 2,
+        }
+    return {
+        "seed": 0,
+        "videoInputs": media["videoInputs"],
+        "audioInputs": media["audioInputs"],
+        "audioOutputs": media["audioOutputs"],
+    }
+
+
+def _build_cdp_overrides(identity: Mapping[str, Any]) -> JsonObject:
+    overrides: JsonObject = {}
+
+    browser = identity["browser"]
+    navigator = identity["navigator"]
+    locale = identity["locale"]
+    screen = identity["screen"]
+
+    if browser.get("mode") != "real":
+        user_agent: JsonObject = {"userAgent": browser["userAgent"]}
+        if locale.get("mode") != "real":
+            user_agent["acceptLanguage"] = ",".join(locale["languages"])
+        if navigator.get("mode") != "real":
+            user_agent["platform"] = navigator["platform"]
+        metadata = _browser_user_agent_metadata(browser, navigator)
+        if metadata:
+            user_agent["userAgentMetadata"] = metadata
+        overrides["userAgent"] = user_agent
+
+    if locale.get("mode") != "real":
+        overrides["locale"] = {"locale": locale["locale"]}
+        overrides["timezone"] = {"timezoneId": locale["timezoneId"]}
+
+    if screen.get("mode") != "real":
+        overrides["deviceMetrics"] = {
+            "width": screen["viewportWidth"],
+            "height": screen["viewportHeight"],
+            "deviceScaleFactor": screen["pixelRatio"],
+            "mobile": _identity_mobile(identity),
+            "screenWidth": screen["width"],
+            "screenHeight": screen["height"],
+        }
+
+    geolocation = identity["geolocation"]
+    if geolocation.get("mode") == "custom":
+        overrides["geolocation"] = {
+            "latitude": geolocation["latitude"],
+            "longitude": geolocation["longitude"],
+            "accuracy": geolocation["accuracy"],
+        }
+
+    return overrides
+
+
+def _build_launch_flags(identity: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+
+    browser = identity["browser"]
+    if browser.get("mode") != "real":
+        flags.append(f"--user-agent={browser['userAgent']}")
+
+    locale = identity["locale"]
+    if locale.get("mode") != "real":
+        flags.append(f"--lang={locale['locale']}")
+
+    screen = identity["screen"]
+    if screen.get("mode") != "real":
+        flags.append(f"--window-size={screen['viewportWidth']},{screen['viewportHeight']}")
+        flags.append(f"--force-device-scale-factor={screen['pixelRatio']}")
+
+    policy = identity["webrtc"].get("policy")
+    if policy in {"disableNonProxiedUdp", "block"}:
+        flags.append(WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG)
+    return flags
+
+
+def _browser_user_agent_metadata(browser: Mapping[str, Any], navigator: Mapping[str, Any]) -> JsonObject:
+    browser_hints: JsonObject = {}
+    raw_hints = browser.get("clientHints")
+    if isinstance(raw_hints, Mapping) and raw_hints:
+        browser_hints = _ordered_metadata(raw_hints)
+
+    navigator_hints: JsonObject = {}
+    if navigator.get("mode") != "real":
+        navigator_hints = _navigator_user_agent_metadata(navigator)
+
+    if not browser_hints and not navigator_hints:
+        return {}
+
+    merged: JsonObject = {}
+    for key in ("platform", "platformVersion", "architecture", "mobile", "bitness", "model"):
+        if key in browser_hints:
+            merged[key] = browser_hints[key]
+        elif key in navigator_hints:
+            merged[key] = navigator_hints[key]
+    return _complete_cdp_user_agent_metadata(merged, browser.get("userAgent"))
+
+
+def _complete_cdp_user_agent_metadata(raw: Mapping[str, Any], user_agent: Any) -> JsonObject:
+    """Return Chrome's required CDP UA metadata shape from bounded identity hints."""
+    version = _chrome_version(user_agent)
+    major = version.split(".", 1)[0]
+    architecture = str(raw.get("architecture", ""))
+    metadata: JsonObject = {
+        "platform": raw.get("platform", ""),
+        "platformVersion": raw.get("platformVersion", ""),
+        "architecture": architecture,
+        "mobile": raw.get("mobile", False),
+        "model": raw.get("model", ""),
+        "bitness": raw.get("bitness", _default_bitness(architecture)),
+        "brands": _brand_versions(major),
+        "fullVersionList": _brand_versions(major, full_version=version),
+        "fullVersion": version,
+        "wow64": False,
+    }
+    return metadata
+
+
+def _brand_versions(major: str, *, full_version: Optional[str] = None) -> list[JsonObject]:
+    chromium_version = full_version or major
+    greased_version = "99.0.0.0" if full_version else "99"
+    return [
+        {"brand": "Chromium", "version": chromium_version},
+        {"brand": "Google Chrome", "version": chromium_version},
+        {"brand": "Not=A?Brand", "version": greased_version},
+    ]
+
+
+def _chrome_version(user_agent: Any) -> str:
+    if isinstance(user_agent, str):
+        match = re.search(r"Chrome/(\d+\.\d+\.\d+\.\d+)", user_agent)
+        if match:
+            return match.group(1)
+    return "0.0.0.0"
+
+
+def _default_bitness(architecture: str) -> str:
+    return "64" if architecture in {"x86", "arm"} else ""
+
+
+def _navigator_user_agent_metadata(navigator: Mapping[str, Any]) -> JsonObject:
+    return {
+        "platform": navigator["uaPlatform"],
+        "platformVersion": navigator["uaPlatformVersion"],
+        "architecture": navigator["uaArchitecture"],
+        "mobile": navigator["uaMobile"],
+    }
+
+
+def _ordered_metadata(raw: Mapping[str, Any]) -> JsonObject:
+    metadata: JsonObject = {}
+    for key in ("platform", "platformVersion", "architecture", "mobile", "bitness", "model"):
+        if key in raw:
+            metadata[key] = raw[key]
+    return metadata
+
+
+def _identity_mobile(identity: Mapping[str, Any]) -> bool:
+    browser_hints = identity["browser"].get("clientHints")
+    if isinstance(browser_hints, Mapping) and isinstance(browser_hints.get("mobile"), bool):
+        return browser_hints["mobile"]
+    navigator = identity["navigator"]
+    if navigator.get("mode") != "real" and isinstance(navigator.get("uaMobile"), bool):
+        return navigator["uaMobile"]
+    return False
+
+
+def _json_copy(payload: Any) -> Any:
+    return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True))
+
+
+__all__ = [
+    "IdentityRuntimePlan",
+    "RUNTIME_PLAN_SCHEMA_VERSION",
+    "WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG",
+    "build_identity_runtime_plan",
+]

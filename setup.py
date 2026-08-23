@@ -4,10 +4,11 @@
 from setuptools import setup, find_packages
 from pathlib import Path
 
-# Read version from __init__.py
+# Read version from the sidecar, which is the only Python package now: the
+# customtkinter desktop GUI it used to sit beside has been removed.
 here = Path(__file__).parent
 about = {}
-with open(here / "theprivator" / "__init__.py", encoding="utf-8") as f:
+with open(here / "theprivator_sidecar" / "__init__.py", encoding="utf-8") as f:
     for line in f:
         if line.startswith("__version__"):
             exec(line, about)
@@ -69,13 +70,13 @@ setup(
     # Entry points
     entry_points={
         "console_scripts": [
-            "theprivator=theprivator.main:main",
+            "theprivator-sidecar=theprivator_sidecar.main:main",
         ],
     },
     
     # Package data
     package_data={
-        "theprivator": ["*.json", "*.txt"],
+        "theprivator_sidecar": ["*.json", "*.txt"],
     },
     include_package_data=True,
     

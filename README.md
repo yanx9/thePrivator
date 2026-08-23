@@ -1,244 +1,119 @@
-# 🌐 thePrivator 2.1
+# ThePrivator
 
-**Chromium multi-instance manager with enhanced features and modern architecture**
+A desktop manager for isolated browser profiles. Each profile is its own browser
+identity — separate cookies and storage, its own proxy, and a fingerprint you
+control surface by surface — so accounts that must not be linked stay unlinked.
 
-[![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+![The profile list](docs/screenshot.png)
 
-A modern, robust application for managing multiple Chromium profiles with enhanced privacy features, user-agent spoofing, and proxy support. Perfect for developers, testers, and privacy-conscious users.
+Everything stays on your machine. There is no account, no server of ours, and no
+telemetry. Profiles travel between your own devices only if you point the app at
+a folder your own sync client already keeps up to date.
 
-## ✨ Features
+## What it does
 
-### 🚀 **New in v2.1**
-- **Modern Architecture**: Complete rewrite with modular, maintainable code
-- **Enhanced Performance**: 40% faster startup, 25% less memory usage  
-- **Robust Error Handling**: Comprehensive validation and logging
-- **Advanced Process Management**: Better Chromium instance control
-- **Type Safety**: Full type hints coverage
-- **Professional GUI**: Modern, responsive interface with CustomTkinter
+- **Profiles as a table.** Folders, tags, notes, favourites, start URLs, bulk
+  launch and stop, and a trash you can restore from.
+- **Fingerprint control across 11 surfaces** — browser, navigator, screen,
+  locale, canvas, audio, WebGL, WebRTC, geolocation, media devices and local
+  port access. Each is `real`, `masked`, `custom` or noise-seeded, with curated
+  presets as a starting point.
+- **A consistency check, not just a mask.** Masking is not monotonic: a
+  geolocation that contradicts your proxy's exit country makes a profile *more*
+  identifiable, not less. The app warns when surfaces disagree.
+- **Proxies per profile**, including authenticated SOCKS5 — Chromium cannot do
+  SOCKS authentication itself, so the sidecar runs a local relay for it. A proxy
+  check reports what it actually proved, and says "not established" when it
+  proved nothing.
+- **Cookie import and export** in ThePrivator JSON or Netscape `cookies.txt`,
+  and whole-profile `.tpkg` packages that carry the fingerprint, the proxy and
+  the browsing data — but never the proxy password.
+- **Profile synchronisation through a folder** you already sync with Google
+  Drive, Syncthing or rclone. No OAuth, no token, nothing sent to us.
+- **A local automation endpoint** for Selenium, Playwright or Puppeteer. It
+  listens on loopback and needs an access token, which is never displayed —
+  copying puts it on the clipboard and nowhere else.
 
-### 🔧 **Core Features**
-- **Profile Management**: Create, edit, and organize multiple Chromium profiles
-- **User-Agent Spoofing**: Built-in presets for popular browsers
-- **Proxy Support**: HTTP, HTTPS, SOCKS4, and SOCKS5 proxy support
-- **Process Monitoring**: Real-time monitoring of running instances
-- **Import/Export**: Backup and share profile configurations
-- **Cross-Platform**: Works on Windows, macOS, and Linux
+## Install
 
-### 🛡️ **Privacy & Security**
-- Isolated user data directories for each profile
-- Secure configuration storage
-- Input validation and sanitization
-- No data collection or telemetry
+Download a build from the [releases](../../releases) page:
 
-## Screenshots
+| Platform | Files |
+| --- | --- |
+| Linux | `.deb`, `.rpm`, `.AppImage` |
+| macOS | `.dmg` (Apple silicon and Intel) |
+| Windows | `.msi`, `.exe` |
 
-![alt text](img/main.png)
+You also need Chromium or Google Chrome installed; the app launches the browser
+you already have rather than shipping one. Point it somewhere specific with
+`THEPRIVATOR_CHROMIUM_PATH` if it is not on the usual path.
 
-## 🚀 Quick Start
+## Build from source
 
-### Requirements
-
-- Python 3.8+
-- Chromium or Google Chrome installed
-- Windows, macOS, or Linux
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yanx9/thePrivator.git
-cd thePrivator
-
-# Install dependencies
-pip install customtkinter psutil
-
-# Run the application
-python theprivator/main.py
-
-# OR, install via pip and run as python module
-pip install .
-python -m theprivator
-```
-
-### Creating Your First Profile
-
-1. Click **"➕ New Profile"** in the sidebar
-2. Enter a profile name
-3. Select or enter a User-Agent string
-4. (Optional) Configure proxy settings
-5. Click **"➕ Create"**
-6. Select your profile and click **"🚀 Launch Profile"**
-
-## 📁 Project Structure
-
-```
-thePrivator/
-├── src/
-│   ├── main.py              # Main application entry point
-│   ├── core/               # Core business logic
-│   │   ├── profile_manager.py
-│   │   ├── chromium_launcher.py
-│   │   └── config_manager.py
-│   ├── gui/                # GUI components
-│   │   ├── main_window.py
-│   │   └── profile_dialog.py
-│   └── utils/              # Utilities
-│       ├── logger.py
-│       ├── validator.py
-│       └── exceptions.py
-├── requirements.txt         # Dependencies
-└── README.md               # Documentation
-```
-
-## ⚙️ Configuration
-
-thePrivator stores configuration in `~/.theprivator/`:
-
-```
-~/.theprivator/
-├── config.json          # Application settings
-├── profiles.json        # Profile definitions
-├── profiles/            # Profile data directories
-│   ├── profile-1/
-│   └── profile-2/
-└── logs/                # Application logs
-    └── theprivator.log
-```
-
-### Configuration Options
-
-```json
-{
-  "theme": "dark",
-  "color_theme": "blue",
-  "window_geometry": "900x700",
-  "default_user_agent": "Mozilla/5.0 ...",
-  "auto_cleanup": true,
-  "max_concurrent_profiles": 10,
-  "process_monitor_interval": 5
-}
-```
-
-## 🔗 Command Line Interface
+Requires **Node 20.19+**, **Python 3.11+**, **Rust 1.77+**, and on Linux the
+WebKitGTK development packages:
 
 ```bash
-# Show help
-python src/main.py --help
-
-# Use custom config directory
-python src/main.py --config-dir ~/.my-privator
-
-# Enable debug logging
-python src/main.py --debug
-
-# Show version
-python src/main.py --version
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 ```
 
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Q: "Chromium not found" error**
-A: Install Chromium or Google Chrome, or ensure it's in your system PATH.
-
-**Q: Profiles not launching**
-A: Check if you have permission to create files in the profile directory.
-
-**Q: High memory usage**
-A: Limit concurrent profiles in settings or close unused instances.
-
-**Q: GUI not responding**
-A: Try running with `--debug` flag to see detailed error messages.
-
-### Installation Help
-
-**Windows:**
-```powershell
-# Install Google Chrome
-winget install Google.Chrome
-
-# Or download from: https://www.google.com/chrome/
-```
-
-**macOS:**
-```bash
-# Install with Homebrew
-brew install --cask google-chrome
-
-# Or download from: https://www.google.com/chrome/
-```
-
-**Linux:**
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install chromium-browser
-
-# Fedora
-sudo dnf install chromium
-
-# Arch
-sudo pacman -S chromium
-```
-
-## 🤝 Contributing
-
-We welcome contributions! Here's how to get started:
-
-### Development Setup
+Then:
 
 ```bash
-# Fork and clone the repository
-git clone https://github.com/yanx9/thePrivator.git
-cd thePrivator
-
-# Install dependencies
-pip install customtkinter psutil
-
-# Run in development mode
-python theprivator/main.py --debug
+npm ci
+python -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+npm run tauri build
 ```
 
-### Making Changes
+Installers land in `src-tauri/target/release/bundle/`.
 
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Make** your changes
-4. **Test** thoroughly
-5. **Commit** changes (`git commit -m 'Add amazing feature'`)
-6. **Push** to branch (`git push origin feature/amazing-feature`)
-7. **Create** a Pull Request
+For development, `npm run tauri dev` rebuilds the frontend on save.
 
-## 📊 Performance Metrics
+**One build produces one platform.** The Python sidecar is packed with
+PyInstaller, which bundles the host's interpreter and native libraries and has
+no cross-compilation mode — so a macOS build needs a Mac and a Windows build
+needs Windows, whatever the Rust side could otherwise manage. The
+[release workflow](.github/workflows/release.yml) runs one runner per platform
+for exactly that reason.
 
-| Metric | v1.x | v2.0 | Improvement |
-|--------|------|------|-------------|
-| Startup Time | 2.1s | 1.3s | **↓ 38%** |
-| Memory Usage | 45MB | 34MB | **↓ 24%** |
-| Profile Creation | 850ms | 340ms | **↓ 60%** |
-| UI Responsiveness | Good | Excellent | **↑ 80%** |
+## How it fits together
 
+```
+React frontend  ──invoke──▶  Rust bridge  ──NDJSON over stdio──▶  Python sidecar  ──▶  Chromium
+   src/                       src-tauri/                           theprivator_sidecar/
+```
 
-## 📄 License
+The Rust bridge owns nothing but transport, timeouts and diagnostics. The
+sidecar owns the profile store, the proxy runtime, the fingerprint engine and
+the browser lifecycle. The frontend never talks to the filesystem or spawns a
+process.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Two rules run through the whole codebase and are worth knowing before changing
+anything:
 
-## 🙏 Acknowledgments
+- **The redaction perimeter.** Absolute paths, proxy credentials, browser
+  command lines and automation tokens must not reach the UI. The sidecar redacts
+  and the TypeScript client independently rejects — a response carrying one is
+  refused, not rendered. Errors carry an opaque reference instead, which
+  Settings → Diagnostics exchanges for the detail behind it.
+- **Strict-key parsing.** Every sidecar response is validated field by field on
+  both sides. An unexpected key is an error, not something to ignore, so a
+  protocol drift surfaces at the boundary rather than three screens later.
 
-- **CustomTkinter** - Modern UI framework
-- **psutil** - Process and system utilities
-- **Contributors** - Everyone who has contributed to this project
+## Tests
 
-## 📞 Support
+```bash
+npx tsc --noEmit        # types
+npx vitest run          # frontend and component tests
+python -m pytest tests/ # sidecar
+cd src-tauri && cargo test
+npm run verify:sidecar  # the packed binary, not the source
+```
 
-- 📖 [Documentation](https://github.com/yanx9/thePrivator/wiki)
-- 🐛 [Issue Tracker](https://github.com/yanx9/thePrivator/issues)
-- 💬 [Discussions](https://github.com/yanx9/thePrivator/discussions)
+That last one matters more than it looks: the sidecar imports some modules
+lazily, so a missing `--hidden-import` can leave a feature broken only in the
+packaged build while every from-source test passes.
 
----
+## Licence
 
-**Made with ❤️ by the thePrivator team**
-
-*If you find this project useful, please consider giving it a ⭐ on GitHub!*
+MIT — see [LICENSE](LICENSE).

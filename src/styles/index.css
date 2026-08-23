@@ -1,0 +1,12 @@
+/*
+ * The single place cascade order is decided.
+ *
+ * Declaring the layers here, before any import, is what stops a stylesheet added
+ * later from winning by accident -- the failure that produced three stacked
+ * themes in the file this replaces. A component's styles cannot outrank a
+ * utility no matter where its import lands.
+ */
+@layer tokens, base, components, utilities;
+
+@import "./tokens.css";
+@import "./reset.css";

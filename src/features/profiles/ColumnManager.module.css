@@ -1,0 +1,127 @@
+@layer components {
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 260px;
+    padding: var(--space-3);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-2);
+  }
+
+  .hint {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-subtle);
+  }
+
+  .list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 320px;
+    padding: 0;
+    margin: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .item {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .toggle {
+    display: flex;
+    flex: 1;
+    gap: var(--space-2);
+    align-items: center;
+    min-width: 0;
+    font-size: var(--text-base);
+    cursor: pointer;
+  }
+
+  .toggle > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .reorder {
+    display: flex;
+    gap: 2px;
+  }
+
+  .reorder button {
+    padding: 0 var(--space-1);
+    font-size: 8px;
+    line-height: 1;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+  }
+
+  .reorder button:hover:not(:disabled) {
+    color: var(--color-text);
+    border-color: var(--color-border);
+  }
+
+  .reorder button:disabled {
+    color: var(--color-border);
+    cursor: default;
+  }
+
+  .actions {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .spacer {
+    flex: 1;
+  }
+
+  .primary,
+  .secondary {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .primary {
+    color: var(--color-accent-fg);
+    background: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+
+  .primary:disabled {
+    color: var(--color-text-subtle);
+    cursor: default;
+    background: var(--color-bg-hover);
+    border-color: var(--color-border);
+  }
+
+  .secondary {
+    color: var(--color-text);
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+  }
+
+  .secondary:hover {
+    border-color: var(--color-accent);
+  }
+}

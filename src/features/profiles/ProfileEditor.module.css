@@ -1,0 +1,323 @@
+@layer components {
+  .editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    height: 100%;
+    min-height: 0;
+    padding: var(--space-4);
+  }
+
+  .header {
+    display: flex;
+    flex: none;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .header h1 {
+    margin: 0;
+    overflow: hidden;
+    font-size: var(--text-xl);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .spacer {
+    flex: 1;
+  }
+
+  .primary,
+  .secondary {
+    padding: var(--space-1) var(--space-4);
+    font-size: var(--text-base);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .primary {
+    font-weight: 500;
+    color: var(--color-accent-fg);
+    background: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+
+  .primary:disabled {
+    color: var(--color-text-subtle);
+    cursor: default;
+    background: var(--color-bg-hover);
+    border-color: var(--color-border);
+  }
+
+  .secondary {
+    color: var(--color-text);
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+  }
+
+  .tabs {
+    display: flex;
+    flex: none;
+    gap: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .tab {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .tab[aria-selected="true"] {
+    color: var(--color-text);
+    border-bottom-color: var(--color-accent);
+  }
+
+  .tabBadge {
+    min-width: 18px;
+    padding: 0 5px;
+    font-size: var(--text-xs);
+    color: var(--color-accent-fg);
+    text-align: center;
+    background: var(--color-danger);
+    border-radius: var(--radius-pill);
+  }
+
+  .body {
+    flex: 1;
+    min-height: 0;
+    padding-right: var(--space-2);
+    overflow-y: auto;
+  }
+
+  .loading,
+  .hint {
+    font-size: var(--text-sm);
+    color: var(--color-text-subtle);
+  }
+
+  .error {
+    padding: var(--space-2) var(--space-3);
+    margin: 0;
+    font-size: var(--text-base);
+    color: var(--color-danger);
+    background: var(--color-danger-bg);
+    border-radius: var(--radius-sm);
+  }
+
+  .general,
+  .startup {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    max-width: 640px;
+  }
+
+  .stacked {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .stacked > label,
+  .stacked > span:first-child {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }
+
+  .textInput,
+  .stacked textarea,
+  .tagEntry input {
+    padding: var(--space-2);
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+  }
+
+  .stacked textarea {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    resize: vertical;
+  }
+
+  .checkbox {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    font-size: var(--text-base);
+  }
+
+  .tagList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: 0;
+    margin: 0;
+    list-style: none;
+  }
+
+  .tagChip {
+    display: flex;
+    gap: var(--space-1);
+    align-items: center;
+    padding: 2px var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-accent);
+    border: 1px solid currentcolor;
+    border-radius: var(--radius-pill);
+  }
+
+  .tagChip button {
+    padding: 0;
+    font-size: var(--text-base);
+    line-height: 1;
+    color: inherit;
+    cursor: pointer;
+    background: none;
+    border: 0;
+  }
+
+  .tagEntry {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .tagEntry input {
+    flex: 1;
+  }
+
+  .tagEntry button {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    cursor: pointer;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+  }
+
+  .fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    margin: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  .fieldset legend {
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-muted);
+  }
+
+  .fieldset label {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    font-size: var(--text-base);
+  }
+}
+
+@layer components {
+  .fieldset h3 {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+
+  .toolActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .toolActions button {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    cursor: pointer;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+  }
+
+  .toolActions button:disabled {
+    color: var(--color-text-subtle);
+    cursor: default;
+  }
+
+  .checkFacts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: var(--space-3);
+    margin: 0;
+  }
+
+  .checkFacts div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .checkFacts dt {
+    font-size: var(--text-xs);
+    color: var(--color-text-subtle);
+    text-transform: uppercase;
+  }
+
+  .checkFacts dd {
+    margin: 0;
+    font-size: var(--text-base);
+  }
+
+  .auditList {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: 0;
+    margin: 0;
+    list-style: none;
+  }
+
+  .auditList li {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2);
+    background: var(--color-bg-raised);
+    border-radius: var(--radius-sm);
+  }
+
+  .auditList li > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .auditList button {
+    flex: none;
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    cursor: pointer;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+  }
+}
