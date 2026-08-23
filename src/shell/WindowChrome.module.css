@@ -1,0 +1,67 @@
+@layer components {
+  .chrome {
+    display: flex;
+    align-items: stretch;
+    height: var(--chrome-height);
+    background: var(--color-bg-surface);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .dragRegion {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+    padding-inline: var(--space-3);
+    /* Tall enough to actually grab. A thin strip is technically a drag region
+       and practically unusable. */
+    min-height: var(--chrome-height);
+  }
+
+  .mark {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-sm);
+    background: var(--color-accent);
+    color: var(--color-accent-fg);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  .title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .controls {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .control {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    transition: background var(--duration-fast) var(--ease-out);
+  }
+
+  .control:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .close:hover {
+    background: var(--color-danger);
+    color: #ffffff;
+  }
+}

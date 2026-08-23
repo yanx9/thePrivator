@@ -1,6 +1,5 @@
 // Vite's eager raw glob reads the sidecar contract without Node fs types, the
 // same way the UI source guard in App.test.tsx reads the UI.
-// @ts-expect-error import.meta.glob is a Vite extension without ambient types here.
 const sidecarIdentitySources: Record<string, string> = import.meta.glob("../theprivator_sidecar/identity.py", {
   query: "?raw",
   import: "default",
