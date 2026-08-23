@@ -36,7 +36,7 @@ function writeJson(path, value) {
 function seedS03Root({ packageScript = "node scripts/verify-m005-s03.mjs", readme } = {}) {
   const root = mkdtempRoot("theprivator-m005-s03-root-");
   mkdirSync(join(root, "scripts"), { recursive: true });
-  mkdirSync(join(root, "theprivator", "tests"), { recursive: true });
+  mkdirSync(join(root, "tests"), { recursive: true });
   mkdirSync(join(root, "src", "sidecar"), { recursive: true });
   writeJson(join(root, "package.json"), { scripts: { "verify:m005:s03": packageScript } });
   writeFileSync(join(root, "README.md"), readme ?? "Use `npm run verify:m005:s03` for the M005 S03 source-level unsafe .tpkg rejection, rollback, cleanup, diagnostics detailRef, redaction, and package-content proof. The redaction scanner checks public verifier events, UI/client evidence, diagnostics, and final summaries; the package-content scanner separately checks accepted/exported archive contents while allowing portable cookie payload only in its dedicated cookie member. S04 owns packaged real-dialog native open/save dialog proof.\n", "utf8");
