@@ -107,6 +107,15 @@ import type {
   ProfileDefaults,
   ProfileListResult,
   ProfileListSnapshot,
+  ProfileLaunchDraft,
+  ProfileOrganizationDraft,
+  ProfileTrashListResult,
+  ProfileTrashListSnapshot,
+  ChromiumBulkLaunchResult,
+  ChromiumBulkLaunchSnapshot,
+  ChromiumBulkStopResult,
+  ChromiumBulkStopSnapshot,
+  BulkFailure,
   ProfileMutationResult,
   ProfileMutationSnapshot,
   ProfileRecord,
@@ -1035,6 +1044,90 @@ export async function stopChromiumProfile(profileId: string): Promise<ChromiumSt
   }
 }
 
+export async function listTrashedProfiles(): Promise<ProfileTrashListSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_trash_list");
+    return parseProfileTrashListEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function restoreProfile(id: string): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_trash_restore", { id });
+    // A restore can rename, when the name was taken while the profile sat in the
+    // trash, so the caller needs the record that actually came back.
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true,
+      requireProfileInList: true,
+      requireWarnings: false,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function purgeProfile(id: string): Promise<ProfileTrashListSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_trash_purge", { id });
+    return parseProfileTrashListEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function updateProfileOrganization(
+  profileId: string,
+  organization: ProfileOrganizationDraft,
+): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_organization_update", { profileId, organization });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true,
+      requireProfileInList: true,
+      requireWarnings: false,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function updateProfileLaunch(
+  profileId: string,
+  launch: ProfileLaunchDraft,
+): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_launch_update", { profileId, launch });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true,
+      requireProfileInList: true,
+      requireWarnings: false,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function bulkLaunchChromiumProfiles(profileIds: string[]): Promise<ChromiumBulkLaunchSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("chromium_bulk_launch", { profileIds });
+    return parseChromiumBulkLaunchEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+/** Stop the named profiles, or every running one when the list is omitted. */
+export async function bulkStopChromiumProfiles(profileIds?: string[]): Promise<ChromiumBulkStopSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("chromium_bulk_stop", { profileIds: profileIds ?? null });
+    return parseChromiumBulkStopEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
 export function normalizeSidecarError(error: unknown): SidecarClientError {
   if (isCommandErrorEnvelope(error)) {
     const source = sourceForCode(error.code);
@@ -1640,6 +1733,137 @@ function parseChromiumStopEnvelope(value: unknown, receivedAt: string): Chromium
     bridgeDurationMs: envelope.durationMs,
     receivedAt,
     ...result,
+  };
+}
+
+function parseProfileTrashListEnvelope(value: unknown, receivedAt: string): ProfileTrashListSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseProfileTrashListResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseProfileTrashListResult(value: unknown): ProfileTrashListResult {
+  const record = requireRecord(value, "The sidecar profile trash list result must be an object.");
+  requireExactKeys(record, ["storeVersion", "profiles", "count"], "profileTrashList");
+  const storeVersion = requireStoreVersion(record.storeVersion);
+  const profiles = parseProfileArray(record.profiles);
+  const count = requireNonNegativeInteger(record.count, "count");
+
+  if (count !== profiles.length) {
+    throw makeProtocolError("The sidecar profile trash list count does not match the profiles array length.");
+  }
+
+  for (const profile of profiles) {
+    // A live profile reaching the trash view would show a Restore action for a
+    // profile that was never deleted, and hide it from the list it belongs in.
+    if (profile.lifecycle.deletedAt === null) {
+      throw makeProtocolError("The sidecar profile trash list contains a profile that is not trashed.");
+    }
+  }
+
+  return { storeVersion, profiles, count };
+}
+
+function parseChromiumBulkLaunchEnvelope(value: unknown, receivedAt: string): ChromiumBulkLaunchSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseChromiumBulkLaunchResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+function parseChromiumBulkStopEnvelope(value: unknown, receivedAt: string): ChromiumBulkStopSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseChromiumBulkStopResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
+const MAX_BULK_RESULT_ENTRIES = 512;
+
+function parseBulkFailures(value: unknown, field: string): BulkFailure[] {
+  if (!Array.isArray(value) || value.length > MAX_BULK_RESULT_ENTRIES) {
+    throw makeProtocolError(`The sidecar bulk field ${field} must be a bounded array.`);
+  }
+
+  return value.map((entry, index) => {
+    const record = requireRecord(entry, `The sidecar bulk field ${field}[${index}] must be an object.`);
+    requireExactKeys(record, ["profileId", "code"], `${field}[${index}]`);
+    return {
+      profileId: requireNonBlankString(record.profileId, `${field}[${index}].profileId`),
+      code: requireNonBlankString(record.code, `${field}[${index}].code`),
+    };
+  });
+}
+
+function parseChromiumBulkLaunchResult(value: unknown): ChromiumBulkLaunchResult {
+  const record = requireRecord(value, "The sidecar chromium bulk launch result must be an object.");
+  requireExactKeys(record, ["launched", "failed", "runningCount"], "chromiumBulkLaunch");
+
+  const launchedValue = record.launched;
+  if (!Array.isArray(launchedValue) || launchedValue.length > MAX_BULK_RESULT_ENTRIES) {
+    throw makeProtocolError("The sidecar chromium bulk launch field launched must be a bounded array.");
+  }
+
+  const launched = launchedValue.map((entry, index) => {
+    const entryRecord = requireRecord(entry, `The sidecar bulk field launched[${index}] must be an object.`);
+    requireExactKeys(entryRecord, ["profileId", "startedAt"], `launched[${index}]`);
+    return {
+      profileId: requireNonBlankString(entryRecord.profileId, `launched[${index}].profileId`),
+      startedAt: requireIsoTimestamp(entryRecord.startedAt, `launched[${index}].startedAt`),
+    };
+  });
+
+  return {
+    launched,
+    failed: parseBulkFailures(record.failed, "failed"),
+    runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
+  };
+}
+
+function parseChromiumBulkStopResult(value: unknown): ChromiumBulkStopResult {
+  const record = requireRecord(value, "The sidecar chromium bulk stop result must be an object.");
+  requireExactKeys(record, ["stopped", "failed", "runningCount"], "chromiumBulkStop");
+
+  const stoppedValue = record.stopped;
+  if (!Array.isArray(stoppedValue) || stoppedValue.length > MAX_BULK_RESULT_ENTRIES) {
+    throw makeProtocolError("The sidecar chromium bulk stop field stopped must be a bounded array.");
+  }
+
+  const stopped = stoppedValue.map((entry, index) => {
+    const entryRecord = requireRecord(entry, `The sidecar bulk field stopped[${index}] must be an object.`);
+    requireExactKeys(entryRecord, ["profileId", "termination"], `stopped[${index}]`);
+    return {
+      profileId: requireNonBlankString(entryRecord.profileId, `stopped[${index}].profileId`),
+      termination: requireChromiumTermination(entryRecord.termination, `stopped[${index}].termination`),
+    };
+  });
+
+  return {
+    stopped,
+    failed: parseBulkFailures(record.failed, "failed"),
+    runningCount: requireNonNegativeInteger(record.runningCount, "runningCount"),
   };
 }
 

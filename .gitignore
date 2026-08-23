@@ -8,18 +8,18 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
 .eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -75,12 +75,15 @@ ehthumbs.db
 Thumbs.db
 
 # thePrivator specific
+# Anchored with a leading slash on purpose: a bare "profiles/" also matches
+# src/features/profiles, which silently kept a whole feature directory out of a
+# commit. Every rule here names a runtime artefact at the repository root.
 .theprivator/
-profiles/
-logs/
+/profiles/
+/logs/
 *.log
-config.json
-profiles.json
+/config.json
+/profiles.json
 
 # Temporary files
 *.tmp

@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
-// The legacy tree is exercised by its own suite; here it stands in for "the
-// profiles surface" so this file can stay a test of routing rather than a second
-// slow copy of that suite.
+// The profile surfaces have their own suites; here they stand in for themselves
+// so this file stays a test of routing rather than a second slow copy of both.
 vi.mock("./legacy/LegacyApp", () => ({
-  LegacyApp: () => <div data-testid="legacy-profiles" />,
+  LegacyApp: () => <div data-testid="legacy-editor" />,
+}));
+
+vi.mock("./features/profiles/ProfilesPage", () => ({
+  ProfilesPage: ({ view }: { view: string }) => <div data-testid="profiles-table">{view}</div>,
 }));
 
 vi.mock("./windowControls", () => ({
@@ -31,11 +34,30 @@ describe("App", () => {
     window.location.hash = "";
   });
 
-  it("opens on the profiles surface", () => {
+  it("opens on the profile table", () => {
     render(<App />);
 
-    expect(screen.getByTestId("legacy-profiles")).toBeInTheDocument();
+    expect(screen.getByTestId("profiles-table")).toHaveTextContent("all");
     expect(screen.getByRole("navigation", { name: /profile folders and views/i })).toBeInTheDocument();
+  });
+
+  it("passes the view named by the hash down to the table", () => {
+    render(<App />);
+
+    navigate("#/profiles/trash");
+
+    expect(screen.getByTestId("profiles-table")).toHaveTextContent("trash");
+  });
+
+  it("still opens the editor for a single profile while it is being ported", () => {
+    // The strangler seam: the list is the new table, editing is not yet.
+    render(<App />);
+
+    navigate("#/profiles/abc123");
+    expect(screen.getByTestId("legacy-editor")).toBeInTheDocument();
+
+    navigate("#/profiles/new");
+    expect(screen.getByTestId("legacy-editor")).toBeInTheDocument();
   });
 
   it("follows the hash to another destination without a reload", () => {
@@ -43,7 +65,7 @@ describe("App", () => {
 
     navigate("#/proxies");
 
-    expect(screen.queryByTestId("legacy-profiles")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("profiles-table")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Proxies" })).toBeInTheDocument();
   });
 
@@ -63,7 +85,7 @@ describe("App", () => {
 
     navigate("#/../../etc/passwd");
 
-    expect(screen.getByTestId("legacy-profiles")).toBeInTheDocument();
+    expect(screen.getByTestId("profiles-table")).toHaveTextContent("all");
   });
 
   it("reaches every destination by clicking, so none needs a typed hash", () => {

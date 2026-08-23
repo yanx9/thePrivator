@@ -2170,3 +2170,35 @@ def test_new_v4_commands_are_reachable_through_the_real_entrypoint(tmp_path):
             run_sidecar(request_line({"id": method, "method": method, "params": {"storeRoot": store_root, **params}})).stdout
         )[0]
         assert response["ok"] is True, f"{method} failed: {response.get('error')}"
+
+
+def test_no_source_file_is_hidden_from_git_by_an_ignore_rule():
+    """An ignore pattern without a leading slash matches every directory of that
+    name, not just the one at the root. A bare "profiles/" once matched
+    src/features/profiles and kept an entire feature out of a commit -- the code
+    was on disk, the tests passed, and the commit did not build."""
+    repo_root = Path(__file__).resolve().parents[2]
+    tracked_roots = ["src", "theprivator_sidecar", "src-tauri/src", "scripts"]
+
+    candidates: list[str] = []
+    for root in tracked_roots:
+        base = repo_root / root
+        if not base.exists():
+            continue
+        for path in base.rglob("*"):
+            if path.is_file() and path.suffix in {".ts", ".tsx", ".css", ".py", ".rs", ".mjs"}:
+                candidates.append(str(path.relative_to(repo_root)))
+
+    assert len(candidates) > 50, "the source scan found almost nothing; the roots are wrong"
+
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=repo_root,
+        input="\n".join(candidates),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ignored = [line for line in result.stdout.splitlines() if line.strip()]
+
+    assert ignored == [], f"these source files are invisible to git: {ignored[:10]}"

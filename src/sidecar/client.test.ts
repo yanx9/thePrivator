@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyProfileIdentityPreset,
+  bulkLaunchChromiumProfiles,
+  bulkStopChromiumProfiles,
   checkProfileProxy,
   collectIdentityAuditResults,
   copyAutomationApiToken,
@@ -19,6 +21,9 @@ import {
   launchChromiumProfile,
   listIdentityPresets,
   listProfiles,
+  listTrashedProfiles,
+  purgeProfile,
+  restoreProfile,
   lookupDiagnosticDetail,
   openIdentityAuditPage,
   replaceProfileCookies,
@@ -29,6 +34,8 @@ import {
   triggerSidecarDiagnosticFailure,
   updateProfile,
   updateProfileIdentity,
+  updateProfileLaunch,
+  updateProfileOrganization,
   updateProfileProxy,
   validateIdentity,
   validateProxy,
@@ -3131,5 +3138,161 @@ describe("sidecar client", () => {
       source: "protocol",
       phase: "bridge-error",
     });
+  });
+});
+
+describe("trash commands", () => {
+  const TRASHED_AT = "2026-05-04T19:00:00.000Z";
+
+  function trashedRecord(overrides: Record<string, unknown> = {}) {
+    return profileRecord({ lifecycle: profileLifecycle({ deletedAt: TRASHED_AT }), ...overrides });
+  }
+
+  it("lists the trash with no parameters of its own", async () => {
+    const trashed = trashedRecord();
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ storeVersion: 4, profiles: [trashed], count: 1 }));
+
+    const snapshot = await listTrashedProfiles();
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_trash_list");
+    expect(snapshot.profiles).toEqual([trashed]);
+    expect(snapshot.count).toBe(1);
+  });
+
+  it("rejects a trash listing carrying a profile that is not trashed", async () => {
+    // A live profile here would offer Restore for something never deleted, and
+    // hide it from the list it actually belongs in.
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ storeVersion: 4, profiles: [profileRecord()], count: 1 }));
+
+    await expect(listTrashedProfiles()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a trash listing whose count disagrees with its array", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ storeVersion: 4, profiles: [trashedRecord()], count: 7 }));
+
+    await expect(listTrashedProfiles()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a trash listing with an unexpected key", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ storeVersion: 4, profiles: [], count: 0, purgedBytes: 42 }),
+    );
+
+    await expect(listTrashedProfiles()).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("returns the restored record, which may carry a new name", async () => {
+    // Restoring into a store where the name was taken renames, so the caller
+    // cannot assume the record it deleted is the record it gets back.
+    const restored = profileRecord({ name: "Research (2)" });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profile: restored, profiles: [restored] })));
+
+    const snapshot = await restoreProfile(restored.id);
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_trash_restore", { id: restored.id });
+    expect(snapshot.profile?.name).toBe("Research (2)");
+  });
+
+  it("returns the remaining trash after a purge", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ storeVersion: 4, profiles: [], count: 0 }));
+
+    const snapshot = await purgeProfile("11111111-1111-1111-1111-111111111111");
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_trash_purge", { id: "11111111-1111-1111-1111-111111111111" });
+    expect(snapshot.count).toBe(0);
+  });
+});
+
+describe("section update commands", () => {
+  it("sends the whole organization section rather than a patch", async () => {
+    const organization = { folderId: null, tags: ["eu"], notes: "note", favorite: true, color: null };
+    const profile = profileRecord({ organization: profileOrganization(organization) });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile] })));
+
+    await updateProfileOrganization(profile.id, organization);
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+      profileId: profile.id,
+      organization,
+    });
+  });
+
+  it("sends the whole launch section", async () => {
+    const launch = { startupBehavior: "customUrls" as const, startUrls: ["https://example.test/"], args: [] };
+    const profile = profileRecord({ launch: profileLaunch(launch) });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile] })));
+
+    await updateProfileLaunch(profile.id, launch);
+
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_launch_update", { profileId: profile.id, launch });
+  });
+});
+
+describe("bulk chromium commands", () => {
+  const FIRST = "11111111-1111-1111-1111-111111111111";
+  const SECOND = "22222222-2222-2222-2222-222222222222";
+
+  it("reports launched and failed profiles side by side", async () => {
+    // One broken proxy must not hide the nine that started.
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        launched: [{ profileId: FIRST, startedAt: "2026-05-04T18:05:00.000Z" }],
+        failed: [{ profileId: SECOND, code: "CHROMIUM_LAUNCH_FAILED" }],
+        runningCount: 1,
+      }),
+    );
+
+    const snapshot = await bulkLaunchChromiumProfiles([FIRST, SECOND]);
+
+    expect(mockInvoke).toHaveBeenCalledWith("chromium_bulk_launch", { profileIds: [FIRST, SECOND] });
+    expect(snapshot.launched).toEqual([{ profileId: FIRST, startedAt: "2026-05-04T18:05:00.000Z" }]);
+    expect(snapshot.failed).toEqual([{ profileId: SECOND, code: "CHROMIUM_LAUNCH_FAILED" }]);
+    expect(snapshot.runningCount).toBe(1);
+  });
+
+  it("asks the sidecar to stop everything when given no list", async () => {
+    mockInvoke.mockResolvedValueOnce(profileEnvelope({ stopped: [], failed: [], runningCount: 0 }));
+
+    await bulkStopChromiumProfiles();
+
+    expect(mockInvoke).toHaveBeenCalledWith("chromium_bulk_stop", { profileIds: null });
+  });
+
+  it("carries the termination of each stopped profile", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({
+        stopped: [{ profileId: FIRST, termination: "graceful" }],
+        failed: [],
+        runningCount: 0,
+      }),
+    );
+
+    const snapshot = await bulkStopChromiumProfiles([FIRST]);
+
+    expect(snapshot.stopped).toEqual([{ profileId: FIRST, termination: "graceful" }]);
+  });
+
+  it("rejects a bulk result with an unknown termination", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ stopped: [{ profileId: FIRST, termination: "vanished" }], failed: [], runningCount: 0 }),
+    );
+
+    await expect(bulkStopChromiumProfiles([FIRST])).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a bulk result with an extra key", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ launched: [], failed: [], runningCount: 0, skipped: [] }),
+    );
+
+    await expect(bulkLaunchChromiumProfiles([FIRST])).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+
+  it("rejects a failure entry that names no profile", async () => {
+    mockInvoke.mockResolvedValueOnce(
+      profileEnvelope({ launched: [], failed: [{ profileId: "", code: "X" }], runningCount: 0 }),
+    );
+
+    await expect(bulkLaunchChromiumProfiles([FIRST])).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
   });
 });

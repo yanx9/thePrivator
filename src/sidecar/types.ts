@@ -791,6 +791,75 @@ export interface ProfileIdentityMutationResult extends ProfileMutationResult {
   warnings: IdentityWarning[];
 }
 
+/**
+ * What the UI sends to replace a profile's organization section.
+ *
+ * The whole section travels, not a patch: the sections are small and strict-key,
+ * and a partial update would need its own merge rules plus a way to say "clear
+ * this field" that is distinguishable from "leave it alone".
+ */
+export interface ProfileOrganizationDraft {
+  folderId: string | null;
+  tags: string[];
+  notes: string;
+  favorite: boolean;
+  color: string | null;
+}
+
+export interface ProfileLaunchDraft {
+  startupBehavior: ProfileStartupBehavior;
+  startUrls: string[];
+  args: string[];
+}
+
+export interface ProfileTrashListResult {
+  storeVersion: 4;
+  profiles: ProfileRecord[];
+  count: number;
+}
+
+export interface ProfileTrashListSnapshot extends ProfileTrashListResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+/** One profile a bulk call could not act on, and the code that says why. */
+export interface BulkFailure {
+  profileId: string;
+  code: string;
+}
+
+export interface ChromiumBulkLaunchResult {
+  launched: Array<{ profileId: string; startedAt: string }>;
+  failed: BulkFailure[];
+  runningCount: number;
+}
+
+export interface ChromiumBulkStopResult {
+  stopped: Array<{ profileId: string; termination: ChromiumTermination }>;
+  failed: BulkFailure[];
+  runningCount: number;
+}
+
+export interface ChromiumBulkLaunchSnapshot extends ChromiumBulkLaunchResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface ChromiumBulkStopSnapshot extends ChromiumBulkStopResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
 export interface ProfileListSnapshot extends ProfileListResult {
   requestId: string;
   rawRequestId: JsonScalar;

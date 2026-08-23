@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { Placeholder } from "./app/Placeholder";
-import { primaryNavKeyForRoute } from "./app/routes";
-import { useRoute } from "./app/useRoute";
+import { type Route, primaryNavKeyForRoute } from "./app/routes";
+import { useNavigate, useRoute } from "./app/useRoute";
+import { ProfilesPage } from "./features/profiles/ProfilesPage";
 import { LegacyApp } from "./legacy/LegacyApp";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
@@ -20,8 +21,6 @@ import type { StatusTile } from "./shell/StatusBar";
  */
 function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
   switch (routeName) {
-    case "profiles":
-      return <LegacyApp />;
     case "proxies":
       return (
         <Placeholder
@@ -53,8 +52,44 @@ function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
   }
 }
 
+interface DestinationContext {
+  destination: string;
+  search: string;
+  folderNames: ReadonlyMap<string, string>;
+  onOpenProfile: (id: string) => void;
+  onNewProfile: () => void;
+}
+
+/**
+ * The strangler seam.
+ *
+ * The profile list is the new table; creating and editing a profile is still the
+ * previous UI, until the editor lands. Splitting on the route rather than on a
+ * flag means both halves are reachable and testable at every commit, instead of
+ * a long period where one of them only exists in a branch.
+ */
+function renderDestination(route: Route, context: DestinationContext) {
+  if (route.name === "profiles") {
+    return (
+      <ProfilesPage
+        view={route.view}
+        folderId={route.folderId}
+        search={context.search}
+        folderNames={context.folderNames}
+        onOpenProfile={context.onOpenProfile}
+        onNewProfile={context.onNewProfile}
+      />
+    );
+  }
+  if (route.name === "profile" || route.name === "profile-new") {
+    return <LegacyApp />;
+  }
+  return destinationFor(context.destination);
+}
+
 export function App() {
   const route = useRoute();
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -62,10 +97,14 @@ export function App() {
 
   // Placeholders until the profile store hook lands with the table.
   const folders = useMemo<SidebarFolder[]>(() => [], []);
+  const folderNames = useMemo<ReadonlyMap<string, string>>(() => new Map(), []);
   const counts = useMemo<SidebarCounts>(() => ({ all: 0, favorites: 0, running: 0, trash: 0 }), []);
   const statusTiles = useMemo<StatusTile[]>(() => [], []);
 
   const destination = primaryNavKeyForRoute(route);
+
+  const openProfile = useCallback((id: string) => navigate({ name: "profile", id }), [navigate]);
+  const newProfile = useCallback(() => navigate({ name: "profile-new" }), [navigate]);
 
   return (
     <AppShell
@@ -79,7 +118,13 @@ export function App() {
       statusTiles={statusTiles}
       showSidebar={destination === "profiles"}
     >
-      {destinationFor(destination)}
+      {renderDestination(route, {
+        destination,
+        search,
+        folderNames,
+        onOpenProfile: openProfile,
+        onNewProfile: newProfile,
+      })}
     </AppShell>
   );
 }
