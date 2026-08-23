@@ -9,6 +9,7 @@ import {
 import { type ProxyDraftState, createProxyDraftState, parseProxyDraftState } from "../../proxyControls";
 import {
   createProfile,
+  getChromiumStatus,
   listProfiles,
   normalizeSidecarError,
   updateProfile,
@@ -25,12 +26,15 @@ import type {
 } from "../../sidecar/types";
 import { FingerprintForm } from "./FingerprintForm";
 import { GeneralForm } from "./GeneralForm";
+import { ProfileTools } from "./ProfileTools";
 import { ProxyForm } from "./ProxyForm";
 import styles from "./ProfileEditor.module.css";
 
 interface ProfileEditorProps {
   /** Null opens the create flow; a record opens the edit flow for it. */
   profileId: string | null;
+  /** Whether this profile's browser is live, which several tools refuse to touch. */
+  running?: boolean;
   onClose: () => void;
   onSaved: (id: string) => void;
 }
@@ -40,6 +44,7 @@ const SECTIONS: Array<{ id: EditorSection; label: string }> = [
   { id: "proxy", label: "Proxy" },
   { id: "fingerprint", label: "Fingerprint" },
   { id: "extra", label: "Startup" },
+  { id: "tools", label: "Tools" },
 ];
 
 interface EditorDraft {
@@ -88,7 +93,7 @@ function draftFrom(profile: ProfileRecord | null): EditorDraft {
   };
 }
 
-export function ProfileEditor({ profileId, onClose, onSaved }: ProfileEditorProps) {
+export function ProfileEditor({ profileId, running: runningProp, onClose, onSaved }: ProfileEditorProps) {
   const [profile, setProfile] = useState<ProfileRecord | null>(null);
   const [draft, setDraft] = useState<EditorDraft>(() => draftFrom(null));
   const [section, setSection] = useState<EditorSection>("general");
@@ -100,6 +105,10 @@ export function ProfileEditor({ profileId, onClose, onSaved }: ProfileEditorProp
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<IdentityWarning[]>([]);
+  // Asked for rather than assumed: several tools refuse to touch a profile whose
+  // browser is live, and a stale "stopped" would let them corrupt it.
+  const [runningHere, setRunningHere] = useState(false);
+  const running = runningProp ?? runningHere;
 
   useEffect(() => {
     if (profileId === null) {
@@ -137,12 +146,34 @@ export function ProfileEditor({ profileId, onClose, onSaved }: ProfileEditorProp
     };
   }, [profileId]);
 
+  useEffect(() => {
+    if (profileId === null || runningProp !== undefined) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await getChromiumStatus();
+        if (!cancelled) {
+          setRunningHere(status.profiles.some((entry) => entry.profileId === profileId));
+        }
+      } catch {
+        // A status this could not read is not a reason to block the editor; the
+        // sidecar refuses a busy profile on its own as the real guard.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, runningProp]);
+
   const sectionErrorCount = useMemo(
     () => ({
       general: nameError === null ? 0 : 1,
       proxy: Object.keys(draft.proxy.errors).length,
       fingerprint: Object.keys(draft.identity.errors).length,
       extra: 0,
+      tools: 0,
     }),
     [nameError, draft.proxy.errors, draft.identity.errors],
   );
@@ -292,11 +323,13 @@ export function ProfileEditor({ profileId, onClose, onSaved }: ProfileEditorProp
             warnings={warnings}
             onChange={(identity) => setDraft((current) => ({ ...current, identity }))}
           />
-        ) : (
+        ) : section === "extra" ? (
           <StartupForm
             launch={draft.launch}
             onChange={(launch) => setDraft((current) => ({ ...current, launch }))}
           />
+        ) : (
+          <ProfileTools profileId={profile?.id ?? null} running={running} />
         )}
       </div>
     </div>

@@ -9,7 +9,7 @@
 
 export type ProfileView = "all" | "favorites" | "running" | "trash";
 
-export type EditorSection = "general" | "proxy" | "fingerprint" | "extra";
+export type EditorSection = "general" | "proxy" | "fingerprint" | "extra" | "tools";
 
 export type SettingsSection = "appearance" | "sync" | "diagnostics" | "import";
 

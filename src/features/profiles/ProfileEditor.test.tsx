@@ -92,6 +92,7 @@ function respond(handlers: Record<string, () => unknown>) {
 function allSaveCommandsSucceed(profile = record()) {
   respond({
     profiles_list: () => envelope({ storeVersion: 4, profiles: [profile], count: 1 }),
+    chromium_status: () => envelope({ runningCount: 0, profiles: [], reconciled: [] }),
     profiles_create: () => mutation(profile),
     profiles_update: () => mutation(profile),
     profiles_organization_update: () => mutation(profile),
@@ -163,8 +164,9 @@ describe("ProfileEditor, editing an existing profile", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(PROFILE_ID));
+    // Reads are fine; the point is that nothing was written.
     const commands = mockInvoke.mock.calls.map(([command]) => command);
-    expect(commands).toEqual(["profiles_list"]);
+    expect(commands.filter((command) => /update|create|delete/.test(command as string))).toEqual([]);
   });
 
   it("sends the new name when it did change", async () => {
