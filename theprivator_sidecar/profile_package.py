@@ -164,6 +164,12 @@ class ValidatedPackage:
     payload_files: list[PayloadManifestEntry]
     payload_byte_count: int
     warnings: list[JsonObject]
+    kind: str = PACKAGE_KIND_PORTABLE
+    sync: Optional[JsonObject] = None
+
+    def restore_into(self, destination: Path) -> None:
+        """Copy the staged payload into a profile's user-data directory."""
+        _copy_prepared_payload(self.payload_temp_dir, destination)
 
 
 class PackageWarningAccumulator:
@@ -229,8 +235,17 @@ def export_profile_package(
     store_root: Union[str, Path],
     profile_id: str,
     destination_path: Union[str, Path],
+    *,
+    kind: str = PACKAGE_KIND_PORTABLE,
 ) -> JsonObject:
-    """Export a stopped profile into a versioned ThePrivator ``.tpkg`` archive."""
+    """Export a stopped profile into a versioned ThePrivator ``.tpkg`` archive.
+
+    ``kind`` decides whether the manifest carries the profile id and revision. A
+    sync payload does; a portable package deliberately does not, because it is
+    something a user may hand to another person.
+    """
+    if kind not in SUPPORTED_PACKAGE_KINDS:
+        raise SidecarError(code=INVALID_REQUEST, message="Unsupported package kind.")
     destination = _selected_path(destination_path, read=False)
     store = ProfileStore(store_root)
     profile = store.get(profile_id)
@@ -253,6 +268,7 @@ def export_profile_package(
         payload_files=payload_files,
         payload_byte_count=payload_byte_count,
         warnings=warnings.to_public(),
+        kind=kind,
     )
     _write_package_archive(destination, manifest, cookie_payload.content, payload_files)
 
@@ -282,6 +298,24 @@ def import_profile_package(
         staged_payload_dir = Path(temp_root) / "payload"
         validated = _read_validated_package(source, staged_payload_dir)
         return _commit_validated_package(store_root, validated)
+
+
+def read_sync_package(payload: bytes, staging: Path) -> ValidatedPackage:
+    """Validate a sync payload held in memory, staged under a caller-owned directory.
+
+    It goes through exactly the same reader as a file a user picked, because a
+    payload from a shared folder is no more trustworthy than one from a
+    download: same zip-bomb ceilings, same per-file checksums, same path-escape
+    checks.
+
+    The staging directory belongs to the caller because the staged copy is a
+    whole profile -- routinely hundreds of megabytes. Allocating it here would
+    leave one behind in the temp directory on every single pull.
+    """
+    staging.mkdir(parents=True, exist_ok=True)
+    archive_path = staging / "payload.tpkg"
+    archive_path.write_bytes(payload)
+    return _read_validated_package(archive_path, staging / "payload")
 
 
 def _commit_validated_package(store_root: Union[str, Path], package: ValidatedPackage) -> JsonObject:
@@ -557,7 +591,16 @@ def _read_validated_package(source: Path, staged_payload_dir: Path) -> Validated
             _validate_archive_infos(infos)
             by_name = {info.filename: info for info in infos}
             manifest = _read_manifest(archive, by_name)
-            profile_name, identity, proxy, cookie_meta, payload_entries, warnings = _validate_manifest(manifest)
+            (
+                profile_name,
+                identity,
+                proxy,
+                cookie_meta,
+                payload_entries,
+                warnings,
+                kind,
+                sync_section,
+            ) = _validate_manifest(manifest)
             cookie_bytes = _read_and_verify_cookie_member(archive, by_name, cookie_meta)
             payload_byte_count = _stage_and_verify_payload_members(
                 archive,
@@ -575,6 +618,8 @@ def _read_validated_package(source: Path, staged_payload_dir: Path) -> Validated
                 payload_files=payload_entries,
                 payload_byte_count=payload_byte_count,
                 warnings=warnings,
+                kind=kind,
+                sync=sync_section,
             )
     except PackageValidationError:
         raise
@@ -675,7 +720,16 @@ def _read_manifest(archive: zipfile.ZipFile, by_name: Mapping[str, zipfile.ZipIn
 
 def _validate_manifest(
     manifest: Mapping[str, Any]
-) -> tuple[str, JsonObject, JsonObject, JsonObject, list[PayloadManifestEntry], list[JsonObject]]:
+) -> tuple[
+    str,
+    JsonObject,
+    JsonObject,
+    JsonObject,
+    list[PayloadManifestEntry],
+    list[JsonObject],
+    str,
+    Optional[JsonObject],
+]:
     if manifest.get("format") != PACKAGE_FORMAT:
         _raise_invalid_package()
     version = manifest.get("version")
@@ -701,8 +755,9 @@ def _validate_manifest(
         expected = _MANIFEST_FIELDS_V3 if kind == PACKAGE_KIND_SYNC else (_MANIFEST_FIELDS | {"kind"})
         if keys != expected:
             _raise_invalid_package()
-        if kind == PACKAGE_KIND_SYNC:
-            _validate_sync_manifest(manifest.get("sync"))
+    sync_section: Optional[JsonObject] = None
+    if version >= 3 and kind == PACKAGE_KIND_SYNC:
+        sync_section = _validate_sync_manifest(manifest.get("sync"))
     created_at = manifest.get("createdAt")
     if not isinstance(created_at, str) or not is_utc_iso_timestamp(created_at):
         _raise_invalid_package()
@@ -730,7 +785,7 @@ def _validate_manifest(
     cookie_meta = _validate_cookie_manifest(manifest.get("cookies"))
     payload_entries = _validate_payload_manifest(manifest.get("payload"))
     warnings = _validate_manifest_warnings(manifest.get("warnings", []))
-    return profile_name, identity, proxy, cookie_meta, payload_entries, warnings
+    return profile_name, identity, proxy, cookie_meta, payload_entries, warnings, kind, sync_section
 
 
 def _validate_sync_manifest(raw: Any) -> JsonObject:

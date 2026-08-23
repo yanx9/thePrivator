@@ -210,6 +210,9 @@ def dispatch(request: SidecarRequest) -> JsonObject:
     if request.method.startswith("portability."):
         return dispatch_portability_request(request)
 
+    if request.method.startswith("sync."):
+        return dispatch_sync_request(request)
+
     raise SidecarError(
         code=UNKNOWN_COMMAND,
         message="Unknown sidecar command.",
@@ -460,6 +463,52 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
             request_id=request.id,
             method=request.method,
         ) from error
+
+
+def dispatch_sync_request(request: SidecarRequest) -> JsonObject:
+    """Dispatch profile synchronisation commands.
+
+    The sync package is imported here rather than at module scope: it pulls in
+    the package reader and the archive machinery, and a build that never syncs
+    should not pay for that on every command.
+    """
+    try:
+        from .sync import commands as sync_commands
+
+        store_root = require_string_param(
+            request.params,
+            "storeRoot",
+            "Profile storeRoot is required.",
+        )
+        return _sync_command(sync_commands, request, store_root)
+    except SidecarError as error:
+        raise SidecarError(
+            code=error.code,
+            message=error.message,
+            recoverable=error.recoverable,
+            detail_ref=error.detail_ref,
+            request_id=request.id,
+            method=request.method,
+        ) from error
+
+
+def _sync_command(sync_commands: Any, request: SidecarRequest, store_root: str) -> JsonObject:
+    if request.method == "sync.status":
+        return sync_commands.status(store_root)
+    if request.method == "sync.configure":
+        return sync_commands.configure(store_root, request.params)
+    if request.method == "sync.plan":
+        return sync_commands.plan(store_root)
+    if request.method == "sync.run":
+        return sync_commands.run(store_root)
+    if request.method == "sync.resolve":
+        return sync_commands.resolve(store_root, request.params)
+    if request.method == "sync.prepare":
+        return sync_commands.prepare(store_root, request.params)
+    if request.method == "sync.lock.forceRelease":
+        return sync_commands.force_release_lock(store_root, request.params)
+
+    raise SidecarError(code=UNKNOWN_COMMAND, message="Unknown sidecar command.")
 
 
 def dispatch_legacy_request(request: SidecarRequest) -> JsonObject:

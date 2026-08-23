@@ -509,3 +509,107 @@ class TestStateRoundTrip:
         (root / "sync-state.json").write_text(json.dumps({"version": 99, "profiles": {"a": {"baseRevision": 4}}}))
 
         assert read_state(root).profiles == {}
+
+
+class TestNoSecretReachesTheSharedFolder:
+    """The top risk of this whole feature.
+
+    A sync folder is somebody's Drive account. A proxy password that lands there
+    is in a third party's version history, and no later fix takes it back.
+    """
+
+    SENTINEL_PASSWORD = "proxy-password-sentinel-74d86415"
+    SENTINEL_USERNAME = "proxy-user-sentinel-e2e33f73"
+
+    def _folder_bytes(self, shared) -> bytes:
+        """Every byte under the sync root, with archives uncompressed.
+
+        Reading the files raw would prove nothing about the archives: a DEFLATE
+        member does not contain its plaintext, so a scan of the compressed bytes
+        passes whether or not the secret is inside.
+        """
+        import io
+        import zipfile
+
+        collected = bytearray()
+        for path in sorted(shared.root.rglob("*")):
+            if not path.is_file():
+                continue
+            collected.extend(path.name.encode("utf-8"))
+            raw = path.read_bytes()
+            collected.extend(raw)
+            if path.suffix == ".tpkg":
+                try:
+                    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                        for name in archive.namelist():
+                            collected.extend(name.encode("utf-8"))
+                            collected.extend(archive.read(name))
+                except zipfile.BadZipFile:
+                    # A payload the syncing client has only half delivered. Its
+                    # raw bytes are already in the scan above, which is the most
+                    # that can be said about it.
+                    pass
+        return bytes(collected)
+
+    def test_a_proxy_password_never_reaches_the_sync_folder(self, tmp_path, shared):
+        from theprivator_sidecar.sync.apply import build_push_payload
+
+        root = tmp_path / "a"
+        root.mkdir()
+        store = ProfileStore(root)
+        created = store.create("Banking")["profile"]
+        store.update_proxy(
+            created["id"],
+            {
+                "proxyVersion": 1,
+                "mode": "fixedServer",
+                "protocol": "http",
+                "host": "10.0.0.9",
+                "port": 8080,
+                "credentials": {
+                    "username": self.SENTINEL_USERNAME,
+                    "password": self.SENTINEL_PASSWORD,
+                },
+            },
+        )
+
+        eng = engine(store, shared, "device-a")
+        publish(eng, store, created["id"], "device-a", payload=build_push_payload(root, created["id"]))
+
+        contents = self._folder_bytes(shared)
+        assert self.SENTINEL_PASSWORD.encode() not in contents
+        assert self.SENTINEL_USERNAME.encode() not in contents
+
+    def test_the_scan_would_notice_a_secret_that_did_reach_the_folder(self, tmp_path, shared):
+        """Without this, the test above passes on an empty folder and on a
+        folder full of passwords alike."""
+        shared.put("profiles/a/meta.json", self.SENTINEL_PASSWORD.encode(), expected_etag=None)
+
+        assert self.SENTINEL_PASSWORD.encode() in self._folder_bytes(shared)
+
+    def test_the_scan_looks_inside_archives_not_only_at_them(self, tmp_path, shared):
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps({"password": self.SENTINEL_PASSWORD}))
+        raw = buffer.getvalue()
+        assert self.SENTINEL_PASSWORD.encode() not in raw, "the fixture must be compressed to be meaningful"
+
+        shared.put("profiles/a/payloads/1-abcdef0123456789.tpkg", raw, expected_etag=None)
+
+        assert self.SENTINEL_PASSWORD.encode() in self._folder_bytes(shared)
+
+    def test_the_device_hostname_never_reaches_the_sync_folder(self, tmp_path, shared):
+        """The label is user-chosen precisely so the machine's real name stays
+        on the machine."""
+        root = tmp_path / "a"
+        root.mkdir()
+        store = ProfileStore(root)
+        created = store.create("Banking")["profile"]
+        eng = engine(store, shared, "device-a")
+        publish(eng, store, created["id"], "device-a")
+        eng.acquire(created["id"], device_id="device-a", device_label="Laptop A")
+
+        assert os.uname().nodename.encode() not in self._folder_bytes(shared)

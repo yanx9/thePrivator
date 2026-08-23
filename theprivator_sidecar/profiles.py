@@ -160,13 +160,33 @@ class ProfileRecord:
         proxy: Mapping[str, Any],
         metadata: Optional[Mapping[str, Any]] = None,
         device_id: Optional[str] = None,
+        profile_id: Optional[str] = None,
+        organization: Optional[Mapping[str, Any]] = None,
+        launch_override: Optional[Mapping[str, Any]] = None,
+        revision: Optional[int] = None,
     ) -> "ProfileRecord":
-        """Create an imported package record with sidecar-normalized safe fields."""
-        profile_id = str(uuid.uuid4())
+        """Create an imported package record with sidecar-normalized safe fields.
+
+        ``profile_id`` is supplied only by sync, where a profile has to keep the
+        same identity on every device -- two machines calling the same profile by
+        different ids would make every exchange look like a new profile and grow
+        a duplicate on each run. It is validated as a uuid rather than trusted,
+        because it arrived from a shared folder.
+        """
+        if profile_id is None:
+            profile_id = str(uuid.uuid4())
+        else:
+            try:
+                profile_id = str(uuid.UUID(str(profile_id)))
+            except (ValueError, AttributeError, TypeError):
+                raise SidecarError(
+                    code=INVALID_REQUEST,
+                    message="An imported profile id must be a uuid.",
+                ) from None
         now = utc_now_iso()
         normalized_proxy = normalize_proxy_config(proxy)
         normalized_identity = normalize_profile_identity(identity)
-        launch = default_launch()
+        launch = default_launch() if launch_override is None else normalize_profile_launch(launch_override)
         return cls(
             id=profile_id,
             name=name,
@@ -177,10 +197,10 @@ class ProfileRecord:
             identity=normalized_identity,
             proxy=normalized_proxy,
             metadata=normalize_profile_metadata(metadata),
-            organization=default_organization(),
+            organization=default_organization() if organization is None else normalize_organization(organization),
             launch=launch,
             lifecycle=default_lifecycle(),
-            sync=default_sync(device_id or local_device_id()),
+            sync=_sync_at_revision(device_id or local_device_id(), revision),
         )
 
     @classmethod
@@ -412,6 +432,15 @@ class ProfileStore:
         """
         return local_device_id(self.store_root)
 
+    def records(self) -> List["ProfileRecord"]:
+        """Every stored record, live and trashed, in one read.
+
+        Callers that need the record objects rather than their public
+        dictionaries would otherwise call get() in a loop and re-read the whole
+        store once per profile.
+        """
+        return list(self._read_profiles())
+
     def list(self) -> JsonObject:
         """The profile library as the user sees it: everything except the trash."""
         profiles = self._read_profiles()
@@ -454,6 +483,49 @@ class ProfileStore:
             proxy=proxy,
             metadata=metadata,
             device_id=self.device_id,
+        )
+        self._ensure_profile_directories(profile)
+        updated_profiles = sort_profiles([*profiles, profile])
+        self._write_profiles(updated_profiles)
+        return self._collection_response(updated_profiles, profile=profile)
+
+    def create_synced_profile(
+        self,
+        name: str,
+        *,
+        identity: Mapping[str, Any],
+        proxy: Mapping[str, Any],
+        profile_id: Optional[str],
+        organization: Mapping[str, Any],
+        launch: Mapping[str, Any],
+        revision: int,
+    ) -> JsonObject:
+        """Commit a profile that arrived from another device.
+
+        Unlike a package import this keeps the profile id, because a profile has
+        to be the same profile on every machine -- two devices calling it by
+        different ids would make every exchange look like a first meeting and
+        grow a duplicate on each run.
+        """
+        valid_name = normalize_profile_name(name)
+        profiles = self._read_profiles()
+        self._ensure_unique_name(profiles, valid_name)
+        if profile_id is not None and any(profile.id == profile_id for profile in profiles):
+            raise SidecarError(
+                code=PROFILE_DUPLICATE_NAME,
+                message="A profile with that id already exists on this device.",
+            )
+
+        profile = ProfileRecord.create_from_package(
+            valid_name,
+            identity=identity,
+            proxy=proxy,
+            metadata={"source": "profile-sync", "hasUserData": True},
+            device_id=self.device_id,
+            profile_id=profile_id,
+            organization=organization,
+            launch_override=launch,
+            revision=revision,
         )
         self._ensure_profile_directories(profile)
         updated_profiles = sort_profiles([*profiles, profile])
@@ -1267,6 +1339,19 @@ def local_device_id(store_root: Optional[Union[str, Path]] = None) -> str:
         pass
     _DEVICE_ID_CACHE[key] = device_id
     return device_id
+
+
+def _sync_at_revision(device_id: str, revision: Optional[int]) -> JsonObject:
+    """A fresh sync section, optionally starting at a revision from elsewhere.
+
+    A profile arriving from another device already has a revision history.
+    Starting it back at 1 would make the next comparison read as "this device
+    went backwards", which the merge rules correctly refuse to act on.
+    """
+    section = default_sync(device_id)
+    if revision is not None and isinstance(revision, int) and revision >= 1:
+        section = {**section, "revision": revision}
+    return normalize_sync(section, device_id=device_id)
 
 
 def utc_now_iso() -> str:

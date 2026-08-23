@@ -326,6 +326,25 @@ class SyncEngine:
     def holder(self, profile_id: str):
         return self._remote.read_lock(lock_key(profile_id))
 
+    def take_over(self, profile_id: str) -> bool:
+        """Release a lock regardless of who holds it.
+
+        Only reached after the user has typed the holding device's label back,
+        which is the one gate that distinguishes a machine that is never coming
+        back from one that is merely slow.
+        """
+        return self._remote.clear_lock(lock_key(profile_id))
+
+    # -- payloads ----------------------------------------------------------
+
+    def fetch_payload(self, key: str) -> Optional[bytes]:
+        """Read one payload, or None when it has not arrived yet."""
+        return self._remote.get(key)
+
+    def remove_metadata(self, profile_id: str) -> bool:
+        """Drop a profile's pointer from the folder. Payloads are left alone."""
+        return self._remote.delete(meta_key(profile_id))
+
     # -- state -------------------------------------------------------------
 
     def record_exchange(
