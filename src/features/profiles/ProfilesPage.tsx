@@ -33,7 +33,7 @@ import {
   pruneSelection,
   visibleRows,
 } from "./tableModel";
-import { useProfileData } from "./useProfileData";
+import type { ProfileData } from "./useProfileData";
 import styles from "./ProfilesPage.module.css";
 
 interface ProfilesPageProps {
@@ -41,6 +41,15 @@ interface ProfilesPageProps {
   folderId: string | null;
   search: string;
   folderNames: ReadonlyMap<string, string>;
+  /**
+   * The library, loaded once by the composition root.
+   *
+   * It is handed down rather than fetched here because the sidebar counts the
+   * same profiles this table lists. Two independent loaders would poll twice and
+   * could disagree -- which is exactly what "7 profiles" beside a sidebar
+   * reading zero looked like.
+   */
+  data: ProfileData;
   onOpenProfile: (id: string) => void;
   onNewProfile: () => void;
 }
@@ -92,10 +101,11 @@ export function ProfilesPage({
   folderId,
   search,
   folderNames,
+  data,
   onOpenProfile,
   onNewProfile,
 }: ProfilesPageProps) {
-  const { rows, trashed, loading, error, refresh } = useProfileData(view === "trash");
+  const { rows, trashed, loading, error, refresh } = data;
 
   const [layout, setLayout] = useState<ColumnLayout>(defaultLayout);
   const [sort, setSort] = useState(DEFAULT_SORT);

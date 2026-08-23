@@ -1,8 +1,8 @@
 @layer components {
   .grid {
-    display: grid;
-    grid-template-columns: var(--grid-cols);
-    align-content: start;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
     min-height: 0;
     overflow: auto;
     background: var(--color-bg-surface);
@@ -11,16 +11,22 @@
   }
 
   /*
-   * Header and rows are subgrids of the same track list, so a column width lives
-   * in exactly one place. Without this the header and the body each carry their
-   * own copy and drift apart the first time one of them is edited.
+   * Header and rows read the same track list from one variable, so a column
+   * width still lives in exactly one place.
+   *
+   * This was `grid-template-columns: subgrid` against a grid container, which is
+   * tidier and does not work here: `content-visibility: auto` on a row applies
+   * layout containment, and a contained element cannot be a subgrid -- the
+   * property computes to `none` and every cell collapses into a single stacked
+   * column. The header, having no content-visibility, kept working, so the two
+   * disagreed and the rows rendered on top of themselves.
    */
   .headerRow,
   .row {
     display: grid;
-    grid-column: 1 / -1;
-    grid-template-columns: subgrid;
+    grid-template-columns: var(--grid-cols);
     align-items: center;
+    min-width: fit-content;
   }
 
   .headerRow {
@@ -277,7 +283,6 @@
   }
 
   .empty {
-    grid-column: 1 / -1;
     padding: var(--space-8);
     color: var(--color-text-muted);
     text-align: center;

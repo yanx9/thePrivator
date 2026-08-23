@@ -5,11 +5,13 @@ import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
 import { ProfilesPage } from "./features/profiles/ProfilesPage";
+import { useProfileData } from "./features/profiles/useProfileData";
 import { AutomationPage } from "./features/automation/AutomationPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
 import type { StatusTile } from "./shell/StatusBar";
+import type { ProfileData } from "./features/profiles/useProfileData";
 
 /**
  * The composition root.
@@ -49,6 +51,7 @@ interface DestinationContext {
   destination: string;
   search: string;
   folderNames: ReadonlyMap<string, string>;
+  data: ProfileData;
   onOpenProfile: (id: string) => void;
   onNewProfile: () => void;
   onCloseEditor: () => void;
@@ -62,6 +65,7 @@ function renderDestination(route: Route, context: DestinationContext) {
         folderId={route.folderId}
         search={context.search}
         folderNames={context.folderNames}
+        data={context.data}
         onOpenProfile={context.onOpenProfile}
         onNewProfile={context.onNewProfile}
       />
@@ -90,11 +94,43 @@ export function App() {
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed((collapsed) => !collapsed), []);
 
-  // Placeholders until the profile store hook lands with the table.
+  // One loader for the whole window: the sidebar counts the same profiles the
+  // table lists, and a second loader would poll twice and could disagree.
+  const data = useProfileData(true);
+
+  // Folders need the organization store, which has no command yet. An empty
+  // list renders as "No folders yet", which is true.
   const folders = useMemo<SidebarFolder[]>(() => [], []);
   const folderNames = useMemo<ReadonlyMap<string, string>>(() => new Map(), []);
-  const counts = useMemo<SidebarCounts>(() => ({ all: 0, favorites: 0, running: 0, trash: 0 }), []);
-  const statusTiles = useMemo<StatusTile[]>(() => [], []);
+
+  const counts = useMemo<SidebarCounts>(
+    () => ({
+      all: data.rows.length,
+      favorites: data.rows.filter((row) => row.profile.organization.favorite).length,
+      running: data.rows.filter((row) => row.running).length,
+      trash: data.trashed.length,
+    }),
+    [data.rows, data.trashed],
+  );
+
+  const statusTiles = useMemo<StatusTile[]>(
+    () => [
+      { key: "profiles", label: "Profiles", value: String(data.rows.length) },
+      {
+        key: "running",
+        label: "Running",
+        value: String(data.runningCount),
+        tone: data.runningCount > 0 ? "ok" : "neutral",
+      },
+      {
+        key: "sidecar",
+        label: "Sidecar",
+        value: data.error === null ? "Connected" : "Unavailable",
+        tone: data.error === null ? "ok" : "danger",
+      },
+    ],
+    [data.rows.length, data.runningCount, data.error],
+  );
 
   const destination = primaryNavKeyForRoute(route);
 
@@ -124,6 +160,7 @@ export function App() {
         onOpenProfile: openProfile,
         onNewProfile: newProfile,
         onCloseEditor: closeEditor,
+        data,
       })}
     </AppShell>
   );

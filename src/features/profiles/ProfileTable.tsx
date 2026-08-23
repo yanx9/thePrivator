@@ -354,7 +354,12 @@ function HeaderCell({ column, width, sort, headerSelection, onSort, onResize, on
         />
       ) : column.sortable ? (
         <button type="button" className={styles.headerButton} onClick={() => onSort(column.key)}>
-          <span>{column.label.length > 0 ? column.label : column.srLabel}</span>
+          {/* A sortable column with no visible label still needs a spoken one,
+              but rendering it visibly is how "Status" became "S..." in a 40px
+              column that was never meant to show text. */}
+          <span className={column.label.length > 0 ? undefined : styles.srOnly}>
+            {column.label.length > 0 ? column.label : column.srLabel}
+          </span>
           <span className={styles.sortGlyph} aria-hidden="true">
             {active ? (sort.direction === "asc" ? "▲" : "▼") : ""}
           </span>

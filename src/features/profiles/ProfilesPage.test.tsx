@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { ProfilesPage } from "./ProfilesPage";
+import { useProfileData } from "./useProfileData";
 
 // Only the Tauri bridge is mocked. client.ts -- and with it every strict-key
 // check and redaction rule the responses pass through -- runs for real, which is
@@ -15,6 +16,17 @@ vi.mock("../../sidecarEvents", () => ({
   PROFILES_CHANGED_EVENT: "theprivator://profiles-changed",
   CHROMIUM_STATUS_CHANGED_EVENT: "theprivator://chromium-status-changed",
 }));
+
+/**
+ * The page takes its data from the composition root now, so the tests mount it
+ * through a host that runs the same loader the app does. Nothing below the
+ * bridge is faked -- client.ts still parses every response.
+ */
+function PageHost(props: Omit<Parameters<typeof ProfilesPage>[0], "data"> & { includeTrash: boolean }) {
+  const { includeTrash, ...rest } = props;
+  const data = useProfileData(includeTrash);
+  return <ProfilesPage {...rest} data={data} />;
+}
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -117,7 +129,11 @@ function renderPage(overrides: Partial<Parameters<typeof ProfilesPage>[0]> = {})
     onNewProfile,
     ...overrides,
   };
-  return { onOpenProfile, onNewProfile, ...render(<ProfilesPage {...props} />) };
+  return {
+    onOpenProfile,
+    onNewProfile,
+    ...render(<PageHost {...props} includeTrash={props.view === "trash"} />),
+  };
 }
 
 beforeEach(() => {
@@ -352,11 +368,12 @@ describe("ProfilesPage", () => {
     expect(await screen.findByRole("region", { name: "Bulk actions" })).toBeInTheDocument();
 
     rerender(
-      <ProfilesPage
+      <PageHost
         view="all"
         folderId={null}
         search="alpha"
         folderNames={new Map()}
+        includeTrash={false}
         onOpenProfile={onOpenProfile}
         onNewProfile={onNewProfile}
       />,

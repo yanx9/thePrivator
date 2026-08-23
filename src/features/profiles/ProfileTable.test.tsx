@@ -159,6 +159,21 @@ describe("ProfileTable", () => {
     expect(props.onSort).toHaveBeenCalledWith("folder");
   });
 
+  it("keeps an icon column's header out of sight but not out of the accessibility tree", () => {
+    // Status is a 40px dot column. Rendering its spoken label visibly is how the
+    // header read "S..." across the top of the table.
+    renderTable();
+
+    const status = screen.getByRole("columnheader", { name: /status/i });
+    const spoken = within(status).getByText("Status");
+
+    expect(spoken.className).not.toBe("");
+    expect(spoken.className).toContain("srOnly");
+    // Name is a real heading and must stay visible.
+    const name = screen.getByRole("columnheader", { name: /name/i });
+    expect(within(name).getByText("Name").className).not.toContain("srOnly");
+  });
+
   it("gives no sort control to a column that cannot be sorted", () => {
     renderTable();
 
