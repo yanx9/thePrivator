@@ -2,6 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Cascade layer order, pinned at the document rather than in the bundle.
+
+      A layer's rank is fixed the first time its name is seen. src/styles/index.css
+      declares the same order, but that only holds while it is the first stylesheet
+      the document loads -- and it stopped being so the moment an import in main.tsx
+      was reordered, which silently ranked `base` above `components` and stripped
+      the background, border and padding off every button in the app. Declaring it
+      inline here settles the order before any stylesheet can be parsed. Repeating
+      the statement is a no-op, so both places can keep saying it.
+    -->
+    <style>@layer tokens, base, components, utilities;</style>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"

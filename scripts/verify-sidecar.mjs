@@ -595,18 +595,41 @@ function assertProxyErrorEnvelope(response, diagnostic, requestId, expectedError
   return { errorCode: response.error.code };
 }
 
+/*
+ * What an authenticated SOCKS5 profile does on launch, in the packed build.
+ *
+ * This used to assert PROXY_SOCKS_AUTH_UNSUPPORTED, because Chromium cannot
+ * perform SOCKS authentication itself and the sidecar refused the launch
+ * outright. The SOCKS5 bridge removed that refusal: an authenticated SOCKS5
+ * profile now launches through a local unauthenticated relay, and only SOCKS4 --
+ * which has no usable auth at all -- is still rejected up front.
+ *
+ * So the assertion is inverted. The launch must get PAST the proxy plan and
+ * fail on the deliberately absent executable instead, which is what proves the
+ * bridge path is reachable from a PyInstaller build. That matters here more than
+ * anywhere: proxy_bridge is imported lazily, so it can be missing from the
+ * packed binary while every from-source test passes.
+ */
 function assertChromiumLaunchGuardEnvelope(response, diagnostic) {
   assert(response.id === "verify-chromium-fixed-proxy-guard", "Chromium launch guard did not echo request id.");
   assert(response.ok === false, "Chromium launch guard did not return ok:false.");
   assert(
-    response.error?.code === "PROXY_SOCKS_AUTH_UNSUPPORTED",
-    "Chromium launch guard did not return PROXY_SOCKS_AUTH_UNSUPPORTED.",
+    response.error?.code !== "PROXY_SOCKS_AUTH_UNSUPPORTED",
+    "Authenticated SOCKS5 was refused before launch; the bridge path is unreachable in the packed build.",
+    { actualErrorCode: response.error?.code },
+  );
+  assert(
+    response.error?.code === "CHROMIUM_EXECUTABLE_NOT_FOUND",
+    "Chromium launch guard did not stop at the absent executable.",
     { actualErrorCode: response.error?.code },
   );
   assert(response.error?.recoverable === true, "Chromium launch guard error is not recoverable.");
   assert(response.error?.detailRef, "Chromium launch guard error is missing detailRef.");
   assert(diagnostic.status === "error", "Chromium launch guard diagnostic did not report error status.");
-  assert(diagnostic.errorCode === "PROXY_SOCKS_AUTH_UNSUPPORTED", "Chromium launch guard diagnostic lost errorCode.");
+  assert(
+    diagnostic.errorCode === "CHROMIUM_EXECUTABLE_NOT_FOUND",
+    "Chromium launch guard diagnostic lost errorCode.",
+  );
   assert(diagnostic.detailRef === response.error.detailRef, "Chromium launch guard detailRef mismatch.");
   assertNoProxyCredentialSentinels(response, "Chromium launch guard public response");
   assertNoProxyCredentialSentinels(diagnostic, "Chromium launch guard stderr diagnostic");
@@ -1093,18 +1116,31 @@ try {
     }
 
     const launchGuard = runStep("chromium-fixed-proxy-launch-guard", () => {
-      const result = remember(
-        runSidecarRequest(
-          binaryPath,
-          {
-            id: "verify-chromium-fixed-proxy-guard",
-            method: "chromium.launch",
-            params: { storeRoot, profileId },
-          },
-          sensitiveValues,
-        ),
-        { persisted: true },
-      );
+      // Point at an executable that cannot exist, so the launch stops at a known
+      // point instead of starting a real browser on whatever machine runs this.
+      const previousChromiumPath = process.env.THEPRIVATOR_CHROMIUM_PATH;
+      process.env.THEPRIVATOR_CHROMIUM_PATH = join(storeRoot, "no-such-chromium");
+      let result;
+      try {
+        result = remember(
+          runSidecarRequest(
+            binaryPath,
+            {
+              id: "verify-chromium-fixed-proxy-guard",
+              method: "chromium.launch",
+              params: { storeRoot, profileId },
+            },
+            sensitiveValues,
+          ),
+          { persisted: true },
+        );
+      } finally {
+        if (previousChromiumPath === undefined) {
+          delete process.env.THEPRIVATOR_CHROMIUM_PATH;
+        } else {
+          process.env.THEPRIVATOR_CHROMIUM_PATH = previousChromiumPath;
+        }
+      }
       return { value: result, log: { requestId: result.response.id, errorCode: result.response.error?.code } };
     });
     runStep("chromium-fixed-proxy-launch-guard-assertions", () =>

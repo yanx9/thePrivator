@@ -28,7 +28,24 @@ function importOrder(source: string): string[] {
   return [...source.matchAll(/^import\s+(?:[^"']*?from\s+)?["']([^"']+)["'];?$/gm)].map((match) => match[1]);
 }
 
+const documentShell: string = Object.values(
+  import.meta.glob("../../index.html", { query: "?raw", import: "default", eager: true }),
+)[0] as string;
+
 describe("cascade layer order", () => {
+  it("pins the order in the document, where no bundler decision can move it", () => {
+    // The import order below is the other half of this, and it is one refactor
+    // away from silently regressing. An inline declaration settles the ranking
+    // before any stylesheet can be parsed at all.
+    const declaration = documentShell.indexOf("@layer tokens, base, components, utilities;");
+    const firstStylesheet = documentShell.search(/<link[^>]+rel=["']stylesheet["']|<script[^>]+src=/);
+
+    expect(declaration, "index.html no longer declares the layer order").toBeGreaterThanOrEqual(0);
+    if (firstStylesheet >= 0) {
+      expect(declaration).toBeLessThan(firstStylesheet);
+    }
+  });
+
   it("imports the stylesheet before anything that carries a CSS module", () => {
     const order = importOrder(entrySource);
     const stylesAt = order.indexOf("./styles/index.css");
