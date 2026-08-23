@@ -5,6 +5,7 @@ import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
 import { ProfilesPage } from "./features/profiles/ProfilesPage";
+import { AutomationPage } from "./features/automation/AutomationPage";
 import { SyncSettings } from "./features/sync/SyncSettings";
 import { AppShell } from "./shell/AppShell";
 import type { SidebarCounts, SidebarFolder } from "./shell/Sidebar";
@@ -37,12 +38,7 @@ function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
         />
       );
     case "automation":
-      return (
-        <Placeholder
-          title="Automation"
-          description="The local automation endpoint and its access token are managed here."
-        />
-      );
+      return <AutomationPage />;
     default:
       return (
         <Placeholder

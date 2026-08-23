@@ -1,0 +1,133 @@
+@layer components {
+  .page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    max-width: 760px;
+    height: 100%;
+    padding: var(--space-5);
+    overflow-y: auto;
+  }
+
+  .header h1 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-xl);
+  }
+
+  .lede {
+    max-width: 60ch;
+    margin: 0;
+    font-size: var(--text-base);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: var(--space-3);
+    margin: 0;
+  }
+
+  .facts div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .facts dt {
+    font-size: var(--text-xs);
+    color: var(--color-text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .facts dd {
+    margin: 0;
+    overflow: hidden;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    text-overflow: ellipsis;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .primary,
+  .secondary {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-base);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .primary {
+    font-weight: 500;
+    color: var(--color-accent-fg);
+    background: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+
+  .secondary {
+    color: var(--color-text);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-strong);
+  }
+
+  .primary:disabled,
+  .secondary:disabled {
+    color: var(--color-text-subtle);
+    cursor: default;
+    background: var(--color-bg-hover);
+    border-color: var(--color-border);
+  }
+
+  .error,
+  .warning,
+  .note {
+    padding: var(--space-2) var(--space-3);
+    margin: 0;
+    font-size: var(--text-base);
+    border-radius: var(--radius-sm);
+  }
+
+  .error {
+    color: var(--color-danger);
+    background: var(--color-danger-bg);
+  }
+
+  .warning {
+    color: var(--color-warning);
+    background: var(--color-warning-bg);
+  }
+
+  .note {
+    color: var(--color-success);
+    background: var(--color-success-bg);
+  }
+
+  .hint {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-subtle);
+  }
+}
