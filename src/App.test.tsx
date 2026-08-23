@@ -64,7 +64,7 @@ function healthEnvelope(overrides: Record<string, unknown> = {}) {
 
 function defaultIdentity(overrides: Record<string, unknown> = {}) {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Real identity",
     presetId: null,
     browser: { mode: "real" },
@@ -75,6 +75,9 @@ function defaultIdentity(overrides: Record<string, unknown> = {}) {
     audio: { mode: "real" },
     webgl: { mode: "real" },
     webrtc: { mode: "real", policy: "real" },
+    geolocation: { mode: "real", permission: "prompt" },
+    mediaDevices: { mode: "real" },
+    ports: { mode: "real" },
     ...overrides,
   };
 }
@@ -426,7 +429,7 @@ function packageWarning(overrides: Record<string, unknown> = {}) {
 
 function packageExportResult(overrides: Record<string, unknown> = {}) {
   return {
-    packageVersion: 1,
+    packageVersion: 2,
     format: "theprivator.profile-package",
     operation: "export",
     profileId: "11111111-1111-1111-1111-111111111111",
@@ -445,7 +448,7 @@ function packageImportResult(overrides: Record<string, unknown> = {}) {
   const profileId = typeof overrides.profileId === "string" ? overrides.profileId : "22222222-2222-2222-2222-222222222222";
   const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research copy";
   return {
-    packageVersion: 1,
+    packageVersion: 2,
     format: "theprivator.profile-package",
     operation: "import",
     profileId,
@@ -484,7 +487,7 @@ function identityPresetResult(presets: unknown[] = [
   identityPreset("Strict privacy", "strict-privacy"),
 ]) {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     presets,
     count: presets.length,
   };
@@ -502,7 +505,7 @@ function identityWarning(overrides: Record<string, unknown> = {}) {
 
 function identityValidationResult(identity: unknown, warnings: unknown[] = [identityWarning()]) {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     identity,
     warnings,
   };
@@ -2116,11 +2119,16 @@ describe("ThePrivator profile library UI", () => {
 
     const canvasMode = within(panel).getByLabelText(/canvas mode/i) as HTMLSelectElement;
     const webglMode = within(panel).getByLabelText(/webgl mode/i) as HTMLSelectElement;
+    const geolocationMode = within(panel).getByLabelText(/geolocation mode/i) as HTMLSelectElement;
 
     expect(Array.from(canvasMode.options).map((option) => option.value)).toEqual(["real", "noise"]);
     expect(Array.from(webglMode.options).map((option) => option.value)).toEqual(["real", "masked", "custom"]);
+    expect(Array.from(geolocationMode.options).map((option) => option.value)).toEqual(["real", "custom"]);
     expect(Array.from(canvasMode.options).map((option) => option.value)).not.toContain("custom");
     expect(Array.from(webglMode.options).map((option) => option.value)).not.toContain("noise");
+    // Masked geolocation would mean deriving a position from the proxy exit, which the
+    // sidecar deliberately does not offer; the surface must never present it.
+    expect(Array.from(geolocationMode.options).map((option) => option.value)).not.toContain("masked");
   });
 
   it("shows local field errors and blocks sidecar writes until the advanced draft is parseable", async () => {

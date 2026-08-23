@@ -741,7 +741,7 @@ export function assertM005S04PackageManifestContract(manifest, { expectedProfile
   assertExactKeys(manifest.profile, ["identity", "name", "proxy", "proxySummary"], "manifest.profile");
   if (expectedProfileName !== undefined) assert(manifest.profile.name === expectedProfileName, "M005/S04 package manifest profile name mismatch.", { phase: "package-manifest", markerClass: "profile_name_mismatch" });
   assert(typeof manifest.profile.name === "string" && manifest.profile.name.length > 0 && manifest.profile.name.length <= 160, "M005/S04 package manifest profile name was malformed.", { phase: "package-manifest", markerClass: "manifest_malformed" });
-  assert(isPlainObject(manifest.profile.identity) && manifest.profile.identity.identityVersion === 1, "M005/S04 package manifest identity was not normalized.", { phase: "package-manifest", markerClass: "identity_malformed" });
+  assert(isPlainObject(manifest.profile.identity) && manifest.profile.identity.identityVersion === 2, "M005/S04 package manifest identity was not normalized.", { phase: "package-manifest", markerClass: "identity_malformed" });
   assertNoPackageCredentials(manifest.profile.proxy, "manifest.profile.proxy");
   assertNoPackageCredentials(manifest.profile.proxySummary, "manifest.profile.proxySummary");
   const proxyMode = manifest.profile.proxy?.mode;

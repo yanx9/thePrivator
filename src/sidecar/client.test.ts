@@ -7,6 +7,7 @@ import {
   copyAutomationApiToken,
   createProfile,
   deleteProfile,
+  describeIdentitySurfaces,
   exportProfileCookies,
   exportProfilePackage,
   getAutomationApiStatus,
@@ -110,7 +111,7 @@ function profilePackageWarning(overrides: Record<string, unknown> = {}) {
 
 function profilePackageExportResult(overrides: Record<string, unknown> = {}) {
   return {
-    packageVersion: 1,
+    packageVersion: 2,
     format: "theprivator.profile-package",
     operation: "export",
     profileId: PACKAGE_PROFILE_ID,
@@ -142,7 +143,7 @@ function profilePackageImportResult(overrides: Record<string, unknown> = {}) {
   const profileId = typeof overrides.profileId === "string" ? overrides.profileId : IMPORTED_PACKAGE_PROFILE_ID;
   const profileName = typeof overrides.profileName === "string" ? overrides.profileName : "Research Copy";
   return {
-    packageVersion: 1,
+    packageVersion: 2,
     format: "theprivator.profile-package",
     operation: "import",
     profileId,
@@ -275,7 +276,7 @@ function automationApiLastError(overrides: Record<string, unknown> = {}) {
 
 function defaultIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Real identity",
     presetId: null,
     browser: { mode: "real" },
@@ -286,13 +287,16 @@ function defaultIdentity(overrides: Record<string, unknown> = {}): ProfileIdenti
     audio: { mode: "real" },
     webgl: { mode: "real" },
     webrtc: { mode: "real", policy: "real" },
+    geolocation: { mode: "real", permission: "prompt" },
+    mediaDevices: { mode: "real" },
+    ports: { mode: "real" },
     ...overrides,
   };
 }
 
 function presetIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Windows 10 Chrome 120",
     presetId: "windows-10-chrome-120",
     browser: {
@@ -339,6 +343,67 @@ function presetIdentity(overrides: Record<string, unknown> = {}): ProfileIdentit
       noiseSeed: 120012,
     },
     webrtc: { mode: "masked", policy: "disableNonProxiedUdp" },
+    geolocation: { mode: "real", permission: "prompt" },
+    mediaDevices: { mode: "real" },
+    ports: { mode: "real" },
+    ...overrides,
+  };
+}
+
+function configuredSurfacesIdentity(overrides: Record<string, unknown> = {}): ProfileIdentity {
+  return presetIdentity({
+    presetId: null,
+    label: "Configured surfaces",
+    geolocation: {
+      mode: "custom",
+      permission: "allow",
+      latitude: 40.712776,
+      longitude: -74.005974,
+      accuracy: 65,
+      altitude: null,
+    },
+    mediaDevices: { mode: "custom", videoInputs: 1, audioInputs: 2, audioOutputs: 2 },
+    ports: { mode: "custom", allowedPorts: [80, 443, 8080] },
+    ...overrides,
+  });
+}
+
+function identitySurfacesDescribeResult(overrides: Record<string, unknown> = {}) {
+  return {
+    identityVersion: 2,
+    surfaces: [
+      {
+        id: "browser",
+        modes: ["custom", "masked", "real"],
+        fields: [{ name: "userAgent", type: "text", maxLength: 512, required: true }],
+      },
+      {
+        id: "geolocation",
+        modes: ["custom", "real"],
+        fields: [
+          { name: "permission", type: "enum", options: ["allow", "block", "prompt"], required: true },
+          { name: "latitude", type: "number", min: -90, max: 90, required: true },
+          { name: "longitude", type: "number", min: -180, max: 180, required: true },
+          { name: "accuracy", type: "integer", min: 1, max: 100000, required: true },
+          { name: "altitude", type: "number", min: -1000, max: 100000, required: false },
+        ],
+      },
+      {
+        id: "mediaDevices",
+        modes: ["custom", "masked", "real"],
+        fields: [
+          { name: "videoInputs", type: "integer", min: 0, max: 1, required: true },
+          { name: "audioInputs", type: "integer", min: 1, max: 4, required: true },
+          { name: "audioOutputs", type: "integer", min: 1, max: 4, required: true },
+          { name: "noiseSeed", type: "integer", min: 0, max: 1000000, required: false },
+        ],
+      },
+      {
+        id: "ports",
+        modes: ["custom", "masked", "real"],
+        fields: [{ name: "allowedPorts", type: "list", maxItems: 50, required: true }],
+      },
+    ],
     ...overrides,
   };
 }
@@ -1728,7 +1793,7 @@ describe("sidecar client", () => {
     }
     expect(exported).toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 1,
+      packageVersion: 2,
       operation: "export",
       profileId: PACKAGE_PROFILE_ID,
       profileName: "Research",
@@ -1744,7 +1809,7 @@ describe("sidecar client", () => {
     });
     expect(imported).toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 1,
+      packageVersion: 2,
       operation: "import",
       importedProfileId: IMPORTED_PACKAGE_PROFILE_ID,
       importedProfileName: "Research Copy",
@@ -1772,7 +1837,7 @@ describe("sidecar client", () => {
 
     await expect(callClient()).resolves.toMatchObject({
       portabilityVersion: 1,
-      packageVersion: 1,
+      packageVersion: 2,
     });
   });
 
@@ -1793,7 +1858,8 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["wrong package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 2 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["wrong package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 3 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
+    ["superseded package version", () => profilePackageEnvelope(profilePackageExportResult({ packageVersion: 1 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["wrong package format", () => profilePackageEnvelope(profilePackageExportResult({ format: "zip" })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["missing payload count", () => profilePackageEnvelope(profilePackageExportResult({ payloadFileCount: undefined })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
     ["negative payload bytes", () => profilePackageEnvelope(profilePackageExportResult({ payloadByteCount: -1 })), () => exportProfilePackage(PACKAGE_PROFILE_ID, "/tmp/export.tpkg")],
@@ -2022,8 +2088,8 @@ describe("sidecar client", () => {
     const suspiciousProfile = profileRecord({ identity: suspicious, updatedAt: "2026-05-04T18:03:00.000Z" });
     const warning = identityWarning();
     mockInvoke
-      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 1, presets: [preset], count: 1 }))
-      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 1, identity: suspicious, warnings: [warning] }))
+      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 2, presets: [preset], count: 1 }))
+      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 2, identity: suspicious, warnings: [warning] }))
       .mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile], warnings: [] })))
       .mockResolvedValueOnce(profileEnvelope(profileResult({ profile: suspiciousProfile, profiles: [suspiciousProfile], warnings: [warning] })));
 
@@ -2048,6 +2114,96 @@ describe("sidecar client", () => {
     expect(applied.warnings).toEqual([]);
     expect(updated.profile.identity).toEqual(suspicious);
     expect(updated.warnings).toEqual([warning]);
+  });
+
+  it("parses the geolocation, media device, and port surfaces and their warnings", async () => {
+    const identity = configuredSurfacesIdentity();
+    const geolocationOnly = defaultIdentity({
+      label: "Geolocation only",
+      geolocation: { mode: "custom", permission: "block", latitude: -33.868821, longitude: 151.209296, accuracy: 1, altitude: 58.5 },
+    });
+    const profile = profileRecord({ identity });
+    const geolocationProfile = profileRecord({ id: "55555555-5555-5555-5555-555555555555", identity: geolocationOnly });
+    const warnings = [
+      identityWarning({ code: "IDENTITY_GEOLOCATION_WITHOUT_PERMISSION", message: "A fixed position is set but the page can never ask for it.", surface: "geolocation", path: "geolocation.permission" }),
+      identityWarning({ code: "IDENTITY_GEOLOCATION_TIMEZONE_MISMATCH", message: "The fixed position is far from the masked timezone.", surface: "geolocation", path: "geolocation.latitude" }),
+      identityWarning({ code: "IDENTITY_MEDIA_DEVICES_UNUSUAL", message: "The device counts are valid but uncommon for desktop Chromium.", surface: "mediaDevices", path: "mediaDevices.audioInputs" }),
+      identityWarning({ code: "IDENTITY_PORTS_ALLOWLIST_BROAD", message: "The allowed port list is broad enough to be distinctive.", surface: "ports", path: "ports.allowedPorts" }),
+    ];
+    mockInvoke
+      .mockResolvedValueOnce(identityEnvelope({ identityVersion: 2, identity, warnings }))
+      .mockResolvedValueOnce(profileEnvelope(profileResult({ profiles: [profile, geolocationProfile] })));
+
+    const validation = await validateIdentity(identity);
+    const listed = await listProfiles();
+
+    expect(validation.identityVersion).toBe(2);
+    expect(validation.identity).toEqual(identity);
+    expect(validation.warnings).toEqual(warnings);
+    expect(listed.profiles[0].identity.geolocation).toEqual(identity.geolocation);
+    expect(listed.profiles[0].identity.mediaDevices).toEqual(identity.mediaDevices);
+    expect(listed.profiles[0].identity.ports).toEqual(identity.ports);
+    // A profile whose only non-real surface is one of the new ones must still be
+    // derived as managed, or every profiles response fails the defaults check.
+    expect(listed.profiles[1].defaults.fingerprintMode).toBe("managed");
+  });
+
+  it.each([
+    ["masked media devices", { mediaDevices: { mode: "masked", noiseSeed: 4242 } }],
+    ["masked ports", { ports: { mode: "masked" } }],
+    ["blocked real geolocation", { geolocation: { mode: "real", permission: "block" } }],
+    ["single allowed port", { ports: { mode: "custom", allowedPorts: [65535] } }],
+    ["empty allowed port list", { ports: { mode: "custom", allowedPorts: [] } }],
+    ["boundary coordinates", { geolocation: { mode: "custom", permission: "allow", latitude: -90, longitude: 180, accuracy: 100000, altitude: -1000 } }],
+    ["minimum device counts", { mediaDevices: { mode: "custom", videoInputs: 0, audioInputs: 1, audioOutputs: 1 } }],
+    // The sidecar counts label bounds in code points, so a 128-code-point label
+    // ending in an emoji is a value it accepts and persists.
+    ["code-point label bound", { label: `${"a".repeat(127)}🙂` }],
+  ] as Array<[string, Record<string, unknown>]>)("accepts identity surface boundary conditions: %s", async (_caseName, overrides) => {
+    const identity = defaultIdentity(overrides);
+    mockInvoke.mockResolvedValueOnce(identityEnvelope({ identityVersion: 2, identity, warnings: [] }));
+
+    await expect(validateIdentity(identity)).resolves.toMatchObject({ identityVersion: 2, identity });
+  });
+
+  it("describes identity surfaces through the fixed Tauri command", async () => {
+    mockInvoke.mockResolvedValueOnce(identityEnvelope(identitySurfacesDescribeResult()));
+
+    const described = await describeIdentitySurfaces();
+
+    expect(mockInvoke).toHaveBeenCalledWith("identity_surfaces_describe");
+    expect(described.requestId).toBe("bridge-identity-1");
+    expect(described.identityVersion).toBe(2);
+    expect(described.surfaces.map((surface) => surface.id)).toEqual(["browser", "geolocation", "mediaDevices", "ports"]);
+    expect(described.surfaces[1].modes).toEqual(["custom", "real"]);
+    expect(described.surfaces[1].fields[0]).toEqual({ name: "permission", type: "enum", options: ["allow", "block", "prompt"], required: true });
+    expect(described.surfaces[1].fields[4]).toEqual({ name: "altitude", type: "number", min: -1000, max: 100000, required: false });
+    expect(described.surfaces[3].fields[0]).toEqual({ name: "allowedPorts", type: "list", maxItems: 50, required: true });
+  });
+
+  it.each([
+    ["superseded identity version", identityEnvelope(identitySurfacesDescribeResult({ identityVersion: 1 }))],
+    ["unknown result key", identityEnvelope({ ...identitySurfacesDescribeResult(), surfaceCount: 4 })],
+    ["unknown surface id", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "gpu", modes: ["real"], fields: [] }] }))],
+    ["unknown surface key", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["real"], fields: [], label: "Ports" }] }))],
+    ["repeated surface id", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["real"], fields: [] }, { id: "ports", modes: ["real"], fields: [] }] }))],
+    ["unsorted modes", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["real", "custom"], fields: [] }] }))],
+    ["unknown mode", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["derived"], fields: [] }] }))],
+    ["unknown field key", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["real"], fields: [{ name: "allowedPorts", type: "list", maxItems: 50, required: true, help: "Ports" }] }] }))],
+    ["unknown field type", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "ports", modes: ["real"], fields: [{ name: "allowedPorts", type: "portlist", maxItems: 50, required: true }] }] }))],
+    ["inverted field bounds", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "geolocation", modes: ["real"], fields: [{ name: "latitude", type: "number", min: 90, max: -90, required: true }] }] }))],
+    ["repeated field name", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [{ id: "geolocation", modes: ["real"], fields: [{ name: "latitude", type: "number", min: -90, max: 90, required: true }, { name: "latitude", type: "number", min: -90, max: 90, required: true }] }] }))],
+    ["empty surface list", identityEnvelope(identitySurfacesDescribeResult({ surfaces: [] }))],
+  ])("maps malformed identity surface descriptions to protocol errors: %s", async (_caseName, envelope) => {
+    mockInvoke.mockResolvedValueOnce(envelope);
+
+    await expect(describeIdentitySurfaces()).rejects.toMatchObject({
+      code: SIDECAR_PROTOCOL_ERROR,
+      recoverable: true,
+      source: "protocol",
+      phase: "bridge-error",
+      detailRef: expect.stringMatching(/^ui-protocol-/),
+    });
   });
 
   it("scans legacy profiles through the fixed Tauri command and validates nested candidates", async () => {
@@ -2677,12 +2833,12 @@ describe("sidecar client", () => {
   it.each([
     [
       "malformed preset list warning-free contract",
-      identityEnvelope({ identityVersion: 1, presets: [presetIdentity({ presetId: null })], count: 1 }),
+      identityEnvelope({ identityVersion: 2, presets: [presetIdentity({ presetId: null })], count: 1 }),
       () => listIdentityPresets(),
     ],
     [
       "warning missing code",
-      identityEnvelope({ identityVersion: 1, identity: suspiciousIdentity(), warnings: [identityWarning({ code: undefined })] }),
+      identityEnvelope({ identityVersion: 2, identity: suspiciousIdentity(), warnings: [identityWarning({ code: undefined })] }),
       () => validateIdentity(suspiciousIdentity()),
     ],
     [
@@ -2711,13 +2867,108 @@ describe("sidecar client", () => {
     ],
     [
       "malformed identity command envelope",
-      { protocolVersion: "1.0.0", durationMs: 3.25, result: { identityVersion: 1, presets: [], count: 0 } },
+      { protocolVersion: "1.0.0", durationMs: 3.25, result: { identityVersion: 2, presets: [], count: 0 } },
       () => listIdentityPresets(),
     ],
     [
       "unknown protocol version",
-      identityEnvelope({ identityVersion: 1, presets: [], count: 0 }, { protocolVersion: "9.9.9" }),
+      identityEnvelope({ identityVersion: 2, presets: [], count: 0 }, { protocolVersion: "9.9.9" }),
       () => listIdentityPresets(),
+    ],
+    [
+      "superseded identity version",
+      identityEnvelope({ identityVersion: 1, identity: defaultIdentity(), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unknown geolocation field",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "real", permission: "prompt", heading: 90 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unknown media device field",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ mediaDevices: { mode: "real", videoInputs: 1 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unknown port field",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ ports: { mode: "real", allowedPorts: [] } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "masked geolocation mode",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "masked", permission: "prompt", latitude: 0, longitude: 0, accuracy: 10, altitude: null } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unknown geolocation permission",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "real", permission: "ask" } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "out of range latitude",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "custom", permission: "allow", latitude: 91, longitude: 0, accuracy: 10, altitude: null } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "out of range longitude",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "custom", permission: "allow", latitude: 0, longitude: -181, accuracy: 10, altitude: null } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "zero accuracy",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "custom", permission: "allow", latitude: 0, longitude: 0, accuracy: 0, altitude: null } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "missing altitude key",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ geolocation: { mode: "custom", permission: "allow", latitude: 0, longitude: 0, accuracy: 10 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "media device noise seed in custom mode",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ mediaDevices: { mode: "custom", videoInputs: 1, audioInputs: 2, audioOutputs: 2, noiseSeed: 7 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "too many video inputs",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ mediaDevices: { mode: "custom", videoInputs: 2, audioInputs: 2, audioOutputs: 2 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "zero audio inputs",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ mediaDevices: { mode: "custom", videoInputs: 1, audioInputs: 0, audioOutputs: 2 } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "too many allowed ports",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ ports: { mode: "custom", allowedPorts: Array.from({ length: 51 }, (_item, index) => index + 1) } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "duplicated allowed ports",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ ports: { mode: "custom", allowedPorts: [80, 80, 443] } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unsorted allowed ports",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ ports: { mode: "custom", allowedPorts: [443, 80] } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "out of range allowed port",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ ports: { mode: "custom", allowedPorts: [0] } }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "unknown warning surface",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity(), warnings: [identityWarning({ surface: "unknownSurface", path: "unknownSurface.mode" })] }),
+      () => validateIdentity(defaultIdentity()),
+    ],
+    [
+      "label beyond the code-point bound",
+      identityEnvelope({ identityVersion: 2, identity: defaultIdentity({ label: `${"a".repeat(128)}🙂` }), warnings: [] }),
+      () => validateIdentity(defaultIdentity()),
     ],
   ])("maps malformed identity payloads to protocol errors: %s", async (_caseName, envelope, callClient) => {
     mockInvoke.mockResolvedValueOnce(envelope);

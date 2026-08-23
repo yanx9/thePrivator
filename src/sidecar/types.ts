@@ -130,8 +130,23 @@ export interface DiagnosticLookupResult {
 
 export type FingerprintMode = "disabled" | "managed";
 
-export type IdentitySurface = "browser" | "navigator" | "screen" | "locale" | "canvas" | "audio" | "webgl" | "webrtc";
+export type IdentitySurface =
+  | "browser"
+  | "navigator"
+  | "screen"
+  | "locale"
+  | "canvas"
+  | "audio"
+  | "webgl"
+  | "webrtc"
+  | "geolocation"
+  | "mediaDevices"
+  | "ports";
 export type IdentityMaskingMode = "real" | "masked" | "custom";
+// Geolocation deliberately omits "masked": the sidecar has no mode that derives a
+// position, so a masked geolocation would be a mode nothing can produce.
+export type IdentityGeolocationMode = Exclude<IdentityMaskingMode, "masked">;
+export type IdentityGeolocationPermission = "prompt" | "allow" | "block";
 export type IdentityNoiseMode = "real" | "noise";
 export type WebRtcPolicy = "real" | "disableNonProxiedUdp" | "block";
 
@@ -251,7 +266,7 @@ export interface ProfilePackageWarning {
 
 export interface ProfilePackageExportResult {
   portabilityVersion: 1;
-  packageVersion: 1;
+  packageVersion: 2;
   operation: Extract<ProfilePackageOperation, "export">;
   profileId: string;
   profileName: string;
@@ -273,7 +288,7 @@ export interface ProfilePackageExportSnapshot extends ProfilePackageExportResult
 
 export interface ProfilePackageImportResult {
   portabilityVersion: 1;
-  packageVersion: 1;
+  packageVersion: 2;
   operation: Extract<ProfilePackageOperation, "import">;
   importedProfileId: string;
   importedProfileName: string;
@@ -398,6 +413,10 @@ export interface IdentityRealSurface {
   mode: "real";
 }
 
+export interface IdentityMaskedSurface {
+  mode: "masked";
+}
+
 export interface BrowserClientHints {
   platform?: string;
   platformVersion?: string;
@@ -471,8 +490,46 @@ export interface WebRtcIdentitySurface {
   policy: WebRtcPolicy;
 }
 
+export interface GeolocationRealSurface {
+  mode: Extract<IdentityGeolocationMode, "real">;
+  permission: IdentityGeolocationPermission;
+}
+
+export interface GeolocationCustomSurface {
+  mode: Exclude<IdentityGeolocationMode, "real">;
+  permission: IdentityGeolocationPermission;
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  /** Always emitted in custom mode, null when the profile pins no altitude. */
+  altitude: number | null;
+}
+
+export type GeolocationIdentitySurface = GeolocationRealSurface | GeolocationCustomSurface;
+
+export interface MediaDevicesMaskedSurface {
+  mode: "masked";
+  noiseSeed: number;
+}
+
+export interface MediaDevicesCustomSurface {
+  mode: "custom";
+  videoInputs: number;
+  audioInputs: number;
+  audioOutputs: number;
+}
+
+export type MediaDevicesIdentitySurface = IdentityRealSurface | MediaDevicesMaskedSurface | MediaDevicesCustomSurface;
+
+export interface PortsCustomSurface {
+  mode: "custom";
+  allowedPorts: number[];
+}
+
+export type PortsIdentitySurface = IdentityRealSurface | IdentityMaskedSurface | PortsCustomSurface;
+
 export interface ProfileIdentity {
-  identityVersion: 1;
+  identityVersion: 2;
   label: string;
   presetId: string | null;
   browser: BrowserIdentitySurface;
@@ -483,6 +540,9 @@ export interface ProfileIdentity {
   audio: AudioIdentitySurface;
   webgl: WebGlIdentitySurface;
   webrtc: WebRtcIdentitySurface;
+  geolocation: GeolocationIdentitySurface;
+  mediaDevices: MediaDevicesIdentitySurface;
+  ports: PortsIdentitySurface;
 }
 
 export interface IdentityWarning {
@@ -593,7 +653,7 @@ export interface IdentityAuditCollectSnapshot extends IdentityAuditCollectResult
 }
 
 export interface IdentityPresetListResult {
-  identityVersion: 1;
+  identityVersion: 2;
   presets: ProfileIdentity[];
   count: number;
 }
@@ -607,12 +667,44 @@ export interface IdentityPresetListSnapshot extends IdentityPresetListResult {
 }
 
 export interface IdentityValidationResult {
-  identityVersion: 1;
+  identityVersion: 2;
   identity: ProfileIdentity;
   warnings: IdentityWarning[];
 }
 
 export interface IdentityValidationSnapshot extends IdentityValidationResult {
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export type IdentitySurfaceFieldType = "text" | "integer" | "number" | "list" | "enum";
+
+export interface IdentitySurfaceFieldDescriptor {
+  name: string;
+  type: IdentitySurfaceFieldType;
+  required: boolean;
+  maxLength?: number;
+  min?: number;
+  max?: number;
+  maxItems?: number;
+  options?: string[];
+}
+
+export interface IdentitySurfaceDescriptor {
+  id: IdentitySurface;
+  modes: string[];
+  fields: IdentitySurfaceFieldDescriptor[];
+}
+
+export interface IdentitySurfacesDescribeResult {
+  identityVersion: 2;
+  surfaces: IdentitySurfaceDescriptor[];
+}
+
+export interface IdentitySurfacesDescribeSnapshot extends IdentitySurfacesDescribeResult {
   requestId: string;
   rawRequestId: JsonScalar;
   protocolVersion: string;

@@ -100,7 +100,6 @@ def test_coordinates_are_rounded_because_precision_is_itself_a_signal():
         ("geolocation", {"mode": "custom", "permission": "allow", "latitude": 0, "longitude": 0, "accuracy": 0}),
         ("geolocation", {"mode": "real", "permission": "sometimes"}),
         ("mediaDevices", {"mode": "custom", "videoInputs": 2, "audioInputs": 1, "audioOutputs": 1}),
-        ("mediaDevices", {"mode": "custom", "videoInputs": 1, "audioInputs": 0, "audioOutputs": 1}),
         ("mediaDevices", {"mode": "custom", "videoInputs": 1, "audioInputs": 1, "audioOutputs": 9}),
         ("ports", {"mode": "custom", "allowedPorts": [0]}),
         ("ports", {"mode": "custom", "allowedPorts": [70000]}),
@@ -159,7 +158,22 @@ def test_a_position_matching_the_timezone_region_is_not_flagged():
 
 
 def test_a_camera_with_no_microphone_is_flagged():
+    """A webcam with no microphone at all is an odd device set to claim."""
+    identity = with_surface("mediaDevices", {"mode": "custom", "videoInputs": 1, "audioInputs": 0, "audioOutputs": 1})
+
+    assert "IDENTITY_MEDIA_DEVICES_UNUSUAL" in codes(identity)
+
+
+def test_an_ordinary_camera_and_microphone_pair_is_not_flagged():
     identity = with_surface("mediaDevices", {"mode": "custom", "videoInputs": 1, "audioInputs": 1, "audioOutputs": 1})
+
+    assert "IDENTITY_MEDIA_DEVICES_UNUSUAL" not in codes(identity)
+
+
+def test_no_microphone_without_a_camera_is_not_flagged():
+    """A machine with neither is common; only the mismatch is unusual."""
+    identity = with_surface("mediaDevices", {"mode": "custom", "videoInputs": 0, "audioInputs": 0, "audioOutputs": 1})
+
     assert "IDENTITY_MEDIA_DEVICES_UNUSUAL" not in codes(identity)
 
 

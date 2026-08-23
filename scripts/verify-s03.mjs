@@ -562,7 +562,7 @@ function assertProfileShape(profile, expectedName = SMOKE_PROFILE_NAME) {
     userDataDir: profile.storage.userDataDir,
   });
   assert(profile.identity && typeof profile.identity === "object" && !Array.isArray(profile.identity), "Profile is missing identity.");
-  assert(profile.identity.identityVersion === 1, "Profile identity version mismatch.", {
+  assert(profile.identity.identityVersion === 2, "Profile identity version mismatch.", {
     identityVersion: profile.identity.identityVersion,
   });
   assertPublicPayloadSafe(profile, "public profile payload");

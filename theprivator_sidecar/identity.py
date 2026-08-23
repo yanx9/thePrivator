@@ -45,6 +45,7 @@ MIN_ALTITUDE_METERS = -1_000
 # profile out more clearly than a wrong city would.
 GEOLOCATION_COORDINATE_DECIMALS = 6
 MAX_MEDIA_VIDEO_INPUTS = 1
+MIN_MEDIA_AUDIO_INPUTS = 0
 MAX_MEDIA_AUDIO_INPUTS = 4
 MAX_MEDIA_AUDIO_OUTPUTS = 4
 MAX_ALLOWED_PORTS = 50
@@ -449,7 +450,7 @@ def _describe_surface_fields(surface: str) -> list[JsonObject]:
         return [field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=True)]
     if surface == "webgl":
         return [
-            field("vendor", "text", maxLength=MAX_SHORT_STRING_LENGTH, required=True),
+            field("vendor", "text", maxLength=MAX_STRING_LENGTH, required=True),
             field("renderer", "text", maxLength=MAX_STRING_LENGTH, required=True),
             field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=False),
         ]
@@ -466,7 +467,7 @@ def _describe_surface_fields(surface: str) -> list[JsonObject]:
     if surface == "mediaDevices":
         return [
             field("videoInputs", "integer", min=0, max=MAX_MEDIA_VIDEO_INPUTS, required=True),
-            field("audioInputs", "integer", min=1, max=MAX_MEDIA_AUDIO_INPUTS, required=True),
+            field("audioInputs", "integer", min=MIN_MEDIA_AUDIO_INPUTS, max=MAX_MEDIA_AUDIO_INPUTS, required=True),
             field("audioOutputs", "integer", min=1, max=MAX_MEDIA_AUDIO_OUTPUTS, required=True),
             field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=False),
         ]
@@ -738,7 +739,10 @@ def _normalize_media_devices(raw_surface: Mapping[str, Any], mode: str) -> JsonO
     _ensure_keys(raw_surface, allowed={"mode", "videoInputs", "audioInputs", "audioOutputs"}, required={"mode", "videoInputs", "audioInputs", "audioOutputs"}, context="mediaDevices")
     video_inputs = _require_int(raw_surface.get("videoInputs"), "mediaDevices.videoInputs", min_value=0, max_value=MAX_MEDIA_VIDEO_INPUTS
     )
-    audio_inputs = _require_int(raw_surface.get("audioInputs"), "mediaDevices.audioInputs", min_value=1, max_value=MAX_MEDIA_AUDIO_INPUTS
+    # Zero is allowed: a desktop or VM with no microphone at all is ordinary, and
+    # a bound of 1 made IDENTITY_MEDIA_DEVICES_UNUSUAL unreachable -- the very
+    # combination it exists to flag could not be expressed.
+    audio_inputs = _require_int(raw_surface.get("audioInputs"), "mediaDevices.audioInputs", min_value=MIN_MEDIA_AUDIO_INPUTS, max_value=MAX_MEDIA_AUDIO_INPUTS
     )
     audio_outputs = _require_int(raw_surface.get("audioOutputs"), "mediaDevices.audioOutputs", min_value=1, max_value=MAX_MEDIA_AUDIO_OUTPUTS
     )

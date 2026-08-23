@@ -56,9 +56,9 @@ function seedS03Root({ packageScript = "node scripts/verify-m005-s03.mjs", readm
 function goodManifest() {
   return {
     format: PACKAGE_FORMAT,
-    version: 1,
+    version: 2,
     createdAt: "2026-01-01T00:00:00.000Z",
-    profile: { name: "M005 S03", identity: { identityVersion: 1 }, proxy: { proxyVersion: 1, mode: "direct" }, proxySummary: { proxyVersion: 1, mode: "direct", credentialState: "none", summary: "Direct connection" } },
+    profile: { name: "M005 S03", identity: { identityVersion: 2 }, proxy: { proxyVersion: 1, mode: "direct" }, proxySummary: { proxyVersion: 1, mode: "direct", credentialState: "none", summary: "Direct connection" } },
     cookies: { member: COOKIE_MEMBER, format: "theprivator.cookies", version: 1, byteCount: 64, sha256: "a".repeat(64), cookieCount: 1, skippedCount: 0 },
     payload: { prefix: "payload/", fileCount: 1, byteCount: 12, files: [{ path: "Default/Preferences", member: "payload/Default/Preferences", byteCount: 12, sha256: "b".repeat(64) }] },
     warnings: [],

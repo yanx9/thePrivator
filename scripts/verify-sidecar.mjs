@@ -407,8 +407,8 @@ function assertProfileCreateEnvelope(response, diagnostic, profileName) {
   assert(response.result?.profile?.id, "Profile create is missing profile id.");
   assert(response.result?.profile?.name === profileName, "Profile create returned the wrong profile name.");
   assert(
-    response.result?.profile?.identity?.identityVersion === 1,
-    "Profile create is missing default identity v1.",
+    response.result?.profile?.identity?.identityVersion === 2,
+    "Profile create is missing default identity v2.",
   );
   assert(diagnostic.status === "ok", "Profile create diagnostic did not report ok status.");
   assert(diagnostic.errorCode === null, "Profile create diagnostic should not include an error code.");
@@ -418,7 +418,7 @@ function assertProfileCreateEnvelope(response, diagnostic, profileName) {
 function assertPresetListEnvelope(response, diagnostic) {
   assert(response.id === "verify-identity-presets", "Preset list did not echo request id.");
   assert(response.ok === true, "Preset list did not return ok:true.");
-  assert(response.result?.identityVersion === 1, "Preset list did not return identityVersion 1.");
+  assert(response.result?.identityVersion === 2, "Preset list did not return identityVersion 2.");
   assert(Array.isArray(response.result?.presets), "Preset list did not return presets array.");
   assert(response.result.count === response.result.presets.length, "Preset list count mismatch.");
   const presetIds = response.result.presets.map((preset) => preset.presetId);
@@ -428,6 +428,33 @@ function assertPresetListEnvelope(response, diagnostic) {
   );
   assert(diagnostic.status === "ok", "Preset list diagnostic did not report ok status.");
   return { presetId: "windows-10-chrome-120", presetCount: response.result.count };
+}
+
+function assertSurfaceDescribeEnvelope(response, diagnostic) {
+  assert(response.id === "verify-identity-surfaces", "Surface describe did not echo request id.");
+  assert(response.ok === true, "Surface describe did not return ok:true.");
+  assert(response.result?.identityVersion === 2, "Surface describe did not return identityVersion 2.");
+  assert(Array.isArray(response.result?.surfaces), "Surface describe did not return surfaces array.");
+  const surfaces = new Map(response.result.surfaces.map((surface) => [surface.id, surface]));
+  for (const surfaceId of ["geolocation", "mediaDevices", "ports"]) {
+    assert(surfaces.has(surfaceId), "Surface describe is missing an identity v2 surface.", { surfaceId });
+    assert(
+      Array.isArray(surfaces.get(surfaceId).modes) && surfaces.get(surfaceId).modes.length > 0,
+      "Surface describe returned an identity v2 surface without modes.",
+      { surfaceId },
+    );
+    assert(Array.isArray(surfaces.get(surfaceId).fields), "Surface describe returned a surface without fields.", {
+      surfaceId,
+    });
+  }
+  assert(
+    !surfaces.get("geolocation").modes.includes("masked"),
+    "Surface describe offered a masked geolocation mode.",
+    { modes: surfaces.get("geolocation").modes },
+  );
+  assert(diagnostic.status === "ok", "Surface describe diagnostic did not report ok status.");
+  assert(diagnostic.errorCode === null, "Surface describe diagnostic should not include an error code.");
+  return { surfaceCount: surfaces.size };
 }
 
 function assertApplyPresetEnvelope(response, diagnostic, presetId) {
@@ -886,6 +913,20 @@ try {
     });
     const { presetId } = runStep("identity-presets-assertions", () =>
       assertPresetListEnvelope(presets.response, presets.diagnostic),
+    );
+
+    const describedSurfaces = runStep("identity-surfaces-describe", () => {
+      const result = remember(
+        runSidecarRequest(
+          binaryPath,
+          { id: "verify-identity-surfaces", method: "identity.surfaces.describe", params: {} },
+          sensitiveValues,
+        ),
+      );
+      return { value: result, log: { requestId: result.response.id } };
+    });
+    runStep("identity-surfaces-assertions", () =>
+      assertSurfaceDescribeEnvelope(describedSurfaces.response, describedSurfaces.diagnostic),
     );
 
     const applied = runStep("identity-apply-preset", () => {

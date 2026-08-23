@@ -44,7 +44,7 @@ function writeJson(path, value) {
 
 function defaultIdentity() {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Real identity",
     presetId: null,
     browser: { mode: "real" },
@@ -55,12 +55,15 @@ function defaultIdentity() {
     audio: { mode: "real" },
     webgl: { mode: "real" },
     webrtc: { mode: "real", policy: "real" },
+    geolocation: { mode: "real", permission: "prompt" },
+    mediaDevices: { mode: "real" },
+    ports: { mode: "real" },
   };
 }
 
 function packagedSmokeIdentity(overrides = {}) {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: PACKAGED_SMOKE_PRESET_LABEL,
     presetId: PACKAGED_SMOKE_PRESET_ID,
     browser: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.browser },
@@ -71,6 +74,9 @@ function packagedSmokeIdentity(overrides = {}) {
     audio: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.audio },
     webgl: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.webgl },
     webrtc: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.webrtc, policy: "disableNonProxiedUdp" },
+    geolocation: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.geolocation, permission: "prompt" },
+    mediaDevices: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.mediaDevices },
+    ports: { mode: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES.ports },
     ...overrides,
   };
 }
@@ -274,6 +280,9 @@ describe("verify-s06 guard helpers", () => {
       audio: "noise",
       webgl: "masked",
       webrtc: "masked",
+      geolocation: "real",
+      mediaDevices: "real",
+      ports: "real",
     });
     expect(REQUIRED_DIAGNOSTIC_METHODS).toEqual([
       "profiles.create",
@@ -673,7 +682,7 @@ describe("verify-s06 guard helpers", () => {
         userDataDir: `profile-store/profiles/${profileId}/user-data`,
       },
       identity: {
-        identityVersion: 1,
+        identityVersion: 2,
         presetId: PACKAGED_SMOKE_PRESET_ID,
         label: PACKAGED_SMOKE_PRESET_LABEL,
         surfaceModes: PACKAGED_SMOKE_EXPECTED_SURFACE_MODES,

@@ -52,11 +52,18 @@ import type {
   IdentityAuditPlanResult,
   IdentityAuditPlanSnapshot,
   IdentityAuditSurface,
+  IdentityGeolocationMode,
+  IdentityGeolocationPermission,
   IdentityMaskingMode,
   IdentityNoiseMode,
   IdentityPresetListResult,
   IdentityPresetListSnapshot,
   IdentitySurface,
+  IdentitySurfaceDescriptor,
+  IdentitySurfaceFieldDescriptor,
+  IdentitySurfaceFieldType,
+  IdentitySurfacesDescribeResult,
+  IdentitySurfacesDescribeSnapshot,
   IdentityValidationResult,
   IdentityValidationSnapshot,
   IdentityWarning,
@@ -342,7 +349,11 @@ const MAX_PROFILE_LAUNCH_ARGS = 20;
 const MAX_PROFILE_LAUNCH_ARG_LENGTH = 256;
 const MAX_PROFILE_DEVICE_ID_LENGTH = 64;
 
-const PROFILE_IDENTITY_SURFACES = ["browser", "navigator", "screen", "locale", "canvas", "audio", "webgl", "webrtc"] as const;
+const PROFILE_IDENTITY_SURFACES = ["browser", "navigator", "screen", "locale", "canvas", "audio", "webgl", "webrtc", "geolocation", "mediaDevices", "ports"] as const;
+
+const IDENTITY_DESCRIBED_MODES = ["custom", "masked", "noise", "real"] as const;
+const MAX_IDENTITY_SURFACE_FIELDS = 12;
+const MAX_IDENTITY_SURFACE_FIELD_OPTIONS = 12;
 
 const PROFILE_TAG_PATTERN = /^[\p{L}\p{N}_ -]+$/u;
 const PROFILE_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
@@ -476,7 +487,7 @@ const FORBIDDEN_COOKIE_PORTABILITY_TEXT_MARKERS = [
 ];
 
 const PROFILE_PACKAGE_FORMAT = "theprivator.profile-package";
-const PROFILE_PACKAGE_VERSION = 1;
+const PROFILE_PACKAGE_VERSION = 2;
 const MAX_PROFILE_PACKAGE_WARNINGS = 20;
 
 const PROFILE_PACKAGE_PAYLOAD_SKIP_WARNING_CODES = new Set([
@@ -712,6 +723,15 @@ export async function listIdentityPresets(): Promise<IdentityPresetListSnapshot>
   try {
     const envelope = await invoke<unknown>("identity_presets_list");
     return parseIdentityPresetListEnvelope(envelope, new Date().toISOString());
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
+export async function describeIdentitySurfaces(): Promise<IdentitySurfacesDescribeSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("identity_surfaces_describe");
+    return parseIdentitySurfacesDescribeEnvelope(envelope, new Date().toISOString());
   } catch (error) {
     throw normalizeSidecarError(error);
   }
@@ -1276,6 +1296,20 @@ function parseIdentityPresetListEnvelope(value: unknown, receivedAt: string): Id
   };
 }
 
+function parseIdentitySurfacesDescribeEnvelope(value: unknown, receivedAt: string): IdentitySurfacesDescribeSnapshot {
+  const envelope = parseSuccessEnvelope(value);
+  const result = parseIdentitySurfacesDescribeResult(envelope.result);
+
+  return {
+    requestId: formatRequestId(envelope.requestId),
+    rawRequestId: envelope.requestId,
+    protocolVersion: envelope.protocolVersion,
+    bridgeDurationMs: envelope.durationMs,
+    receivedAt,
+    ...result,
+  };
+}
+
 function parseIdentityValidationEnvelope(value: unknown, receivedAt: string): IdentityValidationSnapshot {
   const envelope = parseSuccessEnvelope(value);
   const result = parseIdentityValidationResult(envelope.result);
@@ -1728,7 +1762,7 @@ function parseProfileMutationResult(
 
 function parseIdentityPresetListResult(value: unknown): IdentityPresetListResult {
   const record = requireRecord(value, "The sidecar identity preset list result must be an object.");
-  requireLiteralNumber(record.identityVersion, "identityVersion", 1);
+  requireLiteralNumber(record.identityVersion, "identityVersion", 2);
   const presets = parseIdentityArray(record.presets, "presets");
   const count = requireNonNegativeInteger(record.count, "count");
 
@@ -1748,7 +1782,7 @@ function parseIdentityPresetListResult(value: unknown): IdentityPresetListResult
   }
 
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     presets,
     count,
   };
@@ -1756,12 +1790,119 @@ function parseIdentityPresetListResult(value: unknown): IdentityPresetListResult
 
 function parseIdentityValidationResult(value: unknown): IdentityValidationResult {
   const record = requireRecord(value, "The sidecar identity validation result must be an object.");
-  requireLiteralNumber(record.identityVersion, "identityVersion", 1);
+  requireLiteralNumber(record.identityVersion, "identityVersion", 2);
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     identity: parseProfileIdentity(record.identity, "identity"),
     warnings: parseIdentityWarningArray(record.warnings, "warnings"),
   };
+}
+
+function parseIdentitySurfacesDescribeResult(value: unknown): IdentitySurfacesDescribeResult {
+  const record = requireRecord(value, "The sidecar identity surface description result must be an object.");
+  requireExactKeys(record, ["identityVersion", "surfaces"], "identitySurfaces");
+  requireLiteralNumber(record.identityVersion, "identityVersion", 2);
+  return {
+    identityVersion: 2,
+    surfaces: parseIdentitySurfaceDescriptorArray(record.surfaces, "surfaces"),
+  };
+}
+
+function parseIdentitySurfaceDescriptorArray(value: unknown, field: string): IdentitySurfaceDescriptor[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > PROFILE_IDENTITY_SURFACES.length) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded non-empty surface array.`);
+  }
+
+  const surfaces = value.map((item, index) => parseIdentitySurfaceDescriptor(item, `${field}[${index}]`));
+  if (new Set(surfaces.map((surface) => surface.id)).size !== surfaces.length) {
+    throw makeProtocolError(`The sidecar identity field ${field} must not repeat a surface.`);
+  }
+
+  return surfaces;
+}
+
+function parseIdentitySurfaceDescriptor(value: unknown, field: string): IdentitySurfaceDescriptor {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  requireExactKeys(record, ["id", "modes", "fields"], field);
+  return {
+    id: requireIdentitySurfaceName(record.id, `${field}.id`),
+    modes: parseIdentitySurfaceModeArray(record.modes, `${field}.modes`),
+    fields: parseIdentitySurfaceFieldArray(record.fields, `${field}.fields`),
+  };
+}
+
+function parseIdentitySurfaceModeArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > IDENTITY_DESCRIBED_MODES.length) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded non-empty mode array.`);
+  }
+
+  const modes = value.map((item, index) => requireIdentityDescribedMode(item, `${field}[${index}]`));
+  // The sidecar emits sorted(...), so a repeated or out-of-order entry is a shape
+  // no sidecar produced.
+  if (modes.some((mode, index) => index > 0 && mode <= modes[index - 1])) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be sorted ascending without duplicates.`);
+  }
+
+  return modes;
+}
+
+function parseIdentitySurfaceFieldArray(value: unknown, field: string): IdentitySurfaceFieldDescriptor[] {
+  if (!Array.isArray(value) || value.length > MAX_IDENTITY_SURFACE_FIELDS) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded field array.`);
+  }
+
+  const fields = value.map((item, index) => parseIdentitySurfaceFieldDescriptor(item, `${field}[${index}]`));
+  if (new Set(fields.map((descriptor) => descriptor.name)).size !== fields.length) {
+    throw makeProtocolError(`The sidecar identity field ${field} must not repeat a field name.`);
+  }
+
+  return fields;
+}
+
+function parseIdentitySurfaceFieldDescriptor(value: unknown, field: string): IdentitySurfaceFieldDescriptor {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  // Which bound keys a descriptor carries depends on its type, so this is an
+  // allowed set rather than an exact one: only name, type, and required are
+  // present on every descriptor.
+  requireAllowedKeys(
+    record,
+    ["name", "type", "required", "maxLength", "min", "max", "maxItems", "options"],
+    ["name", "type", "required"],
+    field,
+  );
+  const maxLength = record.maxLength === undefined ? undefined : requirePositiveInteger(record.maxLength, `${field}.maxLength`);
+  const min = record.min === undefined ? undefined : requireNumber(record.min, `${field}.min`);
+  const max = record.max === undefined ? undefined : requireNumber(record.max, `${field}.max`);
+  const maxItems = record.maxItems === undefined ? undefined : requirePositiveInteger(record.maxItems, `${field}.maxItems`);
+  const options = record.options === undefined ? undefined : parseIdentitySurfaceFieldOptions(record.options, `${field}.options`);
+
+  if (min !== undefined && max !== undefined && min > max) {
+    throw makeProtocolError(`The sidecar identity field ${field} must not invert its bounds.`);
+  }
+
+  return compactOptionalFields({
+    name: requireIdentityText(record.name, `${field}.name`, { maxLength: 80 }),
+    type: requireIdentitySurfaceFieldType(record.type, `${field}.type`),
+    required: requireBoolean(record.required, `${field}.required`),
+    maxLength,
+    min,
+    max,
+    maxItems,
+    options,
+  });
+}
+
+function parseIdentitySurfaceFieldOptions(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_IDENTITY_SURFACE_FIELD_OPTIONS) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded non-empty option array.`);
+  }
+
+  const options = value.map((item, index) => requireIdentityText(item, `${field}[${index}]`, { maxLength: 80 }));
+  if (new Set(options).size !== options.length) {
+    throw makeProtocolError(`The sidecar identity field ${field} must not repeat an option.`);
+  }
+
+  return options;
 }
 
 function parseProxyValidationResult(value: unknown): ProxyValidationResult {
@@ -3111,7 +3252,7 @@ function requireProfileTag(value: unknown, field: string): string {
 
 function requireProfileFreeText(value: unknown, field: string, maxLength: number): string {
   const text = requireString(value, field);
-  if (codePointLength(text) > maxLength || containsControlCharacters(text)) {
+  if (codePointLength(text) > maxLength || containsControlCharactersOrDelete(text)) {
     throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
   }
 
@@ -3154,7 +3295,7 @@ function parseProfileStartUrlArray(value: unknown, field: string): string[] {
 
 function requireProfileStartUrl(value: unknown, field: string): string {
   const startUrl = requireString(value, field);
-  if (!startUrl || codePointLength(startUrl) > MAX_PROFILE_START_URL_LENGTH || containsControlCharacters(startUrl) || /\s/.test(startUrl)) {
+  if (!startUrl || codePointLength(startUrl) > MAX_PROFILE_START_URL_LENGTH || containsControlCharactersOrDelete(startUrl) || /\s/.test(startUrl)) {
     throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
   }
   // A start URL is handed to Chromium as a positional argument, so an exact
@@ -3185,7 +3326,7 @@ function requireProfileLaunchArg(value: unknown, field: string): string {
 
 function requireProfileDeviceId(value: unknown, field: string): string {
   const deviceId = requireNonBlankString(value, field);
-  if (codePointLength(deviceId) > MAX_PROFILE_DEVICE_ID_LENGTH || containsControlCharacters(deviceId)) {
+  if (codePointLength(deviceId) > MAX_PROFILE_DEVICE_ID_LENGTH || containsControlCharactersOrDelete(deviceId)) {
     throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
   }
 
@@ -3214,11 +3355,14 @@ function parseProfileIdentity(value: unknown, field: string): ProfileIdentity {
     "audio",
     "webgl",
     "webrtc",
+    "geolocation",
+    "mediaDevices",
+    "ports",
   ], field);
-  requireLiteralNumber(record.identityVersion, `${field}.identityVersion`, 1);
+  requireLiteralNumber(record.identityVersion, `${field}.identityVersion`, 2);
 
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: requireIdentityText(record.label, `${field}.label`, { maxLength: 128 }),
     presetId: parseIdentityPresetId(record.presetId, `${field}.presetId`),
     browser: parseBrowserIdentitySurface(record.browser, `${field}.browser`),
@@ -3229,6 +3373,9 @@ function parseProfileIdentity(value: unknown, field: string): ProfileIdentity {
     audio: parseNoiseIdentitySurface(record.audio, `${field}.audio`, "audio"),
     webgl: parseWebGlIdentitySurface(record.webgl, `${field}.webgl`),
     webrtc: parseWebRtcIdentitySurface(record.webrtc, `${field}.webrtc`),
+    geolocation: parseGeolocationIdentitySurface(record.geolocation, `${field}.geolocation`),
+    mediaDevices: parseMediaDevicesIdentitySurface(record.mediaDevices, `${field}.mediaDevices`),
+    ports: parsePortsIdentitySurface(record.ports, `${field}.ports`),
   };
 }
 
@@ -3381,6 +3528,86 @@ function parseWebRtcIdentitySurface(value: unknown, field: string): ProfileIdent
   return { mode, policy };
 }
 
+function parseGeolocationIdentitySurface(value: unknown, field: string): ProfileIdentity["geolocation"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityGeolocationMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode", "permission"], field);
+    return {
+      mode,
+      permission: requireIdentityGeolocationPermission(record.permission, `${field}.permission`),
+    };
+  }
+
+  // altitude is required-present-but-nullable: the sidecar emits the key in every
+  // custom geolocation, set to null when the profile pins no altitude.
+  const required = ["mode", "permission", "latitude", "longitude", "accuracy", "altitude"];
+  requireAllowedKeys(record, required, required, field);
+  return {
+    mode,
+    permission: requireIdentityGeolocationPermission(record.permission, `${field}.permission`),
+    latitude: requireIdentityNumber(record.latitude, `${field}.latitude`, -90, 90),
+    longitude: requireIdentityNumber(record.longitude, `${field}.longitude`, -180, 180),
+    accuracy: requireIdentityInteger(record.accuracy, `${field}.accuracy`, 1, 100000),
+    altitude: record.altitude === null ? null : requireIdentityNumber(record.altitude, `${field}.altitude`, -1000, 100000),
+  };
+}
+
+function parseMediaDevicesIdentitySurface(value: unknown, field: string): ProfileIdentity["mediaDevices"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode === "real") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+  if (mode === "masked") {
+    requireExactKeys(record, ["mode", "noiseSeed"], field);
+    return {
+      mode,
+      noiseSeed: requireIdentityInteger(record.noiseSeed, `${field}.noiseSeed`, 0, 1000000),
+    };
+  }
+
+  const required = ["mode", "videoInputs", "audioInputs", "audioOutputs"];
+  requireAllowedKeys(record, required, required, field);
+  return {
+    mode,
+    videoInputs: requireIdentityInteger(record.videoInputs, `${field}.videoInputs`, 0, 1),
+    audioInputs: requireIdentityInteger(record.audioInputs, `${field}.audioInputs`, 1, 4),
+    audioOutputs: requireIdentityInteger(record.audioOutputs, `${field}.audioOutputs`, 1, 4),
+  };
+}
+
+function parsePortsIdentitySurface(value: unknown, field: string): ProfileIdentity["ports"] {
+  const record = requireRecord(value, `The sidecar identity field ${field} must be an object.`);
+  const mode = requireIdentityMaskingMode(record.mode, `${field}.mode`);
+  if (mode !== "custom") {
+    requireExactKeys(record, ["mode"], field);
+    return { mode };
+  }
+
+  requireExactKeys(record, ["mode", "allowedPorts"], field);
+  return {
+    mode,
+    allowedPorts: parseIdentityAllowedPortArray(record.allowedPorts, `${field}.allowedPorts`),
+  };
+}
+
+function parseIdentityAllowedPortArray(value: unknown, field: string): number[] {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be a bounded port array.`);
+  }
+
+  const ports = value.map((item, index) => requireIdentityInteger(item, `${field}[${index}]`, 1, 65535));
+  // The sidecar deduplicates and sorts before it persists, so a repeated or
+  // out-of-order entry is a shape no sidecar produced.
+  if (ports.some((port, index) => index > 0 && port <= ports[index - 1])) {
+    throw makeProtocolError(`The sidecar identity field ${field} must be sorted ascending without duplicates.`);
+  }
+
+  return ports;
+}
+
 function parseIdentityWarningArray(value: unknown, field: string): IdentityWarning[] {
   if (!Array.isArray(value)) {
     throw makeProtocolError(`The sidecar identity warning field ${field} must be an array.`);
@@ -3426,7 +3653,7 @@ function requireIdentityText(value: unknown, field: string, options: { maxLength
   if (!options.allowEmpty && !text) {
     throw makeProtocolError(`The sidecar identity field ${field} must not be empty.`);
   }
-  if (text.length > options.maxLength || containsControlCharacters(text)) {
+  if (codePointLength(text) > options.maxLength || containsControlCharacters(text)) {
     throw makeProtocolError(`The sidecar identity field ${field} is outside supported bounds.`);
   }
   return text;
@@ -3462,6 +3689,36 @@ function requireIdentityNoiseMode(value: unknown, field: string): IdentityNoiseM
   throw makeProtocolError(`The sidecar identity field ${field} must be a supported mode.`);
 }
 
+// Geolocation has no "masked" mode, so it cannot share requireIdentityMaskingMode:
+// accepting one here would admit a surface shape no sidecar branch can emit.
+function requireIdentityGeolocationMode(value: unknown, field: string): IdentityGeolocationMode {
+  if (value === "real" || value === "custom") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported mode.`);
+}
+
+function requireIdentityGeolocationPermission(value: unknown, field: string): IdentityGeolocationPermission {
+  if (value === "prompt" || value === "allow" || value === "block") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported geolocation permission.`);
+}
+
+function requireIdentityDescribedMode(value: unknown, field: string): string {
+  if (typeof value === "string" && (IDENTITY_DESCRIBED_MODES as readonly string[]).includes(value)) {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported mode.`);
+}
+
+function requireIdentitySurfaceFieldType(value: unknown, field: string): IdentitySurfaceFieldType {
+  if (value === "text" || value === "integer" || value === "number" || value === "list" || value === "enum") {
+    return value;
+  }
+  throw makeProtocolError(`The sidecar identity field ${field} must be a supported field type.`);
+}
+
 function requireWebRtcPolicy(value: unknown, field: string): WebRtcPolicy {
   if (value === "real" || value === "disableNonProxiedUdp" || value === "block") {
     return value;
@@ -3478,7 +3735,10 @@ function requireIdentitySurfaceName(value: unknown, field: string): IdentitySurf
     value === "canvas" ||
     value === "audio" ||
     value === "webgl" ||
-    value === "webrtc"
+    value === "webrtc" ||
+    value === "geolocation" ||
+    value === "mediaDevices" ||
+    value === "ports"
   ) {
     return value;
   }
@@ -3746,7 +4006,7 @@ function requireDialogPathString(value: unknown, field: string): string {
   return path;
 }
 
-function requireProfilePackageVersion(value: unknown, field: string): 1 {
+function requireProfilePackageVersion(value: unknown, field: string): 2 {
   return requireLiteralNumber(value, field, PROFILE_PACKAGE_VERSION);
 }
 
@@ -4248,10 +4508,25 @@ function codePointLength(value: string): number {
   return Array.from(value).length;
 }
 
+/**
+ * Control-character rule for identity text.
+ *
+ * Deliberately does NOT reject DEL, because theprivator_sidecar/identity.py does
+ * not either. A validator stricter than its producer is not a safer validator:
+ * the sidecar would accept and persist a label containing DEL, and then every
+ * later profiles.list would fail here -- rejecting the whole response, not the
+ * one field -- leaving the library unopenable with no in-app way to repair it.
+ */
 function containsControlCharacters(value: string): boolean {
-  // DEL included to match the sidecar's _contains_control_characters. Without it
-  // this boundary accepts a notes, tag, or launch-arg value the producer rejects,
-  // which is the wrong direction for a validator to be lenient in.
+  return Array.from(value).some((character) => character.charCodeAt(0) < 32);
+}
+
+/**
+ * Stricter rule for the store v4 sections, whose producer really does reject DEL
+ * (theprivator_sidecar/profile_sections.py). Kept separate rather than merged so
+ * neither boundary drifts away from the module it mirrors.
+ */
+function containsControlCharactersOrDelete(value: string): boolean {
   return Array.from(value).some((character) => {
     const code = character.charCodeAt(0);
     return code < 32 || code === 127;

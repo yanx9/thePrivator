@@ -104,6 +104,9 @@ export const PACKAGED_SMOKE_EXPECTED_SURFACE_MODES = Object.freeze({
   audio: "noise",
   webgl: "masked",
   webrtc: "masked",
+  geolocation: "real",
+  mediaDevices: "real",
+  ports: "real",
 });
 export const PACKAGED_SMOKE_AUDIT_PAGE_ID = "browserleaks-webgl";
 export const PACKAGED_SMOKE_AUDIT_PAGE_LABEL = "BrowserLeaks WebGL";
@@ -3076,11 +3079,11 @@ function assertPackagedSmokeIdentity(identity, profileStorePath, rootDir, smokeC
     smokeProfileName: smokeContext.smokeProfileName,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 
-  assert(identity.identityVersion === 1, "Smoke profile identity.identityVersion must be v1.", {
+  assert(identity.identityVersion === 2, "Smoke profile identity.identityVersion must be v2.", {
     code: "S06_PROFILE_IDENTITY_VERSION",
     profileStore: repoRelative(rootDir, profileStorePath),
     smokeProfileName: smokeContext.smokeProfileName,
-    expectedIdentityVersion: 1,
+    expectedIdentityVersion: 2,
     actualIdentityVersion: identity.identityVersion,
   }, { rootDir, sensitiveValues: [smokeContext.smokeRoot] });
 

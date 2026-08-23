@@ -1,6 +1,16 @@
+// Vite's eager raw glob reads the sidecar contract without Node fs types, the
+// same way the UI source guard in App.test.tsx reads the UI.
+// @ts-expect-error import.meta.glob is a Vite extension without ambient types here.
+const sidecarIdentitySources: Record<string, string> = import.meta.glob("../theprivator_sidecar/identity.py", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
 import { describe, expect, it } from "vitest";
 import {
+  IDENTITY_DRAFT_FIELD_DESCRIPTORS,
   DEFAULT_ADVANCED_IDENTITY_LABEL,
+  IDENTITY_SURFACE_ORDER,
   formatIdentityExpectedValueSummary,
   formatIdentitySummary,
   getIdentitySurfaceControls,
@@ -15,12 +25,60 @@ import {
 import type { IdentityDraftFieldValues, IdentityDraftState } from "./identityControls";
 import type { IdentitySurface, ProfileIdentity, ProfileRecord } from "./sidecar/types";
 
-const maskingSurfaces: IdentitySurface[] = ["browser", "navigator", "screen", "locale", "webgl", "webrtc"];
+const maskingSurfaces: IdentitySurface[] = ["browser", "navigator", "screen", "locale", "webgl", "webrtc", "mediaDevices", "ports"];
 const noiseSurfaces: IdentitySurface[] = ["canvas", "audio"];
+
+// identity.surfaces.describe reports exactly this table: its surface ids are the
+// keys and its mode lists are the values, both taken straight from the sidecar.
+function readSidecarSurfaceContract(): { identityVersion: number; modesBySurface: Map<string, string[]> } {
+  const source = Object.values(sidecarIdentitySources)[0];
+  if (!source) {
+    throw new Error("The sidecar identity module could not be read.");
+  }
+
+  const table = /\nSUPPORTED_MODES_BY_SURFACE[^=]*= \{\n([\s\S]*?)\n\}\n/.exec(source)?.[1];
+  const version = /\nIDENTITY_VERSION = (\d+)\n/.exec(source)?.[1];
+  if (!table || !version) {
+    throw new Error("The sidecar identity module no longer declares its surface contract where this test reads it.");
+  }
+
+  const modesBySurface = new Map<string, string[]>();
+  for (const [, surface, modes] of table.matchAll(/^ {4}"([A-Za-z]+)": \{([^}]*)\},$/gm)) {
+    modesBySurface.set(surface, [...modes.matchAll(/"([a-z]+)"/g)].map(([, mode]) => mode).sort());
+  }
+  return { identityVersion: Number(version), modesBySurface };
+}
+
+/**
+ * The length bounds identity.py actually enforces, read from its normalizer
+ * calls rather than from describe_surfaces -- the descriptor is a second copy
+ * and has been wrong before, so the enforcing code is the authority.
+ */
+function readSidecarTextFieldBounds(): Map<string, number> {
+  const source = Object.values(sidecarIdentitySources)[0];
+  if (!source) {
+    throw new Error("The sidecar identity module could not be read.");
+  }
+  const constants = new Map<string, number>();
+  for (const [, name, value] of source.matchAll(/^(MAX_[A-Z_]*LENGTH) = ([\d_]+)$/gm)) {
+    constants.set(name, Number(value.replace(/_/g, "")));
+  }
+  const bounds = new Map<string, number>();
+  for (const [, path, constant] of source.matchAll(/_require_string\([^,]+,\s*"([^"]+)"[^)]*max_length=(MAX_[A-Z_]+)/g)) {
+    const value = constants.get(constant);
+    if (value !== undefined) {
+      bounds.set(path, value);
+    }
+  }
+  if (bounds.size === 0) {
+    throw new Error("The sidecar identity module no longer declares its text bounds where this test reads them.");
+  }
+  return bounds;
+}
 
 function identity(overrides: Partial<ProfileIdentity> = {}): ProfileIdentity {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Research laptop",
     presetId: "balanced-desktop",
     browser: { mode: "masked", userAgent: "Mozilla/5.0 Test" },
@@ -53,6 +111,16 @@ function identity(overrides: Partial<ProfileIdentity> = {}): ProfileIdentity {
     audio: { mode: "real" },
     webgl: { mode: "masked", vendor: "Intel Inc.", renderer: "Mesa Intel" },
     webrtc: { mode: "custom", policy: "block" },
+    geolocation: {
+      mode: "custom",
+      permission: "allow",
+      latitude: 52.520008,
+      longitude: 13.404954,
+      accuracy: 120,
+      altitude: null,
+    },
+    mediaDevices: { mode: "masked", noiseSeed: 3001 },
+    ports: { mode: "custom", allowedPorts: [3000, 8080] },
     ...overrides,
   };
 }
@@ -121,6 +189,41 @@ describe("identity control helpers", () => {
 
     expect(getSupportedIdentityModeOptions("webgl").map((option) => option.value)).not.toContain("noise");
     expect(getSupportedIdentityModeOptions("browser").map((option) => option.value)).not.toContain("noise");
+  });
+
+  it("offers geolocation a real-or-custom choice without a masked mode", () => {
+    const options = getSupportedIdentityModeOptions("geolocation").map((option) => option.value);
+
+    expect(options).toEqual(["real", "custom"]);
+    expect(options).not.toContain("masked");
+    expect(options).not.toContain("noise");
+  });
+
+  it("agrees with the sidecar identity surface contract on surfaces and modes", () => {
+    const contract = readSidecarSurfaceContract();
+
+    expect(contract.identityVersion).toBe(identity().identityVersion);
+    expect([...contract.modesBySurface.keys()].sort()).toEqual([...IDENTITY_SURFACE_ORDER].sort());
+
+    for (const [surface, modes] of contract.modesBySurface) {
+      expect(getSupportedIdentityModeOptions(surface as IdentitySurface).map((option) => option.value).sort()).toEqual(modes);
+    }
+  });
+
+  it("agrees with the sidecar on the length bound of every text field it edits", () => {
+    // A form built from a smaller bound than the sidecar enforces rejects values
+    // the sidecar accepts and persists, which reads as a bug in the profile
+    // rather than in the form. This is the drift the describe contract exists to
+    // catch, so it is compared rather than assumed.
+    const enforced = readSidecarTextFieldBounds();
+
+    for (const descriptor of IDENTITY_DRAFT_FIELD_DESCRIPTORS) {
+      const bound = enforced.get(descriptor.path);
+      if (bound === undefined || descriptor.maxLength === undefined) {
+        continue;
+      }
+      expect(descriptor.maxLength, `${descriptor.path} bound disagrees with the sidecar`).toBe(bound);
+    }
   });
 
   it("formats a compact saved-identity summary with label, preset, and surface modes", () => {
@@ -212,6 +315,84 @@ describe("identity control helpers", () => {
     }
   });
 
+  it("seeds each surface with its own shape when a mode changes", () => {
+    let draft = createIdentityDraftState(profileRecord(identity()));
+
+    draft = updateIdentityDraftSurfaceMode(draft, "ports", "masked");
+    draft = updateIdentityDraftSurfaceMode(draft, "mediaDevices", "custom");
+    draft = updateIdentityDraftSurfaceMode(draft, "geolocation", "real");
+
+    expect(draft.identity.ports).toEqual({ mode: "masked" });
+    expect(draft.identity.mediaDevices).toEqual({ mode: "custom", videoInputs: 1, audioInputs: 1, audioOutputs: 1 });
+    expect(draft.identity.geolocation).toEqual({ mode: "real", permission: "allow" });
+  });
+
+  it("normalizes an allowed-port list the way the sidecar stores it", () => {
+    let draft = createIdentityDraftState(profileRecord(identity()));
+    draft = updateIdentityDraftField(draft, "ports.allowedPorts", "8080, 3000, 8080, 1");
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.identity.ports).toEqual({ mode: "custom", allowedPorts: [1, 3000, 8080] });
+    }
+  });
+
+  it("guards geolocation, media device, and port fields before a sidecar payload is built", () => {
+    let draft = createIdentityDraftState(profileRecord(identity()));
+
+    draft = updateIdentityDraftField(draft, "geolocation.latitude", "91");
+    draft = updateIdentityDraftField(draft, "geolocation.permission", "always");
+    draft = updateIdentityDraftField(draft, "ports.allowedPorts", "80, 70000");
+    draft = updateIdentityDraftSurfaceMode(draft, "geolocation", "masked");
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(draft.errors["geolocation.mode"]).toMatch(/does not support masked mode/i);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.errors["geolocation.latitude"]).toMatch(/between -90 and 90/i);
+      expect(parsed.errors["geolocation.permission"]).toMatch(/prompt, allow, or block/i);
+      expect(parsed.errors["ports.allowedPorts"]).toMatch(/between 1 and 65535/i);
+    }
+  });
+
+  it("keeps a surface the draft builder does not parse instead of dropping it from the payload", () => {
+    const savedIdentity = identity();
+    const futureSurface = { mode: "masked", futureField: 7 };
+    const withFutureSurface = { ...savedIdentity, futureSurface } as ProfileIdentity;
+    const draft: IdentityDraftState = { identity: withFutureSurface, values: seedValues(savedIdentity), errors: {}, labelEdited: false };
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.identity.identityVersion).toBe(2);
+      expect((parsed.identity as unknown as Record<string, unknown>).futureSurface).toEqual(futureSurface);
+      expect((parsed.identity as unknown as Record<string, unknown>).futureSurface).not.toBe(futureSurface);
+      expect(parsed.identity.geolocation).toEqual(savedIdentity.geolocation);
+      expect(parsed.identity.mediaDevices).toEqual(savedIdentity.mediaDevices);
+      expect(parsed.identity.ports).toEqual(savedIdentity.ports);
+    }
+  });
+
+  it("counts text field bounds in code points so astral characters are not charged twice", () => {
+    let draft = createIdentityDraftState(profileRecord(identity()));
+    draft = updateIdentityDraftField(draft, "webgl.vendor", "😀".repeat(512));
+
+    expect(parseIdentityDraftState(draft).ok).toBe(true);
+
+    draft = updateIdentityDraftField(draft, "webgl.vendor", "😀".repeat(513));
+
+    const parsed = parseIdentityDraftState(draft);
+
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.errors["webgl.vendor"]).toMatch(/512 safe characters or fewer/i);
+    }
+  });
+
   it("formats expected values for S05 verifier wording without leaking implementation paths", () => {
     const summary = formatIdentityExpectedValueSummary(identity());
 
@@ -219,6 +400,9 @@ describe("identity control helpers", () => {
     expect(summary).toContain("Navigator: Custom Linux x86_64, 8 cores, 8 GiB");
     expect(summary).toContain("Locale: Custom en-US, en-US/en, UTC");
     expect(summary).toContain("WebRTC: Custom WebRTC policy block");
+    expect(summary).toContain("Geolocation: Custom 52.520008, 13.404954 ±120 m, permission allow");
+    expect(summary).toContain("Media devices: Masked device labels, noise seed 3001");
+    expect(summary).toContain("Ports: Custom allowed ports 3000/8080");
   });
 });
 
@@ -254,5 +438,15 @@ function seedValues(savedIdentity: ProfileIdentity): IdentityDraftFieldValues {
     "webgl.renderer": savedIdentity.webgl.mode === "real" ? "Mesa Intel" : savedIdentity.webgl.renderer,
     "webgl.noiseSeed": savedIdentity.webgl.mode === "real" || savedIdentity.webgl.noiseSeed === undefined ? "" : String(savedIdentity.webgl.noiseSeed),
     "webrtc.policy": String(savedIdentity.webrtc.policy),
+    "geolocation.permission": savedIdentity.geolocation.permission,
+    "geolocation.latitude": savedIdentity.geolocation.mode === "real" ? "0" : String(savedIdentity.geolocation.latitude),
+    "geolocation.longitude": savedIdentity.geolocation.mode === "real" ? "0" : String(savedIdentity.geolocation.longitude),
+    "geolocation.accuracy": savedIdentity.geolocation.mode === "real" ? "100" : String(savedIdentity.geolocation.accuracy),
+    "geolocation.altitude": savedIdentity.geolocation.mode === "real" || savedIdentity.geolocation.altitude === null ? "" : String(savedIdentity.geolocation.altitude),
+    "mediaDevices.noiseSeed": savedIdentity.mediaDevices.mode === "masked" ? String(savedIdentity.mediaDevices.noiseSeed) : "3001",
+    "mediaDevices.videoInputs": savedIdentity.mediaDevices.mode === "custom" ? String(savedIdentity.mediaDevices.videoInputs) : "1",
+    "mediaDevices.audioInputs": savedIdentity.mediaDevices.mode === "custom" ? String(savedIdentity.mediaDevices.audioInputs) : "1",
+    "mediaDevices.audioOutputs": savedIdentity.mediaDevices.mode === "custom" ? String(savedIdentity.mediaDevices.audioOutputs) : "1",
+    "ports.allowedPorts": savedIdentity.ports.mode === "custom" ? savedIdentity.ports.allowedPorts.join(", ") : "",
   };
 }

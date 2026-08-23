@@ -24,6 +24,10 @@ FORBIDDEN_GENERATED_TEXT = (
     "debugPort",
     "Traceback",
     "Identity Profile Should Not Leak",
+    # The generated content script runs in the page's MAIN world, so its text is
+    # part of what a site can reach. Naming the technique there tells a checker
+    # what to look for, which is the opposite of the point.
+    "fingerprint",
 )
 
 

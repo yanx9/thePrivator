@@ -101,9 +101,9 @@ if payload.get("credentialProxy"):
   proxy_summary = {"proxyVersion":1,"mode":"fixedServer","credentialState":"configured","summary":"credentialed proxy should stay private"}
 manifest = {
   "format":"theprivator.profile-package",
-  "version":1,
+  "version":2,
   "createdAt":"2026-01-01T00:00:00.000Z",
-  "profile":{"name":"M005 S04 Package","identity":{"identityVersion":1},"proxy":proxy,"proxySummary":proxy_summary},
+  "profile":{"name":"M005 S04 Package","identity":{"identityVersion":2},"proxy":proxy,"proxySummary":proxy_summary},
   "cookies":{"member":"cookies/theprivator-cookies.json","format":"theprivator.cookies","version":1,"byteCount":len(cookie_bytes),"sha256":hashlib.sha256(cookie_bytes).hexdigest(),"cookieCount":1,"skippedCount":0},
   "payload":{"prefix":"payload/","fileCount":len(payload_files),"byteCount":sum(len(item["bytes"]) for item in payload_files),"files":[{"path":item["path"],"member":item["member"],"byteCount":len(item["bytes"]),"sha256":hashlib.sha256(item["bytes"]).hexdigest()} for item in payload_files]},
   "warnings":[],

@@ -200,6 +200,14 @@ pub async fn identity_presets_list(
 }
 
 #[tauri::command]
+pub async fn identity_surfaces_describe(
+    app: tauri::AppHandle,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let runner = TauriSidecarRunner::new(app);
+    identity_surfaces_describe_with_runner(&runner).await
+}
+
+#[tauri::command]
 pub async fn identity_validate(
     app: tauri::AppHandle,
     identity: Value,
@@ -548,6 +556,12 @@ pub async fn identity_presets_list_with_runner<R: SidecarRunner>(
     runner: &R,
 ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
     invoke_fixed_method(runner, "identity.presets.list").await
+}
+
+pub async fn identity_surfaces_describe_with_runner<R: SidecarRunner>(
+    runner: &R,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    invoke_fixed_method(runner, "identity.surfaces.describe").await
 }
 
 pub async fn identity_validate_with_runner<R: SidecarRunner>(
@@ -1762,6 +1776,12 @@ mod tests {
         tauri::async_runtime::block_on(identity_presets_list_with_runner(runner))
     }
 
+    fn run_identity_surfaces_describe(
+        runner: &FakeRunner,
+    ) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+        tauri::async_runtime::block_on(identity_surfaces_describe_with_runner(runner))
+    }
+
     fn run_identity_validate(
         runner: &FakeRunner,
         identity: Value,
@@ -2210,10 +2230,25 @@ mod tests {
     }
 
     #[test]
+    fn identity_surfaces_describe_request_uses_empty_params() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+
+        run_identity_surfaces_describe(&runner).expect("identity surface describe reaches sidecar");
+
+        let request = runner.last_request();
+        assert_eq!(request["method"], "identity.surfaces.describe");
+        assert!(request["params"]
+            .as_object()
+            .expect("params object")
+            .is_empty());
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
     fn identity_validate_request_passes_identity_only() {
         let runner = FakeRunner::new(FakeMode::HealthSuccess);
         let identity = json!({
-            "identityVersion": 1,
+            "identityVersion": 2,
             "label": "Real identity",
             "presetId": null,
             "browser": { "mode": "real" },
@@ -2223,7 +2258,10 @@ mod tests {
             "canvas": { "mode": "real" },
             "audio": { "mode": "real" },
             "webgl": { "mode": "real" },
-            "webrtc": { "mode": "real", "policy": "real" }
+            "webrtc": { "mode": "real", "policy": "real" },
+            "geolocation": { "mode": "real", "permission": "prompt" },
+            "mediaDevices": { "mode": "real" },
+            "ports": { "mode": "real" }
         });
 
         run_identity_validate(&runner, identity.clone())
@@ -2278,7 +2316,7 @@ mod tests {
     #[test]
     fn profiles_identity_update_injects_store_root_profile_id_and_identity_only() {
         let runner = FakeRunner::new(FakeMode::HealthSuccess);
-        let identity = json!({ "identityVersion": 1, "label": "Custom" });
+        let identity = json!({ "identityVersion": 2, "label": "Custom" });
 
         run_profiles_identity_update(&runner, "/app/data/root", "profile-id", identity.clone())
             .expect("identity update reaches sidecar");
@@ -2406,8 +2444,8 @@ mod tests {
     #[test]
     fn identity_warning_payloads_pass_through_success_envelopes() {
         let runner = FakeRunner::new(FakeMode::SuccessResult(json!({
-            "identityVersion": 1,
-            "identity": { "identityVersion": 1, "label": "Suspicious" },
+            "identityVersion": 2,
+            "identity": { "identityVersion": 2, "label": "Suspicious" },
             "warnings": [
                 {
                     "code": "IDENTITY_UNUSUAL_CPU",
@@ -2418,7 +2456,7 @@ mod tests {
             ]
         })));
 
-        let result = run_identity_validate(&runner, json!({ "identityVersion": 1 }))
+        let result = run_identity_validate(&runner, json!({ "identityVersion": 2 }))
             .expect("identity validate warnings pass through");
 
         assert_eq!(result.result["warnings"][0]["code"], "IDENTITY_UNUSUAL_CPU");

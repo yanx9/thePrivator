@@ -683,7 +683,7 @@ def _protector_script() -> str:
     const allowedPorts = new Set((portsConfig.allowedPorts || []).map(Number));
     const isLoopbackHost = (host) => host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
     // Only pages served from somewhere else are blocked from probing loopback.
-    // A local page reaching its own host is not a fingerprinting attempt, and
+    // A local page reaching its own host is not a probe, and
     // blocking it unconditionally breaks the sidecar's own local proof fixture
     // and the audit checkers, which the extension also matches.
     const pageIsLocal = isLoopbackHost(location.hostname);

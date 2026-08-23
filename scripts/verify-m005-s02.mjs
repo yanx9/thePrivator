@@ -20,7 +20,7 @@ export const VERIFY_EVENT = "verify.m005.s02";
 export const PROFILE_PACKAGE_EXPORT = "portability.profile_package.export";
 export const PROFILE_PACKAGE_IMPORT = "portability.profile_package.import";
 export const PACKAGE_FORMAT = "theprivator.profile-package";
-export const PACKAGE_VERSION = 1;
+export const PACKAGE_VERSION = 2;
 export const MANIFEST_MEMBER = "manifest.json";
 export const COOKIE_MEMBER = "cookies/theprivator-cookies.json";
 export const PAYLOAD_PREFIX = "payload/";
@@ -352,7 +352,7 @@ export function assertM005S02PackageManifestSummary(manifest, { expectedProfileN
   assert(!("username" in (manifest.profile.proxy ?? {})) && !("password" in (manifest.profile.proxy ?? {})), "Profile package manifest proxy exposed credential fields.", { phase: "manifest-summary" });
   assert(manifest.profile.proxy?.mode === "fixedServer", "Profile package manifest proxy mode mismatch.", { phase: "manifest-summary" });
   assert(manifest.profile.proxySummary?.credentialState === "none", "Profile package proxy summary did not reflect stripped credentials.", { phase: "manifest-summary" });
-  assert(isPlainObject(manifest.profile.identity) && manifest.profile.identity.identityVersion === 1, "Profile package manifest identity was not normalized.", { phase: "manifest-summary" });
+  assert(isPlainObject(manifest.profile.identity) && manifest.profile.identity.identityVersion === 2, "Profile package manifest identity was not normalized.", { phase: "manifest-summary" });
   assert(isPlainObject(manifest.cookies), "Profile package manifest cookie metadata was malformed.", { phase: "manifest-summary" });
   assertExactKeys(manifest.cookies, ["byteCount", "cookieCount", "format", "member", "sha256", "skippedCount", "version"], "manifest.cookies");
   assert(manifest.cookies.member === COOKIE_MEMBER, "Profile package cookie member mismatch.", { phase: "manifest-summary" });

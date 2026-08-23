@@ -15,7 +15,7 @@ const allSurfacePage: IdentityAuditPage = {
 
 function identity(overrides: Partial<ProfileIdentity> = {}): ProfileIdentity {
   return {
-    identityVersion: 1,
+    identityVersion: 2,
     label: "Research laptop",
     presetId: "ubuntu-linux-chrome-120",
     browser: {
@@ -64,6 +64,9 @@ function identity(overrides: Partial<ProfileIdentity> = {}): ProfileIdentity {
       noiseSeed: 120032,
     },
     webrtc: { mode: "masked", policy: "disableNonProxiedUdp" },
+    geolocation: { mode: "real", permission: "prompt" },
+    mediaDevices: { mode: "real" },
+    ports: { mode: "real" },
     ...overrides,
   };
 }

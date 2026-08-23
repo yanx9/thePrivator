@@ -99,11 +99,11 @@ function mkdtempRoot(prefix) {
 function goodManifest(overrides = {}) {
   return {
     format: PACKAGE_FORMAT,
-    version: 1,
+    version: 2,
     createdAt: "2026-05-20T09:00:00.000Z",
     profile: {
       name: "M005 S02 Package Smoke",
-      identity: { identityVersion: 1, label: "Ubuntu", browser: { mode: "real" }, navigator: { mode: "real" }, screen: { mode: "real" }, locale: { mode: "real" }, canvas: { mode: "real" }, audio: { mode: "real" }, webgl: { mode: "real" }, webrtc: { mode: "real", policy: "real" } },
+      identity: { identityVersion: 2, label: "Ubuntu", browser: { mode: "real" }, navigator: { mode: "real" }, screen: { mode: "real" }, locale: { mode: "real" }, canvas: { mode: "real" }, audio: { mode: "real" }, webgl: { mode: "real" }, webrtc: { mode: "real", policy: "real" }, geolocation: { mode: "real", permission: "prompt" }, mediaDevices: { mode: "real" }, ports: { mode: "real" } },
       proxy: { proxyVersion: 1, mode: "fixedServer", protocol: "socks5", host: "proxy.m005-s02.invalid", port: 19080 },
       proxySummary: { proxyVersion: 1, mode: "fixedServer", protocol: "socks5", host: "proxy.m005-s02.invalid", port: 19080, credentialState: "none", summary: "socks5://proxy.m005-s02.invalid:19080" },
     },

@@ -426,7 +426,7 @@ function assertSetupProfile(profile, expectedName) {
 }
 
 function assertPresetList(result) {
-  assert(result?.identityVersion === 1, "Preset list did not return identityVersion 1.", { phase: "identity-preset" });
+  assert(result?.identityVersion === 2, "Preset list did not return identityVersion 2.", { phase: "identity-preset" });
   assert(Array.isArray(result.presets), "Preset list did not return an array.", { phase: "identity-preset" });
   const preset = result.presets.find((item) => item?.presetId === PRESET_ID);
   assert(preset, "Preset list did not include the curated CDP proof preset.", { phase: "identity-preset", presetCount: result.presets.length });

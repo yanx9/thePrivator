@@ -9,7 +9,7 @@ import type {
 } from "./sidecar/types";
 
 export type IdentityModeValue = IdentityMaskingMode | IdentityNoiseMode;
-export type IdentityDraftFieldKind = "text" | "textarea" | "integer" | "number" | "boolean" | "language-list" | "webrtc-policy";
+export type IdentityDraftFieldKind = "text" | "textarea" | "integer" | "number" | "boolean" | "language-list" | "webrtc-policy" | "geolocation-permission" | "port-list";
 export type IdentityDraftFieldPath =
   | "label"
   | "browser.userAgent"
@@ -40,7 +40,17 @@ export type IdentityDraftFieldPath =
   | "webgl.vendor"
   | "webgl.renderer"
   | "webgl.noiseSeed"
-  | "webrtc.policy";
+  | "webrtc.policy"
+  | "geolocation.permission"
+  | "geolocation.latitude"
+  | "geolocation.longitude"
+  | "geolocation.accuracy"
+  | "geolocation.altitude"
+  | "mediaDevices.noiseSeed"
+  | "mediaDevices.videoInputs"
+  | "mediaDevices.audioInputs"
+  | "mediaDevices.audioOutputs"
+  | "ports.allowedPorts";
 
 export type IdentityDraftFieldValues = Record<IdentityDraftFieldPath, string>;
 export type IdentityDraftFieldErrors = Partial<Record<IdentityDraftFieldPath | `${IdentitySurface}.mode`, string>>;
@@ -86,6 +96,8 @@ export type IdentityDraftParseResult =
 
 export const DEFAULT_ADVANCED_IDENTITY_LABEL = "Custom identity override";
 
+export const IDENTITY_VERSION: ProfileIdentity["identityVersion"] = 2;
+
 export const IDENTITY_SURFACE_ORDER: IdentitySurface[] = [
   "browser",
   "navigator",
@@ -95,6 +107,9 @@ export const IDENTITY_SURFACE_ORDER: IdentitySurface[] = [
   "audio",
   "webgl",
   "webrtc",
+  "geolocation",
+  "mediaDevices",
+  "ports",
 ];
 
 export const IDENTITY_SURFACE_LABELS: Record<IdentitySurface, string> = {
@@ -106,6 +121,9 @@ export const IDENTITY_SURFACE_LABELS: Record<IdentitySurface, string> = {
   audio: "Audio",
   webgl: "WebGL",
   webrtc: "WebRTC",
+  geolocation: "Geolocation",
+  mediaDevices: "Media devices",
+  ports: "Ports",
 };
 
 const MASKING_MODE_OPTIONS: IdentityModeOption[] = [
@@ -136,6 +154,22 @@ const NOISE_MODE_OPTIONS: IdentityModeOption[] = [
     value: "noise",
     label: "Noise",
     description: "Use deterministic sidecar noise for this rendering surface.",
+  },
+];
+
+// Geolocation deliberately has no "masked" mode: deriving a plausible position
+// from the proxy exit needs a third-party geo-IP lookup on every launch, which
+// leaks the exit to hide it. The UI offers the last proxy check instead.
+const GEOLOCATION_MODE_OPTIONS: IdentityModeOption[] = [
+  {
+    value: "real",
+    label: "Real",
+    description: "Let Chromium report the host position when a site is granted the permission.",
+  },
+  {
+    value: "custom",
+    label: "Custom",
+    description: "Report a saved fixed position for this profile.",
   },
 ];
 
@@ -172,11 +206,27 @@ const FIELD_DEFAULTS: IdentityDraftFieldValues = {
   "webgl.renderer": "Mesa Intel(R) Graphics",
   "webgl.noiseSeed": "",
   "webrtc.policy": "real",
+  "geolocation.permission": "prompt",
+  "geolocation.latitude": "0",
+  "geolocation.longitude": "0",
+  "geolocation.accuracy": "100",
+  "geolocation.altitude": "",
+  "mediaDevices.noiseSeed": "3001",
+  "mediaDevices.videoInputs": "1",
+  "mediaDevices.audioInputs": "1",
+  "mediaDevices.audioOutputs": "1",
+  "ports.allowedPorts": "",
 };
 
+const GEOLOCATION_COORDINATE_DECIMALS = 6;
+const MAX_ALLOWED_PORT_ENTRIES = 50;
+
 const MASKED_OR_CUSTOM: IdentityModeValue[] = ["masked", "custom"];
+const MASKED_ONLY: IdentityModeValue[] = ["masked"];
+const CUSTOM_ONLY: IdentityModeValue[] = ["custom"];
 const NOISE_ONLY: IdentityModeValue[] = ["noise"];
 const WEBRTC_MODES: IdentityModeValue[] = ["real", "masked", "custom"];
+const GEOLOCATION_MODES: IdentityModeValue[] = ["real", "custom"];
 
 export const IDENTITY_DRAFT_FIELD_DESCRIPTORS: IdentityDraftFieldDescriptor[] = [
   {
@@ -469,10 +519,126 @@ export const IDENTITY_DRAFT_FIELD_DESCRIPTORS: IdentityDraftFieldDescriptor[] = 
     modes: WEBRTC_MODES,
     required: true,
   },
+  {
+    surface: "geolocation",
+    path: "geolocation.permission",
+    label: "Geolocation permission",
+    kind: "geolocation-permission",
+    description: "What Chromium answers when a site asks for the position.",
+    modes: GEOLOCATION_MODES,
+    required: true,
+  },
+  {
+    surface: "geolocation",
+    path: "geolocation.latitude",
+    label: "Latitude",
+    kind: "number",
+    description: "Reported latitude in decimal degrees, rounded to six places.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: -90,
+    max: 90,
+  },
+  {
+    surface: "geolocation",
+    path: "geolocation.longitude",
+    label: "Longitude",
+    kind: "number",
+    description: "Reported longitude in decimal degrees, rounded to six places.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: -180,
+    max: 180,
+  },
+  {
+    surface: "geolocation",
+    path: "geolocation.accuracy",
+    label: "Accuracy",
+    kind: "integer",
+    description: "Reported accuracy radius in metres.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: 1,
+    max: 100_000,
+  },
+  {
+    surface: "geolocation",
+    path: "geolocation.altitude",
+    label: "Altitude",
+    kind: "number",
+    description: "Optional reported altitude in metres; blank reports no altitude.",
+    modes: CUSTOM_ONLY,
+    min: -1_000,
+    max: 100_000,
+  },
+  {
+    surface: "mediaDevices",
+    path: "mediaDevices.noiseSeed",
+    label: "Media devices noise seed",
+    kind: "integer",
+    description: "Deterministic seed for masked media device labels and ids.",
+    modes: MASKED_ONLY,
+    required: true,
+    min: 0,
+    max: 1_000_000,
+  },
+  {
+    surface: "mediaDevices",
+    path: "mediaDevices.videoInputs",
+    label: "Video inputs",
+    kind: "integer",
+    description: "Number of cameras enumerated by mediaDevices.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: 0,
+    max: 1,
+  },
+  {
+    surface: "mediaDevices",
+    path: "mediaDevices.audioInputs",
+    label: "Audio inputs",
+    kind: "integer",
+    description: "Number of microphones enumerated by mediaDevices.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: 1,
+    max: 4,
+  },
+  {
+    surface: "mediaDevices",
+    path: "mediaDevices.audioOutputs",
+    label: "Audio outputs",
+    kind: "integer",
+    description: "Number of speakers enumerated by mediaDevices.",
+    modes: CUSTOM_ONLY,
+    required: true,
+    min: 1,
+    max: 4,
+  },
+  {
+    surface: "ports",
+    path: "ports.allowedPorts",
+    label: "Allowed ports",
+    kind: "port-list",
+    description: "Comma-separated localhost ports pages may still reach, at most 50 entries.",
+    modes: CUSTOM_ONLY,
+    min: 1,
+    max: 65_535,
+  },
 ];
 
 export function getSupportedIdentityModeOptions(surface: IdentitySurface): IdentityModeOption[] {
-  return (NOISE_SURFACES.has(surface) ? NOISE_MODE_OPTIONS : MASKING_MODE_OPTIONS).map((option) => ({ ...option }));
+  return identitySurfaceModeOptions(surface).map((option) => ({ ...option }));
+}
+
+function identitySurfaceModeOptions(surface: IdentitySurface): IdentityModeOption[] {
+  if (NOISE_SURFACES.has(surface)) {
+    return NOISE_MODE_OPTIONS;
+  }
+  if (surface === "geolocation") {
+    return GEOLOCATION_MODE_OPTIONS;
+  }
+  return MASKING_MODE_OPTIONS;
 }
 
 export function isSupportedIdentityMode(surface: IdentitySurface, value: string): value is IdentityModeValue {
@@ -649,6 +815,27 @@ export function serializeIdentityDraftValues(identity: ProfileIdentity): Identit
   }
 
   values["webrtc.policy"] = identity.webrtc.policy;
+  values["geolocation.permission"] = identity.geolocation.permission;
+
+  if (identity.geolocation.mode !== "real") {
+    values["geolocation.latitude"] = String(identity.geolocation.latitude);
+    values["geolocation.longitude"] = String(identity.geolocation.longitude);
+    values["geolocation.accuracy"] = String(identity.geolocation.accuracy);
+    values["geolocation.altitude"] = identity.geolocation.altitude === null ? "" : String(identity.geolocation.altitude);
+  }
+
+  if (identity.mediaDevices.mode === "masked") {
+    values["mediaDevices.noiseSeed"] = String(identity.mediaDevices.noiseSeed);
+  } else if (identity.mediaDevices.mode === "custom") {
+    values["mediaDevices.videoInputs"] = String(identity.mediaDevices.videoInputs);
+    values["mediaDevices.audioInputs"] = String(identity.mediaDevices.audioInputs);
+    values["mediaDevices.audioOutputs"] = String(identity.mediaDevices.audioOutputs);
+  }
+
+  if (identity.ports.mode === "custom") {
+    values["ports.allowedPorts"] = identity.ports.allowedPorts.join(", ");
+  }
+
   return values;
 }
 
@@ -701,19 +888,24 @@ function buildProfileIdentityFromValues(baseIdentity: ProfileIdentity, values: I
     errors,
   });
 
-  const identity: ProfileIdentity = {
-    identityVersion: 1,
-    label,
-    presetId: baseIdentity.presetId,
-    browser: buildBrowserSurface(baseIdentity.browser.mode, values, errors),
-    navigator: buildNavigatorSurface(baseIdentity.navigator.mode, values, errors),
-    screen: buildScreenSurface(baseIdentity.screen.mode, values, errors),
-    locale: buildLocaleSurface(baseIdentity.locale.mode, values, errors),
-    canvas: buildNoiseSurface("canvas", baseIdentity.canvas.mode, values, errors),
-    audio: buildNoiseSurface("audio", baseIdentity.audio.mode, values, errors),
-    webgl: buildWebGlSurface(baseIdentity.webgl.mode, values, errors),
-    webrtc: buildWebRtcSurface(baseIdentity.webrtc.mode, values, errors),
-  };
+  // Merged onto the source identity rather than rebuilt as a literal: a surface
+  // this builder does not parse must survive the round trip instead of being
+  // dropped from the payload the sidecar is handed back.
+  const identity = cloneProfileIdentity(baseIdentity);
+  identity.identityVersion = IDENTITY_VERSION;
+  identity.label = label;
+  identity.presetId = baseIdentity.presetId;
+  identity.browser = buildBrowserSurface(baseIdentity.browser.mode, values, errors, baseIdentity.browser);
+  identity.navigator = buildNavigatorSurface(baseIdentity.navigator.mode, values, errors);
+  identity.screen = buildScreenSurface(baseIdentity.screen.mode, values, errors);
+  identity.locale = buildLocaleSurface(baseIdentity.locale.mode, values, errors);
+  identity.canvas = buildNoiseSurface("canvas", baseIdentity.canvas.mode, values, errors);
+  identity.audio = buildNoiseSurface("audio", baseIdentity.audio.mode, values, errors);
+  identity.webgl = buildWebGlSurface(baseIdentity.webgl.mode, values, errors);
+  identity.webrtc = buildWebRtcSurface(baseIdentity.webrtc.mode, values, errors);
+  identity.geolocation = buildGeolocationSurface(baseIdentity.geolocation.mode, values, errors);
+  identity.mediaDevices = buildMediaDevicesSurface(baseIdentity.mediaDevices.mode, values, errors);
+  identity.ports = buildPortsSurface(baseIdentity.ports.mode, values, errors);
 
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
@@ -726,10 +918,14 @@ function buildBrowserSurface(
   mode: ProfileIdentity["browser"]["mode"],
   values: IdentityDraftFieldValues,
   errors: IdentityDraftFieldErrors,
+  baseBrowser: ProfileIdentity["browser"],
 ): ProfileIdentity["browser"] {
   if (mode === "real") {
     return { mode };
   }
+
+  const baseClientHints: BrowserClientHints =
+    "clientHints" in baseBrowser && baseBrowser.clientHints ? baseBrowser.clientHints : {};
 
   const userAgent = parseTextValue(values["browser.userAgent"], {
     path: "browser.userAgent",
@@ -754,13 +950,22 @@ function buildBrowserSurface(
       errors,
     });
     const key = path.split(".").at(-1) as keyof Omit<BrowserClientHints, "mobile">;
-    if (value) {
+    // Written when the user typed something, and also when the saved identity
+    // already carried the key -- the sidecar accepts an empty platformVersion or
+    // model, so dropping one silently rewrites a saved profile on any unrelated
+    // edit. Only a key that was never there stays absent.
+    if (value || baseClientHints[key] !== undefined) {
       clientHints[key] = value;
     }
   }
   if (values["browser.clientHints.mobile"] === "true") {
     clientHints.mobile = true;
-  } else if (values["browser.clientHints.mobile"] !== "false") {
+  } else if (values["browser.clientHints.mobile"] === "false") {
+    // false is a value, not an absence. Leaving it out let the runtime fall back
+    // to navigator.uaMobile, which silently flips a profile that deliberately
+    // said "not mobile" to mobile after a save that changed nothing else.
+    clientHints.mobile = false;
+  } else {
     errors["browser.clientHints.mobile"] = "Client hints mobile must be true or false.";
   }
 
@@ -935,6 +1140,114 @@ function buildWebRtcSurface(
   return { mode, policy };
 }
 
+function buildGeolocationSurface(
+  mode: ProfileIdentity["geolocation"]["mode"],
+  values: IdentityDraftFieldValues,
+  errors: IdentityDraftFieldErrors,
+): ProfileIdentity["geolocation"] {
+  // The permission is carried in both modes: a profile that reports its real
+  // position still has to say whether a page may ask for it.
+  const permission = parseGeolocationPermissionValue(values["geolocation.permission"], errors);
+  if (mode === "real") {
+    return { mode, permission };
+  }
+
+  const altitudeText = values["geolocation.altitude"].trim();
+  return {
+    mode,
+    permission,
+    latitude: roundCoordinateValue(parseNumberValue(values["geolocation.latitude"], {
+      path: "geolocation.latitude",
+      label: "Latitude",
+      min: -90,
+      max: 90,
+      errors,
+    })),
+    longitude: roundCoordinateValue(parseNumberValue(values["geolocation.longitude"], {
+      path: "geolocation.longitude",
+      label: "Longitude",
+      min: -180,
+      max: 180,
+      errors,
+    })),
+    accuracy: parseIntegerValue(values["geolocation.accuracy"], {
+      path: "geolocation.accuracy",
+      label: "Accuracy",
+      min: 1,
+      max: 100_000,
+      errors,
+    }),
+    altitude: altitudeText
+      ? roundCoordinateValue(parseNumberValue(altitudeText, {
+        path: "geolocation.altitude",
+        label: "Altitude",
+        min: -1_000,
+        max: 100_000,
+        errors,
+      }))
+      : null,
+  };
+}
+
+function buildMediaDevicesSurface(
+  mode: ProfileIdentity["mediaDevices"]["mode"],
+  values: IdentityDraftFieldValues,
+  errors: IdentityDraftFieldErrors,
+): ProfileIdentity["mediaDevices"] {
+  if (mode === "real") {
+    return { mode };
+  }
+  if (mode === "masked") {
+    return {
+      mode,
+      noiseSeed: parseIntegerValue(values["mediaDevices.noiseSeed"], {
+        path: "mediaDevices.noiseSeed",
+        label: "Media devices noise seed",
+        min: 0,
+        max: 1_000_000,
+        errors,
+      }),
+    };
+  }
+
+  return {
+    mode,
+    videoInputs: parseIntegerValue(values["mediaDevices.videoInputs"], {
+      path: "mediaDevices.videoInputs",
+      label: "Video inputs",
+      min: 0,
+      max: 1,
+      errors,
+    }),
+    audioInputs: parseIntegerValue(values["mediaDevices.audioInputs"], {
+      path: "mediaDevices.audioInputs",
+      label: "Audio inputs",
+      min: 1,
+      max: 4,
+      errors,
+    }),
+    audioOutputs: parseIntegerValue(values["mediaDevices.audioOutputs"], {
+      path: "mediaDevices.audioOutputs",
+      label: "Audio outputs",
+      min: 1,
+      max: 4,
+      errors,
+    }),
+  };
+}
+
+function buildPortsSurface(
+  mode: ProfileIdentity["ports"]["mode"],
+  values: IdentityDraftFieldValues,
+  errors: IdentityDraftFieldErrors,
+): ProfileIdentity["ports"] {
+  if (mode !== "custom") {
+    return { mode };
+  }
+
+  return { mode, allowedPorts: parseAllowedPortsValue(values["ports.allowedPorts"], errors) };
+}
+
 function seedIdentitySurface(
   surface: IdentitySurface,
   mode: IdentityModeValue,
@@ -945,7 +1258,7 @@ function seedIdentitySurface(
     if (mode === "real") {
       return { mode };
     }
-    return buildBrowserSurface(mode as Exclude<IdentityMaskingMode, "real">, values, {});
+    return buildBrowserSurface(mode as Exclude<IdentityMaskingMode, "real">, values, {}, { mode: "real" });
   }
   if (surface === "navigator") {
     if (mode === "real") {
@@ -983,9 +1296,21 @@ function seedIdentitySurface(
     }
     return buildWebGlSurface(mode as Exclude<IdentityMaskingMode, "real">, values, {});
   }
+  if (surface === "webrtc") {
+    const previousPolicy = identity.webrtc.policy;
+    return { mode: mode as IdentityMaskingMode, policy: mode === "real" ? "real" : previousPolicy };
+  }
+  if (surface === "geolocation") {
+    return buildGeolocationSurface(mode as ProfileIdentity["geolocation"]["mode"], values, {});
+  }
+  if (surface === "mediaDevices") {
+    return buildMediaDevicesSurface(mode as IdentityMaskingMode, values, {});
+  }
+  if (surface === "ports") {
+    return buildPortsSurface(mode as IdentityMaskingMode, values, {});
+  }
 
-  const previousPolicy = identity.webrtc.policy;
-  return { mode: mode as IdentityMaskingMode, policy: mode === "real" ? "real" : previousPolicy };
+  return unsupportedIdentitySurface(surface);
 }
 
 function assignIdentitySurface(
@@ -1007,8 +1332,16 @@ function assignIdentitySurface(
     identity.audio = value as ProfileIdentity["audio"];
   } else if (surface === "webgl") {
     identity.webgl = value as ProfileIdentity["webgl"];
-  } else {
+  } else if (surface === "webrtc") {
     identity.webrtc = value as ProfileIdentity["webrtc"];
+  } else if (surface === "geolocation") {
+    identity.geolocation = value as ProfileIdentity["geolocation"];
+  } else if (surface === "mediaDevices") {
+    identity.mediaDevices = value as ProfileIdentity["mediaDevices"];
+  } else if (surface === "ports") {
+    identity.ports = value as ProfileIdentity["ports"];
+  } else {
+    unsupportedIdentitySurface(surface);
   }
 }
 
@@ -1027,7 +1360,9 @@ function parseTextValue(
     options.errors[options.path] = `${options.label} is required.`;
     return "";
   }
-  if (text.length > options.maxLength || containsControlCharacters(text)) {
+  // The sidecar counts code points, so a UTF-16 length here would reject
+  // payloads it accepts and accept payloads it rejects.
+  if (Array.from(text).length > options.maxLength || containsControlCharacters(text)) {
     options.errors[options.path] = `${options.label} must be ${options.maxLength} safe characters or fewer.`;
   }
   return text;
@@ -1148,6 +1483,52 @@ function parseWebRtcPolicyValue(value: string, errors: IdentityDraftFieldErrors)
   return "real";
 }
 
+function parseGeolocationPermissionValue(
+  value: string,
+  errors: IdentityDraftFieldErrors,
+): ProfileIdentity["geolocation"]["permission"] {
+  if (value === "prompt" || value === "allow" || value === "block") {
+    return value;
+  }
+  errors["geolocation.permission"] = "Geolocation permission must be prompt, allow, or block.";
+  return "prompt";
+}
+
+function parseAllowedPortsValue(value: string, errors: IdentityDraftFieldErrors): number[] {
+  const text = value.trim();
+  if (!text) {
+    return [];
+  }
+
+  const rawItems = text.split(",").map((item) => item.trim());
+  if (rawItems.some((item) => !item)) {
+    errors["ports.allowedPorts"] = "Allowed ports must be a comma-separated list without blank entries.";
+    return [];
+  }
+  if (rawItems.length > MAX_ALLOWED_PORT_ENTRIES) {
+    errors["ports.allowedPorts"] = `Allowed ports supports at most ${MAX_ALLOWED_PORT_ENTRIES} entries.`;
+  }
+
+  // Deduplicated and sorted the way the sidecar normalizes the list, so a saved
+  // draft reads back as the user left it.
+  const ports: number[] = [];
+  for (const item of rawItems) {
+    const parsed = Number(item);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65_535) {
+      errors["ports.allowedPorts"] = "Allowed ports must be whole numbers between 1 and 65535.";
+      break;
+    }
+    if (!ports.includes(parsed)) {
+      ports.push(parsed);
+    }
+  }
+  return ports.sort((left, right) => left - right);
+}
+
+function roundCoordinateValue(value: number): number {
+  return Number(value.toFixed(GEOLOCATION_COORDINATE_DECIMALS));
+}
+
 function descriptorLabel(path: Exclude<IdentityDraftFieldPath, "label">): string {
   return IDENTITY_DRAFT_FIELD_DESCRIPTORS.find((descriptor) => descriptor.path === path)?.label ?? path;
 }
@@ -1181,8 +1562,40 @@ function formatIdentitySurfaceExpectedValues(identity: ProfileIdentity, surface:
     const value = identity.webgl;
     return value.mode === "real" ? "real host WebGL values" : `${formatIdentityMode(value.mode)} ${value.vendor} / ${value.renderer}`;
   }
-  const value = identity.webrtc;
-  return `${formatIdentityMode(value.mode)} WebRTC policy ${value.policy}`;
+  if (surface === "webrtc") {
+    const value = identity.webrtc;
+    return `${formatIdentityMode(value.mode)} WebRTC policy ${value.policy}`;
+  }
+  if (surface === "geolocation") {
+    const value = identity.geolocation;
+    return value.mode === "real"
+      ? `real host position, permission ${value.permission}`
+      : `${formatIdentityMode(value.mode)} ${value.latitude}, ${value.longitude} ±${value.accuracy} m, permission ${value.permission}`;
+  }
+  if (surface === "mediaDevices") {
+    const value = identity.mediaDevices;
+    if (value.mode === "real") {
+      return "real host media devices";
+    }
+    return value.mode === "masked"
+      ? `${formatIdentityMode(value.mode)} device labels, noise seed ${value.noiseSeed}`
+      : `${formatIdentityMode(value.mode)} ${value.videoInputs} camera, ${value.audioInputs} microphone, ${value.audioOutputs} speaker`;
+  }
+  if (surface === "ports") {
+    const value = identity.ports;
+    if (value.mode === "real") {
+      return "real host local port access";
+    }
+    return value.mode === "masked"
+      ? `${formatIdentityMode(value.mode)} local port probes`
+      : `${formatIdentityMode(value.mode)} allowed ports ${value.allowedPorts.length > 0 ? value.allowedPorts.join("/") : "none"}`;
+  }
+
+  return unsupportedIdentitySurface(surface);
+}
+
+function unsupportedIdentitySurface(surface: never): never {
+  throw new Error(`Unsupported identity surface ${String(surface)}.`);
 }
 
 function containsControlCharacters(value: string): boolean {

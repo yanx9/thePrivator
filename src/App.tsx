@@ -6237,6 +6237,19 @@ function IdentityDraftFieldControl({
           <option value="disableNonProxiedUdp">Disable non-proxied UDP</option>
           <option value="block">Block WebRTC</option>
         </select>
+      ) : field.kind === "geolocation-permission" ? (
+        <select
+          id={fieldId}
+          value={value}
+          disabled={isBusy}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onFieldChange(profile.id, field.path, event.target.value)}
+        >
+          <option value="prompt">Prompt</option>
+          <option value="allow">Allow</option>
+          <option value="block">Block</option>
+        </select>
       ) : (
         <input
           id={fieldId}
@@ -6252,7 +6265,7 @@ function IdentityDraftFieldControl({
       )}
       <p id={hintId} className="identity-field-hint">
         {field.description}
-        {field.min !== undefined && field.max !== undefined ? ` Supported range: ${field.min}–${field.max}.` : ""}
+        {field.min !== undefined && field.max !== undefined ? ` Supported range: ${field.min} to ${field.max}.` : ""}
       </p>
       {error ? (
         <p id={errorId} className="identity-field-error" role="alert">

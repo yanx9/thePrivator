@@ -44,6 +44,7 @@ pub fn run() {
             sidecar::sidecar_health,
             sidecar::sidecar_diagnostic_failure,
             sidecar::identity_presets_list,
+            sidecar::identity_surfaces_describe,
             sidecar::identity_validate,
             sidecar::proxy_validate,
             sidecar::identity_audit_plan,
