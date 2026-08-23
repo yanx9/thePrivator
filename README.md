@@ -1,270 +1,119 @@
-# 🌐 thePrivator 2.1
+# ThePrivator
 
-**Chromium multi-instance manager with enhanced features and modern architecture**
+A desktop manager for isolated browser profiles. Each profile is its own browser
+identity — separate cookies and storage, its own proxy, and a fingerprint you
+control surface by surface — so accounts that must not be linked stay unlinked.
 
-[![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+![The profile list](docs/screenshot.png)
 
-A modern, robust application for managing multiple Chromium profiles with enhanced privacy features, user-agent spoofing, and proxy support. Perfect for developers, testers, and privacy-conscious users.
+Everything stays on your machine. There is no account, no server of ours, and no
+telemetry. Profiles travel between your own devices only if you point the app at
+a folder your own sync client already keeps up to date.
 
-## ✨ Features
+## What it does
 
-### 🚀 **New in v2.1**
-- **Modern Architecture**: Complete rewrite with modular, maintainable code
-- **Enhanced Performance**: 40% faster startup, 25% less memory usage  
-- **Robust Error Handling**: Comprehensive validation and logging
-- **Advanced Process Management**: Better Chromium instance control
-- **Type Safety**: Full type hints coverage
-- **Professional GUI**: Modern, responsive interface with CustomTkinter
+- **Profiles as a table.** Folders, tags, notes, favourites, start URLs, bulk
+  launch and stop, and a trash you can restore from.
+- **Fingerprint control across 11 surfaces** — browser, navigator, screen,
+  locale, canvas, audio, WebGL, WebRTC, geolocation, media devices and local
+  port access. Each is `real`, `masked`, `custom` or noise-seeded, with curated
+  presets as a starting point.
+- **A consistency check, not just a mask.** Masking is not monotonic: a
+  geolocation that contradicts your proxy's exit country makes a profile *more*
+  identifiable, not less. The app warns when surfaces disagree.
+- **Proxies per profile**, including authenticated SOCKS5 — Chromium cannot do
+  SOCKS authentication itself, so the sidecar runs a local relay for it. A proxy
+  check reports what it actually proved, and says "not established" when it
+  proved nothing.
+- **Cookie import and export** in ThePrivator JSON or Netscape `cookies.txt`,
+  and whole-profile `.tpkg` packages that carry the fingerprint, the proxy and
+  the browsing data — but never the proxy password.
+- **Profile synchronisation through a folder** you already sync with Google
+  Drive, Syncthing or rclone. No OAuth, no token, nothing sent to us.
+- **A local automation endpoint** for Selenium, Playwright or Puppeteer. It
+  listens on loopback and needs an access token, which is never displayed —
+  copying puts it on the clipboard and nowhere else.
 
-### 🔧 **Core Features**
-- **Profile Management**: Create, edit, and organize multiple Chromium profiles
-- **User-Agent Spoofing**: Built-in presets for popular browsers
-- **Proxy Support**: HTTP, HTTPS, SOCKS4, and SOCKS5 proxy support
-- **Process Monitoring**: Real-time monitoring of running instances
-- **Import/Export**: Backup and share profile configurations
-- **Cross-Platform**: Works on Windows, macOS, and Linux
+## Install
 
-### 🛡️ **Privacy & Security**
-- Isolated user data directories for each profile
-- Secure configuration storage
-- Input validation and sanitization
-- No data collection or telemetry
+Download a build from the [releases](../../releases) page:
 
-## Screenshots
+| Platform | Files |
+| --- | --- |
+| Linux | `.deb`, `.rpm`, `.AppImage` |
+| macOS | `.dmg` (Apple silicon and Intel) |
+| Windows | `.msi`, `.exe` |
 
-![alt text](img/main.png)
+You also need Chromium or Google Chrome installed; the app launches the browser
+you already have rather than shipping one. Point it somewhere specific with
+`THEPRIVATOR_CHROMIUM_PATH` if it is not on the usual path.
 
-## 🚀 Quick Start
+## Build from source
 
-### Requirements
-
-- Python 3.8+
-- Chromium or Google Chrome installed
-- Windows, macOS, or Linux
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yanx9/thePrivator.git
-cd thePrivator
-
-# Install dependencies
-pip install customtkinter psutil
-
-# Run the application
-python theprivator/main.py
-
-# OR, install via pip and run as python module
-pip install .
-python -m theprivator
-```
-
-### Tauri packaged proxy regression
-
-The new Tauri 2 rewrite spine is proven separately from the legacy CustomTkinter app. The health-only S01 smoke is an early guardrail; the final current-OS packaged proxy proof is `npm run verify:s06`, which rebuilds the Tauri artifact, opens the packaged app through WebDriver, creates a unique `M003 Packaged Proxy Smoke ...` profile, applies and persists `ubuntu-linux-chrome-120` / **Ubuntu Linux Chrome 120**, configures and checks a credentialed fixed HTTP proxy, saves masked store-v3 proxy truth, runs **Run saved proxy proof**, launches and stops real Chromium through the bundled sidecar, restarts with identity and proxy summaries intact, correlates diagnostics, and verifies public evidence is redacted.
-
-Use `npm run verify:m004:s01` for the app-managed localhost Automation API lifecycle proof: it rebuilds/uses the target-triple sidecar binary, launches `automation-api` on loopback with a verifier-owned in-memory token, proves public `/health`, protected `/v1/status` auth failures/success, shutdown/listener cleanup, and a forbidden-marker sweep over public evidence.
-
-Use `npm run verify:m004:s02` for the built-sidecar Automation API profile/runtime proof: it uses the target-triple binary, a temporary sidecar-owned app-data root, and a verifier-owned bearer token to create profiles through NDJSON `profiles.create`/`profiles.proxy.update`, launch a fake long-lived Chromium process through `chromium.launch`, start the same binary in `automation-api` mode, and call `/health`, `/v1/profiles`, `/v1/profiles/{profileId}/status`, and `/v1/runtime/status`. The safe `/v1` contract is token-authenticated, path-versioned, request-ID-bearing (`X-Request-ID` plus `request.requestId`), cursor-paginated for profiles, and redacted to profile IDs/names/defaults/identity/proxy summaries plus runtime status/counts only. Missing/invalid auth, invalid pagination, and unknown profiles are typed HTTP errors with safe `details.phase`/`detailRef`; public verifier JSON lines and summaries must not expose token material, authorization headers, temp roots, store/profile/user-data paths, credentials or `credentialState`, process IDs, owner tokens, launch args, raw diagnostics/stdout/stderr, or CDP/debug/WebSocket authority. FastAPI docs/OpenAPI remain disabled for the local automation surface.
-
-Use `npm run verify:m004:s03` for the built-sidecar Automation API Playwright lease proof. It requires `npm run sidecar:build` first and a locally discoverable Chromium/Chrome executable (or the existing ThePrivator Chromium discovery environment), then creates a verifier profile, starts the built sidecar API, creates a short-lived Playwright lease, attaches with `playwright-core` to the sidecar-launched browser, performs a minimal page action, releases the first lease, creates a second short lease, waits for expiry cleanup, verifies the retained attach authority is revoked, confirms listener and temporary-root cleanup, and scans public JSON-line evidence. The command intentionally keeps bearer secrets, lease identifiers, CDP attach origins, storage roots, profile/user-data paths, browser launch details, process-output tails, and stack traces out of public summaries and failure details.
-
-Use `npm run verify:m004:s04` for the built-sidecar Automation API lease hardening proof. It requires `npm run sidecar:build`, Python sidecar dependencies, `playwright-core`, and a locally discoverable Chromium/Chrome executable. The verifier creates a temporary store root, provisions profiles through the sidecar NDJSON contract, applies the curated identity preset, configures a credentialed local HTTP proxy fixture, starts `automation-api` with a verifier-owned bearer token, proves auth and typed lease failures, creates a Playwright lease, attaches to real Chromium, navigates through the proxy fixture, checks representative identity values, releases and expires leases, verifies listener/temp-root cleanup, and scans every public JSON-line phase/final summary. Public evidence is limited to safe phase names, pass/fail status, counts, booleans, stable error codes, and redacted summaries; it must not contain tokens, auth headers, lease IDs, attach endpoints, store/profile/user-data paths, proxy credentials, proxy launch switches, bypass/direct fallback markers, CDP/WebSocket/DevTools markers, raw stdout/stderr/diagnostics, stack traces, or argv/env.
-
-Use `npm run verify:m004:s05` for the final current-OS packaged Automation API regression. It lifts S01-S04 app-managed and built-sidecar contracts into packaged UI orchestration: the verifier rebuilds or validates the release Tauri app, drives WebDriver-visible profile/identity/proxy setup, starts and stops the app-owned Automation API, captures the generated token only through **Copy token**, exercises protected HTTP and Playwright lease flows, proves release/expiry/revocation cleanup, correlates diagnostics, and scans for forbidden markers and redaction failures. Start with the [packaged Automation API regression runbook](docs/packaged-automation-api-regression.md) before running it.
-
-Use `npm run verify:m005:s01` for the M005 S01 source-level cookie portability proof. It runs focused React/TypeScript verifier tests, the TypeScript build, sidecar build, Rust fixed-command tests, capability/source guard scans, README boundary checks, and a direct sidecar cookie export/replace smoke with redacted `verify.m005.s01` JSON-line phases. It proves the no-frontend-filesystem/no-path-leak boundary for dialog-selected cookie locations: the UI may ask native dialogs for opaque locations, Rust may forward only fixed cookie commands, and public summaries must stay limited to safe counts, typed codes, recoverability, and diagnostic references. It intentionally does not prove the current-development-OS packaged UI/dialog loop yet; packaged real-dialog proof belongs to S04.
-
-Use `npm run verify:m005:s02` for the M005 S02 source-level `.tpkg` profile package proof. It runs focused package/client/UI verifier tests, the TypeScript build, sidecar build, Rust fixed-command tests for `profile_package`, capability/source guardrails, README boundary checks, a direct source-sidecar export/import smoke, archive inspection/package scan, restored fake-Chromium launch/stop, diagnostics redaction, and temp cleanup with `verify.m005.s02` JSON-line phases. Public verifier events and summaries must not contain proxy credentials, selected locations, absolute roots, package member lists, cookie values/domains/names, debug endpoints, launch args, tokens, raw diagnostics/stdout/stderr, or stack traces; the package-content scan separately allows intended cookie material only inside `cookies/theprivator-cookies.json` while still forbidding proxy credentials, runtime singleton files, DevTools/debug material, app-data/repo/temp paths, launch args, raw diagnostics, and unsafe manifest keys. S03 owns the broader unsafe/malformed package rejection matrix, and S04 owns packaged real-dialog proof through native open/save dialogs.
-
-Use `npm run verify:m005:s03` for the M005 S03 source-level `.tpkg` package safety proof. It runs focused Python package and diagnostics tests, Rust fixed `profile_package` command tests, focused Vitest package client/UI/verifier tests, the frontend build, sidecar build, capability/source/docs guardrails, unsafe source-sidecar import smoke fixtures, rollback/no-profile assertions, temp-staging cleanup assertions, persisted diagnostics/detailRef lookup scans, accepted/exported package-content scans, and public verifier event/final-summary redaction scans with `verify.m005.s03` JSON-line phases. The redaction scanner checks public evidence only: verifier events, diagnostics/detailRef lookup projections, UI/client error surfaces, and final summaries must expose typed redacted error codes/detailRefs without selected paths, archive members, raw manifests, cookie material, credentials, debug endpoints, raw diagnostics, or stacks. The package-content scanner is separate: unsafe fixture archives may contain forbidden markers internally so rejection can be proven, while accepted/exported package contents are scanned to allow portable cookie material only inside `cookies/theprivator-cookies.json` and reject those markers everywhere else. S03 is not the packaged release-app native dialog loop; S04 owns current-OS packaged real-dialog proof through native open/save dialogs.
-
-Use `npm run verify:m005:s04` for the final M005 current-development-OS packaged portability proof. Start with `npm run verify:m005:s04 -- --preflight-only` to check guardrails, WebDriver, Chromium discovery, and native open/save dialog automation before a long run. The default command rebuilds or validates the release Tauri app, opens the packaged app through Tauri WebDriver, drives real native open/save dialogs for standalone cookie export and cookie replace, exports and imports a `.tpkg` copied profile, launches and stops the restored copy through the bundled sidecar and real Chromium lifecycle, proves running-profile portability is blocked with typed `PORTABILITY_PROFILE_BUSY`, scans `verify.m005.s04` public events/diagnostics/detailRefs/UI summaries/package contents/final summary through the redaction scanner, and removes verifier-owned smoke roots on pass. Diagnostic modes are `-- --build-only`, `-- --ui-only`, `-- --skip-build`, and `-- --keep-temp`; cleanup behavior removes verifier-owned native-dialog files and smoke roots after a passing run, while `--keep-temp` retains private local state for troubleshooting and public output still reports only redacted retained-state wording. A passing run validates the packaged proof boundary for R033/R034/R035/R037/R038/R039/R040.
-
-Use `npm run verify:s02` for fixed-server proxy runtime guardrails, `npm run verify:s03` for the visible proxy configuration UI and store-v3 proxy truth, `npm run verify:s04` for deterministic proxy-check vocabulary, and `npm run verify:s05` for built-sidecar proxy plus identity composition. `verify:s06` then proves those boundaries survive the current-OS packaged app and bundled sidecar; it must not depend on a dev/source sidecar. Public checker pages remain advisory comparison targets only: there is no guarantee of exact external public exit IP, undetectability, checker success scores, or stable public-page assertions.
-
-Start with the [packaged proxy regression and first profile loop runbook](docs/packaged-first-profile-loop.md) for prerequisites, preflight, command order, Linux `.deb`/`.rpm` artifact expectations, manual fallback UAT, diagnostics, troubleshooting, and the post-read action: prove the packaged proxy loop on the current OS with `npm run verify:s06`. Use the [packaged Automation API regression runbook](docs/packaged-automation-api-regression.md) when you need the M004 packaged app proof for `npm run verify:m004:s05`, including prerequisites, expected phases, cleanup, diagnostics, Copy token handling, Playwright lease behavior, and forbidden-marker/redaction boundaries. Use [S01 Tauri sidecar health smoke](docs/s01-health-smoke.md) when you only need to validate the sidecar health spine or diagnose an upstream health/error regression before the packaged loop.
-
-### Creating Your First Profile
-
-1. Click **"➕ New Profile"** in the sidebar
-2. Enter a profile name
-3. Select or enter a User-Agent string
-4. (Optional) Configure proxy settings
-5. Click **"➕ Create"**
-6. Select your profile and click **"🚀 Launch Profile"**
-
-## 📁 Project Structure
-
-```
-thePrivator/
-├── src/
-│   ├── main.py              # Main application entry point
-│   ├── core/               # Core business logic
-│   │   ├── profile_manager.py
-│   │   ├── chromium_launcher.py
-│   │   └── config_manager.py
-│   ├── gui/                # GUI components
-│   │   ├── main_window.py
-│   │   └── profile_dialog.py
-│   └── utils/              # Utilities
-│       ├── logger.py
-│       ├── validator.py
-│       └── exceptions.py
-├── requirements.txt         # Dependencies
-└── README.md               # Documentation
-```
-
-## ⚙️ Configuration
-
-thePrivator stores configuration in `~/.theprivator/`:
-
-```
-~/.theprivator/
-├── config.json          # Application settings
-├── profiles.json        # Profile definitions
-├── profiles/            # Profile data directories
-│   ├── profile-1/
-│   └── profile-2/
-└── logs/                # Application logs
-    └── theprivator.log
-```
-
-### Configuration Options
-
-```json
-{
-  "theme": "dark",
-  "color_theme": "blue",
-  "window_geometry": "900x700",
-  "default_user_agent": "Mozilla/5.0 ...",
-  "auto_cleanup": true,
-  "max_concurrent_profiles": 10,
-  "process_monitor_interval": 5
-}
-```
-
-## 🔗 Command Line Interface
+Requires **Node 20.19+**, **Python 3.11+**, **Rust 1.77+**, and on Linux the
+WebKitGTK development packages:
 
 ```bash
-# Show help
-python src/main.py --help
-
-# Use custom config directory
-python src/main.py --config-dir ~/.my-privator
-
-# Enable debug logging
-python src/main.py --debug
-
-# Show version
-python src/main.py --version
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 ```
 
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Q: "Chromium not found" error**
-A: Install Chromium or Google Chrome, or ensure it's in your system PATH.
-
-**Q: Profiles not launching**
-A: Check if you have permission to create files in the profile directory.
-
-**Q: High memory usage**
-A: Limit concurrent profiles in settings or close unused instances.
-
-**Q: GUI not responding**
-A: Try running with `--debug` flag to see detailed error messages.
-
-### Installation Help
-
-**Windows:**
-```powershell
-# Install Google Chrome
-winget install Google.Chrome
-
-# Or download from: https://www.google.com/chrome/
-```
-
-**macOS:**
-```bash
-# Install with Homebrew
-brew install --cask google-chrome
-
-# Or download from: https://www.google.com/chrome/
-```
-
-**Linux:**
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install chromium-browser
-
-# Fedora
-sudo dnf install chromium
-
-# Arch
-sudo pacman -S chromium
-```
-
-## 🤝 Contributing
-
-We welcome contributions! Here's how to get started:
-
-### Development Setup
+Then:
 
 ```bash
-# Fork and clone the repository
-git clone https://github.com/yanx9/thePrivator.git
-cd thePrivator
-
-# Install dependencies
-pip install customtkinter psutil
-
-# Run in development mode
-python theprivator/main.py --debug
+npm ci
+python -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+npm run tauri build
 ```
 
-### Making Changes
+Installers land in `src-tauri/target/release/bundle/`.
 
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Make** your changes
-4. **Test** thoroughly
-5. **Commit** changes (`git commit -m 'Add amazing feature'`)
-6. **Push** to branch (`git push origin feature/amazing-feature`)
-7. **Create** a Pull Request
+For development, `npm run tauri dev` rebuilds the frontend on save.
 
-## 📊 Performance Metrics
+**One build produces one platform.** The Python sidecar is packed with
+PyInstaller, which bundles the host's interpreter and native libraries and has
+no cross-compilation mode — so a macOS build needs a Mac and a Windows build
+needs Windows, whatever the Rust side could otherwise manage. The
+[release workflow](.github/workflows/release.yml) runs one runner per platform
+for exactly that reason.
 
-| Metric | v1.x | v2.0 | Improvement |
-|--------|------|------|-------------|
-| Startup Time | 2.1s | 1.3s | **↓ 38%** |
-| Memory Usage | 45MB | 34MB | **↓ 24%** |
-| Profile Creation | 850ms | 340ms | **↓ 60%** |
-| UI Responsiveness | Good | Excellent | **↑ 80%** |
+## How it fits together
 
+```
+React frontend  ──invoke──▶  Rust bridge  ──NDJSON over stdio──▶  Python sidecar  ──▶  Chromium
+   src/                       src-tauri/                           theprivator_sidecar/
+```
 
-## 📄 License
+The Rust bridge owns nothing but transport, timeouts and diagnostics. The
+sidecar owns the profile store, the proxy runtime, the fingerprint engine and
+the browser lifecycle. The frontend never talks to the filesystem or spawns a
+process.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Two rules run through the whole codebase and are worth knowing before changing
+anything:
 
-## 🙏 Acknowledgments
+- **The redaction perimeter.** Absolute paths, proxy credentials, browser
+  command lines and automation tokens must not reach the UI. The sidecar redacts
+  and the TypeScript client independently rejects — a response carrying one is
+  refused, not rendered. Errors carry an opaque reference instead, which
+  Settings → Diagnostics exchanges for the detail behind it.
+- **Strict-key parsing.** Every sidecar response is validated field by field on
+  both sides. An unexpected key is an error, not something to ignore, so a
+  protocol drift surfaces at the boundary rather than three screens later.
 
-- **CustomTkinter** - Modern UI framework
-- **psutil** - Process and system utilities
-- **Contributors** - Everyone who has contributed to this project
+## Tests
 
-## 📞 Support
+```bash
+npx tsc --noEmit        # types
+npx vitest run          # frontend and component tests
+python -m pytest tests/ # sidecar
+cd src-tauri && cargo test
+npm run verify:sidecar  # the packed binary, not the source
+```
 
-- 📖 [Documentation](https://github.com/yanx9/thePrivator/wiki)
-- 🐛 [Issue Tracker](https://github.com/yanx9/thePrivator/issues)
-- 💬 [Discussions](https://github.com/yanx9/thePrivator/discussions)
+That last one matters more than it looks: the sidecar imports some modules
+lazily, so a missing `--hidden-import` can leave a feature broken only in the
+packaged build while every from-source test passes.
 
----
+## Licence
 
-**Made with ❤️ by the thePrivator team**
-
-*If you find this project useful, please consider giving it a ⭐ on GitHub!*
+MIT — see [LICENSE](LICENSE).

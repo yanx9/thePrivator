@@ -1,4 +1,5 @@
-customtkinter>=5.2.0
+# Runtime dependencies of theprivator_sidecar. customtkinter was dropped
+# with the desktop GUI package it belonged to; nothing imports it any more.
 psutil>=5.9.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
