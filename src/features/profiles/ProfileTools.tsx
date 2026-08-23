@@ -188,14 +188,14 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
         tone: result.skippedCount > 0 ? "warn" : "ok",
         text:
           result.skippedCount > 0
-            ? `Exported ${result.exportedCount} sessions. ${result.skippedCount} could not be represented in this format.`
-            : `Exported ${result.exportedCount} sessions.`,
+            ? `Exported ${result.exportedCount} cookies. ${result.skippedCount} could not be represented in this format.`
+            : `Exported ${result.exportedCount} cookies.`,
       });
     });
 
   const replaceCookies = () =>
     run("cookies", async () => {
-      const source = await pickFile("Replace this profile's cookies", [
+      const source = await pickFile("Import cookies into this profile", [
         { name: "Cookie files", extensions: ["txt", "json"] },
       ]);
       if (source === null) {
@@ -204,7 +204,7 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
       const result = await replaceProfileCookies(profileId, source);
       setNote({
         tone: "warn",
-        text: `Replaced this profile's sessions with ${result.replacedCount} from the file. The previous ones are gone.`,
+        text: `Imported ${result.importedCount} cookies, replacing this profile's previous ${result.replacedCount}. The old ones are gone.`,
       });
     });
 
@@ -243,23 +243,25 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
       ) : null}
 
       <section className={styles.fieldset}>
-        <h3>Portability</h3>
+        <h3>Cookies and packages</h3>
         <p className={styles.hint}>
-          A package carries the fingerprint, the proxy server and the browsing data, but never the proxy
-          password. The browser must be stopped: copying a profile mid-write produces one that will not open.
+          Importing cookies <strong>replaces</strong> the ones this profile already has; it does not merge
+          them. A package carries the fingerprint, the proxy server and the browsing data, but never the
+          proxy password. The browser must be stopped for all of these: copying a profile mid-write produces
+          one that will not open.
         </p>
         <div className={styles.toolActions}>
           <button type="button" disabled={busy !== null || running} onClick={exportPackage}>
             {busy === "package" ? "Exporting…" : "Export as package"}
           </button>
           <button type="button" disabled={busy !== null || running} onClick={() => exportCookies("theprivator-json")}>
-            Export sessions (JSON)
+            Export cookies (JSON)
           </button>
           <button type="button" disabled={busy !== null || running} onClick={() => exportCookies("netscape")}>
-            Export sessions (cookies.txt)
+            Export cookies (cookies.txt)
           </button>
           <button type="button" disabled={busy !== null || running} onClick={replaceCookies}>
-            Replace sessions…
+            Import cookies…
           </button>
         </div>
         {running ? <p className={styles.hint}>Stop this profile&apos;s browser to use these.</p> : null}

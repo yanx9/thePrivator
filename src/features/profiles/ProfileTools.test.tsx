@@ -57,7 +57,7 @@ describe("ProfileTools", () => {
     render(<ProfileTools profileId={PROFILE} running />);
 
     expect(screen.getByRole("button", { name: /export as package/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /replace sessions/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /import cookies/i })).toBeDisabled();
     expect(screen.getByText(/stop this profile's browser to use these/i)).toBeInTheDocument();
   });
 
@@ -108,14 +108,29 @@ describe("ProfileTools", () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
-  it("names the two session formats separately", () => {
+  it("names the two cookie formats separately", () => {
     render(<ProfileTools profileId={PROFILE} running={false} />);
 
-    expect(screen.getByRole("button", { name: /export sessions \(json\)/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /export sessions \(cookies\.txt\)/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /export cookies \(json\)/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /export cookies \(cookies\.txt\)/i })).toBeInTheDocument();
   });
 
-  it("warns when a session export could not represent everything", async () => {
+  it("calls them cookies, which is what the user is looking for", () => {
+    // They were labelled "sessions", which is accurate and unfindable: someone
+    // hunting for cookie import walks straight past it.
+    render(<ProfileTools profileId={PROFILE} running={false} />);
+
+    expect(screen.getByRole("button", { name: "Import cookies…" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sessions/i })).not.toBeInTheDocument();
+  });
+
+  it("warns up front that importing replaces rather than merges", () => {
+    render(<ProfileTools profileId={PROFILE} running={false} />);
+
+    expect(screen.getByText(/does not merge them/i)).toBeInTheDocument();
+  });
+
+  it("warns when a cookie export could not represent everything", async () => {
     // Netscape cookies.txt cannot carry every attribute, and silently dropping
     // some would produce a file that looks complete and logs the user out.
     dialogs.pickSaveTarget.mockResolvedValue("/home/someone/cookies.txt");
@@ -140,12 +155,12 @@ describe("ProfileTools", () => {
     });
 
     render(<ProfileTools profileId={PROFILE} running={false} />);
-    fireEvent.click(screen.getByRole("button", { name: /export sessions \(cookies\.txt\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /export cookies \(cookies\.txt\)/i }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(/2 could not be represented/i);
   });
 
-  it("says plainly that replacing sessions discards the previous ones", async () => {
+  it("says plainly that importing cookies discards the ones already there", async () => {
     dialogs.pickFile.mockResolvedValue("/home/someone/cookies.json");
     respond({
       profile_cookies_replace: () =>
@@ -163,9 +178,9 @@ describe("ProfileTools", () => {
     });
 
     render(<ProfileTools profileId={PROFILE} running={false} />);
-    fireEvent.click(screen.getByRole("button", { name: /replace sessions/i }));
+    fireEvent.click(screen.getByRole("button", { name: /import cookies/i }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent(/the previous ones are gone/i);
+    expect(await screen.findByRole("status")).toHaveTextContent(/the old ones are gone/i);
   });
 
   it("reports a refused export rather than looking like nothing happened", async () => {
