@@ -99,8 +99,11 @@ export function AutomationPage() {
         </p>
       ) : null}
 
-      <section className={styles.card} aria-label="Automation endpoint status">
-        <dl className={styles.facts}>
+      {/* Both labels are load-bearing: the packaged UI smoke test addresses this
+          section and this list by name, so renaming either is a contract change
+          rather than a cosmetic one. */}
+      <section className={styles.card} aria-label="Automation endpoint">
+        <dl className={styles.facts} aria-label="Automation endpoint status">
           <div>
             <dt>State</dt>
             <dd>{status === null ? "Not checked" : running ? "Running" : "Stopped"}</dd>
@@ -125,7 +128,7 @@ export function AutomationPage() {
           </p>
         ) : null}
 
-        <div className={styles.actions}>
+        <div className={styles.actions} aria-label="Automation endpoint actions">
           {running ? (
             <button
               type="button"

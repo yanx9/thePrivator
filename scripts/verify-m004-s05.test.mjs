@@ -352,7 +352,7 @@ describe("verify-m004-s05 public evidence redaction", () => {
 
   it("validates Automation API UI metrics without allowing unsafe loopback or copy states", () => {
     const metrics = validateAutomationApiStatusMetrics({
-      lifecycle: "running · running",
+      lifecycle: "Running",
       loopbackUrl: "http://127.0.0.1:43123",
       port: "43123",
       scope: "loopback",
@@ -361,14 +361,14 @@ describe("verify-m004-s05 public evidence redaction", () => {
     expect(metrics).toMatchObject({ apiBaseUrl: "http://127.0.0.1:43123", port: 43123, copyAvailable: true });
 
     expectSafeFailure(() => validateAutomationApiStatusMetrics({
-      lifecycle: "running · running",
+      lifecycle: "Running",
       loopbackUrl: "http://localhost:43123",
       port: "43123",
       scope: "loopback",
       copyAvailable: "yes",
     }), ["http://localhost:43123"]);
     expectSafeFailure(() => validateAutomationApiStatusMetrics({
-      lifecycle: "running · running",
+      lifecycle: "Running",
       loopbackUrl: "http://127.0.0.1:43123",
       port: "43123",
       scope: "loopback",

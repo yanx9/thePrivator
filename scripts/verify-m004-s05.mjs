@@ -441,7 +441,7 @@ async function failS05Ui(driver, runtime, message, details = {}) {
 }
 
 async function clickAutomationApiButton(driver, runtime, buttonText, phase) {
-  const selector = By.xpath(`//section[@aria-label='Automation API lifecycle controls']//div[@aria-label='Automation API actions']//button[normalize-space()=${xpathLiteral(buttonText)}]`);
+  const selector = By.xpath(`//section[@aria-label='Automation endpoint']//div[@aria-label='Automation endpoint actions']//button[normalize-space()=${xpathLiteral(buttonText)}]`);
   const button = await waitForVisibleElement(driver, selector, runtime, `${buttonText} Automation API button`, { step: phase });
   try {
     if (!(await button.isEnabled())) {
@@ -467,10 +467,10 @@ async function clickAutomationApiButton(driver, runtime, buttonText, phase) {
 }
 
 async function assertCopyTokenDisabledBeforeStart(driver, runtime) {
-  const selector = By.xpath("//section[@aria-label='Automation API lifecycle controls']//button[normalize-space()='Copy token']");
-  const button = await waitForVisibleElement(driver, selector, runtime, "Copy token button", { step: "packaged-token-copy-disabled" });
+  const selector = By.xpath("//section[@aria-label='Automation endpoint']//button[normalize-space()='Copy access token']");
+  const button = await waitForVisibleElement(driver, selector, runtime, "Copy access token button", { step: "packaged-token-copy-disabled" });
   const enabled = await button.isEnabled();
-  assert(!enabled, "Automation API Copy token button was enabled before the API started.", {
+  assert(!enabled, "Automation API copy access token button was enabled before the API started.", {
     code: "S05_COPY_ENABLED_BEFORE_START",
     phase: "packaged-token-copy-disabled",
   });
@@ -479,7 +479,9 @@ async function assertCopyTokenDisabledBeforeStart(driver, runtime) {
 
 export function validateAutomationApiStatusMetrics(metrics = {}, { phase = "packaged-api-status" } = {}) {
   const lifecycle = String(metrics.lifecycle ?? "").trim();
-  assert(lifecycle === "running · running", "Automation API UI lifecycle metric did not report running.", {
+  // The page says "Running" rather than repeating the sidecar's two-part
+  // lifecycle string; the assertion is still that the UI claims it is up.
+  assert(lifecycle === "Running", "Automation API UI lifecycle metric did not report running.", {
     code: "S05_API_LIFECYCLE_NOT_RUNNING",
     phase,
     lifecycleObserved: lifecycle ? "present" : "missing",
@@ -513,11 +515,11 @@ async function waitForAutomationApiRunningMetrics(driver, runtime, { timeoutMs =
   let lastMetrics = null;
   while (Date.now() - started < timeoutMs) {
     lastMetrics = {
-      lifecycle: await readMetricValue(driver, "Automation API safe status", "Lifecycle phase"),
-      loopbackUrl: await readMetricValue(driver, "Automation API safe status", "Loopback URL"),
-      port: await readMetricValue(driver, "Automation API safe status", "Port"),
-      scope: await readMetricValue(driver, "Automation API safe status", "Scope"),
-      copyAvailable: await readMetricValue(driver, "Automation API safe status", "Copy available"),
+      lifecycle: await readMetricValue(driver, "Automation endpoint status", "State"),
+      loopbackUrl: await readMetricValue(driver, "Automation endpoint status", "Address"),
+      port: await readMetricValue(driver, "Automation endpoint status", "Address"),
+      scope: await readMetricValue(driver, "Automation endpoint status", "Reachable from"),
+      copyAvailable: await readMetricValue(driver, "Automation endpoint status", "State"),
     };
     try {
       const metrics = validateAutomationApiStatusMetrics(lastMetrics);
@@ -620,7 +622,7 @@ export async function clearPrivateClipboardCapture(driver) {
 
 async function captureTokenThroughPrivateCopyFlow(driver, runtime, tracker) {
   await installPrivateClipboardCapture(driver);
-  await clickAutomationApiButton(driver, runtime, "Copy token", "packaged-token-copy-private");
+  await clickAutomationApiButton(driver, runtime, "Copy access token", "packaged-token-copy-private");
   const copiedToken = await readPrivateClipboardToken(driver);
   tracker.update({ token: copiedToken, copiedToken });
   try {
@@ -1697,10 +1699,10 @@ export function assertS05PostSmokeDiagnostics({ rootDir = ROOT_DIR, smokeContext
 }
 
 async function stopAutomationApiThroughUi(driver, runtime, port, { waitForListener = false } = {}) {
-  await clickAutomationApiButton(driver, runtime, "Stop API", "packaged-api-stop");
+  await clickAutomationApiButton(driver, runtime, "Stop", "packaged-api-stop");
   const stopped = await pollForValue(driver, runtime, "Automation API stopped UI metrics", async () => {
-    const lifecycle = await readMetricValue(driver, "Automation API safe status", "Lifecycle phase");
-    const copyAvailable = await readMetricValue(driver, "Automation API safe status", "Copy available");
+    const lifecycle = await readMetricValue(driver, "Automation endpoint status", "State");
+    const copyAvailable = await readMetricValue(driver, "Automation endpoint status", "State");
     if (lifecycle === "stopped · stopped" && copyAvailable === "no") {
       return { lifecycle: "stopped", copyAvailable: false };
     }
@@ -1806,7 +1808,7 @@ async function runPackagedLifecycleProof({ rootDir, proof, tracker, fullRuntime 
     }), getContext);
     ui.proxyConfigured = true;
 
-    await runStepAsync("packaged-api-start", async () => clickAutomationApiButton(driver, runtime, "Start API", "packaged-api-start"), getContext);
+    await runStepAsync("packaged-api-start", async () => clickAutomationApiButton(driver, runtime, "Start", "packaged-api-start"), getContext);
     apiStarted = true;
     ui.apiStarted = true;
     api.started = true;
