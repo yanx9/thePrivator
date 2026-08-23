@@ -12,10 +12,10 @@ import pytest
 from theprivator_sidecar.identity import IDENTITY_VERSION
 from theprivator_sidecar.profiles import STORE_VERSION
 
-from theprivator import __version__ as app_version
+from theprivator_sidecar import __version__ as app_version
 from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SENTINEL_USERNAME = "proxy-user-sentinel-e2e33f73"
 SENTINEL_PASSWORD = "proxy-password-sentinel-74d86415"
 SENTINEL_VALUES = (SENTINEL_USERNAME, SENTINEL_PASSWORD)
@@ -2177,7 +2177,7 @@ def test_no_source_file_is_hidden_from_git_by_an_ignore_rule():
     name, not just the one at the root. A bare "profiles/" once matched
     src/features/profiles and kept an entire feature out of a commit -- the code
     was on disk, the tests passed, and the commit did not build."""
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     tracked_roots = ["src", "theprivator_sidecar", "src-tauri/src", "scripts"]
 
     candidates: list[str] = []

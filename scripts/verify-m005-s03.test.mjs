@@ -43,8 +43,8 @@ function seedS03Root({ packageScript = "node scripts/verify-m005-s03.mjs", readm
   for (const path of [
     "scripts/verify-m005-s03.mjs",
     "scripts/verify-m005-s03.test.mjs",
-    "theprivator/tests/test_profile_package.py",
-    "theprivator/tests/test_diagnostics.py",
+    "tests/test_profile_package.py",
+    "tests/test_diagnostics.py",
     "src/sidecar/client.test.ts",
     "src/App.test.tsx",
   ]) {

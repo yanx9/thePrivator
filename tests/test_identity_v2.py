@@ -24,7 +24,7 @@ from theprivator_sidecar.identity import (
 from theprivator_sidecar.identity_runtime import build_identity_runtime_plan
 from theprivator_sidecar.protocol import IDENTITY_INVALID, IDENTITY_UNSUPPORTED_MODE, SidecarError
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 V2_SURFACES = ("geolocation", "mediaDevices", "ports")
 

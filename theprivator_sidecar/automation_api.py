@@ -1783,12 +1783,7 @@ def _utc_now_iso() -> str:
 
 
 def _product_version() -> str:
-    try:
-        from theprivator import __version__
-
-        return __version__
-    except Exception:
-        return "unknown"
+    return SIDECAR_VERSION
 
 
 def _elapsed_ms(started: float) -> float:

@@ -756,9 +756,12 @@ def health_status() -> JsonObject:
 
 
 def _product_version() -> str:
-    from theprivator import __version__
+    """The version reported to the UI.
 
-    return __version__
+    It used to come from the desktop GUI package, which no longer exists. The
+    sidecar's own version is the honest answer: it is the thing answering.
+    """
+    return SIDECAR_VERSION
 
 
 def _elapsed_ms(started: float) -> float:

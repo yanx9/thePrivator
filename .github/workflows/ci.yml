@@ -60,17 +60,11 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -e .
 
-      # theprivator/tests/ holds the sidecar suite, including the byte-level
-      # redaction contract in test_sidecar_contract.py. The legacy customtkinter
-      # GUI tests in the same directory are excluded: the sidecar imports nothing
-      # from that package and those tests need a display and a Chromium binary.
+      # tests/ holds the whole sidecar suite, including the byte-level redaction
+      # contract in test_sidecar_contract.py. There is nothing to exclude any
+      # more: the customtkinter GUI package those exclusions covered is gone.
       - name: Sidecar tests
-        run: >
-          python -m pytest theprivator/tests/
-          --ignore=theprivator/tests/test_chromium_launcher.py
-          --ignore=theprivator/tests/test_profile_manager.py
-          --ignore=theprivator/tests/test_validators.py
-          -q
+        run: python -m pytest tests/ -q
 
   tauri:
     name: Rust bridge

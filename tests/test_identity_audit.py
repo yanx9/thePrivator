@@ -275,7 +275,7 @@ def test_open_audit_page_for_profile_unknown_page_id_is_typed_and_does_not_open(
 # client's reject list by reading that list out of client.ts, so the two cannot
 # drift apart silently again.
 
-CLIENT_SOURCE = Path(__file__).resolve().parents[2] / "src" / "sidecar" / "client.ts"
+CLIENT_SOURCE = Path(__file__).resolve().parents[1] / "src" / "sidecar" / "client.ts"
 
 
 def client_audit_reject_markers() -> list[str]:

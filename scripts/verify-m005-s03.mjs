@@ -49,8 +49,8 @@ const S03_SOURCE_GUARD_FILES = Object.freeze([
   "scripts/verify-m005-s03.test.mjs",
   "package.json",
   "README.md",
-  "theprivator/tests/test_profile_package.py",
-  "theprivator/tests/test_diagnostics.py",
+  "tests/test_profile_package.py",
+  "tests/test_diagnostics.py",
   "src/sidecar/client.test.ts",
   "src/App.test.tsx",
 ]);
@@ -635,7 +635,7 @@ export function runFullVerification({ rootDir = ROOT_DIR } = {}) {
   resetState();
   const context = createM005S03PublicScanContext({ rootDir });
   const commands = {};
-  runCommandStep("python.package-diagnostics-tests", PYTHON, ["-m", "pytest", "theprivator/tests/test_profile_package.py", "theprivator/tests/test_diagnostics.py", "-q"], 300_000, { rootDir, context }); commands.pythonPackageDiagnostics = "pass";
+  runCommandStep("python.package-diagnostics-tests", PYTHON, ["-m", "pytest", "tests/test_profile_package.py", "tests/test_diagnostics.py", "-q"], 300_000, { rootDir, context }); commands.pythonPackageDiagnostics = "pass";
   runCommandStep("rust.profile-package-command-tests", "cargo", ["test", "--manifest-path", "src-tauri/Cargo.toml", "profile_package"], 240_000, { rootDir, context }); commands.rustPackageCommandTests = "pass";
   runCommandStep("node.focused-vitest", "npm", ["test", "--", "--run", ...FOCUSED_VITEST_FILES], 180_000, { rootDir, context }); commands.focusedVitest = "pass";
   runCommandStep("frontend.typecheck-build", "npm", ["run", "build"], 180_000, { rootDir, context }); commands.frontendBuild = "pass";
