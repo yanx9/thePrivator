@@ -10,6 +10,12 @@ export const SUPPORTED_AUDIT_SURFACES = [
   "webgl",
   "audio",
   "webrtc",
+  // Added with identity v2. This list is what makes the guidance appear at all,
+  // so a surface missing from it silently produces an audit page with nothing
+  // to compare against -- which is how this whole module went unused.
+  "geolocation",
+  "mediaDevices",
+  "ports",
 ] as const;
 
 export type IdentityAuditSurface = (typeof SUPPORTED_AUDIT_SURFACES)[number];
@@ -133,6 +139,60 @@ export function validateIdentityAuditPage(page: unknown): IdentityAuditPage {
 
 function expectedRowsForSurface(identity: ProfileIdentity, surface: IdentityAuditSurface): IdentityAuditExpectedRow[] {
   switch (surface) {
+    case "geolocation": {
+      if (identity.geolocation.mode === "real") {
+        return [
+          row(
+            surface,
+            "Geolocation",
+            "The real device position, if the browser is allowed to report one.",
+            "A page that reports a position far from the proxy's exit country is a mismatch worth fixing.",
+          ),
+        ];
+      }
+      const { latitude, longitude, accuracy, permission } = identity.geolocation;
+      return [
+        row(
+          surface,
+          "Geolocation",
+          `${latitude}, ${longitude} within ${accuracy} m; permission ${permission}`,
+          "Coordinates are rounded to six decimals on purpose: more precision is itself identifying.",
+        ),
+      ];
+    }
+    case "mediaDevices": {
+      if (identity.mediaDevices.mode === "real") {
+        return [row(surface, "Media devices", "The real cameras and microphones.", "Compare the count, not the labels: labels stay empty without permission.")];
+      }
+      if (identity.mediaDevices.mode === "masked") {
+        return [row(surface, "Media devices", "A stable but synthetic device list.", "Device ids should stay the same across reloads of the same profile.")];
+      }
+      const { videoInputs, audioInputs, audioOutputs } = identity.mediaDevices;
+      return [
+        row(
+          surface,
+          "Media devices",
+          `${videoInputs} cameras, ${audioInputs} microphones, ${audioOutputs} speakers`,
+          "Non-empty labels without a permission prompt would be a signal in themselves.",
+        ),
+      ];
+    }
+    case "ports": {
+      if (identity.ports.mode === "real") {
+        return [row(surface, "Port scanning", "Nothing is blocked.", "A page that scans localhost will reach whatever is listening.")];
+      }
+      if (identity.ports.mode === "masked") {
+        return [row(surface, "Port scanning", "Requests to local ports are refused.", "Only pages outside loopback are affected; local proof pages still work.")];
+      }
+      return [
+        row(
+          surface,
+          "Port scanning",
+          `Only ${identity.ports.allowedPorts.join(", ") || "no"} local ports reachable`,
+          "Anything not listed should fail to connect rather than time out.",
+        ),
+      ];
+    }
     case "browser": {
       if (identity.browser.mode === "real") {
         return [row(surface, "Browser", "Real host browser values.", "Compare against the host Chromium values shown by local proof and the public page.")];

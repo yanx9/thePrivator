@@ -329,7 +329,7 @@ export function ProfileEditor({ profileId, running: runningProp, onClose, onSave
             onChange={(launch) => setDraft((current) => ({ ...current, launch }))}
           />
         ) : (
-          <ProfileTools profileId={profile?.id ?? null} running={running} />
+          <ProfileTools profileId={profile?.id ?? null} running={running} identity={profile?.identity} />
         )}
       </div>
     </div>

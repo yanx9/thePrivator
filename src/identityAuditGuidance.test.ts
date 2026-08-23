@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildIdentityAuditGuidance } from "./identityAuditGuidance";
+
+import { IDENTITY_SURFACE_ORDER } from "./identityControls";
+import { buildIdentityAuditGuidance, SUPPORTED_AUDIT_SURFACES } from "./identityAuditGuidance";
 import type { IdentityAuditPage } from "./identityAuditGuidance";
 import type { ProfileIdentity } from "./sidecar/types";
 
@@ -162,5 +164,46 @@ describe("identity audit guidance", () => {
       expect(combined).not.toContain(marker);
     }
     expect(combined).toContain("[redacted]");
+  });
+});
+
+describe("guidance covers the identity it describes", () => {
+  /**
+   * The gap that made this module dead code.
+   *
+   * Identity v2 added geolocation, media devices and port protection, and this
+   * list was never extended -- so an audit page naming one of them produced no
+   * expected rows at all, and the page was a stranger's numbers with nothing to
+   * compare against. This fails the moment a surface is added on one side only.
+   */
+  it("has an audit surface for every identity surface it can describe", () => {
+    const described = new Set<string>(SUPPORTED_AUDIT_SURFACES);
+    // clientHints is a view onto the browser surface rather than one of its own.
+    const identitySurfaces = IDENTITY_SURFACE_ORDER.filter((surface) => surface !== "browser");
+
+    const missing = identitySurfaces.filter((surface) => !described.has(surface));
+
+    expect(missing, `no audit guidance for: ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("produces an expected row for every surface, in every mode", () => {
+    // A surface listed but silently returning nothing is the same failure with
+    // an extra step.
+    for (const surface of SUPPORTED_AUDIT_SURFACES) {
+      const page = {
+        id: "probe-page",
+        label: "Probe",
+        category: "browserleaks",
+        url: "https://example.test/probe",
+        surfaces: [surface],
+        comparisonNote: "Compare what the page reports.",
+      };
+      const rows = buildIdentityAuditGuidance(identity(), page).expectedRows;
+      expect(rows.length, `${surface} produced no expected rows`).toBeGreaterThan(0);
+      for (const entry of rows) {
+        expect(entry.expected.trim().length, `${surface} expected text`).toBeGreaterThan(0);
+        expect(entry.guidance.trim().length, `${surface} guidance text`).toBeGreaterThan(0);
+      }
+    }
   });
 });

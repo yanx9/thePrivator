@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { pickFile, pickSaveTarget } from "../../dialogs";
+import { buildIdentityAuditGuidance } from "../../identityAuditGuidance";
 import {
   checkProfileProxy,
   collectIdentityAuditResults,
@@ -15,6 +16,7 @@ import type {
   CookieExportFormat,
   IdentityAuditCollectResult,
   IdentityAuditPlanResult,
+  ProfileIdentity,
   ProxyCheckResult,
 } from "../../sidecar/types";
 import styles from "./ProfileEditor.module.css";
@@ -22,6 +24,8 @@ import styles from "./ProfileEditor.module.css";
 interface ProfileToolsProps {
   profileId: string | null;
   running: boolean;
+  /** The saved identity, so the audit can say what each page should report. */
+  identity?: ProfileIdentity;
 }
 
 type Note = { tone: "ok" | "warn"; text: string };
@@ -55,6 +59,8 @@ export function ProxyCheckSummary({ result }: { result: ProxyCheckResult }) {
 interface AuditPageListProps {
   pages: IdentityAuditPlanResult["pages"];
   disabled: boolean;
+  /** The identity to compare against; omitted while a draft is unsaved. */
+  identity?: ProfileIdentity;
   onOpen: (pageId: string) => void;
 }
 
@@ -66,22 +72,48 @@ interface AuditPageListProps {
  * A "needs user action" row with nothing to press tells someone that something
  * is required of them and then gives them no way to do it.
  */
-export function AuditPageList({ pages, disabled, onOpen }: AuditPageListProps) {
+export function AuditPageList({ pages, disabled, identity, onOpen }: AuditPageListProps) {
   return (
     <ul className={styles.auditList} aria-label="Audit pages">
-      {pages.map((page) => (
-        <li key={page.id}>
-          <div>
-            <strong>{page.label}</strong>
-            <span className={styles.hint}>{page.comparisonNote}</span>
-          </div>
-          <button type="button" disabled={disabled} onClick={() => onOpen(page.id)}>
-            {page.requiresUserAction ? "Open and finish by hand" : "Open"}
-          </button>
-        </li>
-      ))}
+      {pages.map((page) => {
+        // What this profile *should* report on that page. Without it the user is
+        // looking at a stranger's numbers with nothing to compare them to, which
+        // is most of the work an audit is supposed to save them.
+        const expected = identity === undefined ? [] : expectedRowsFor(identity, page);
+        return (
+          <li key={page.id}>
+            <div>
+              <strong>{page.label}</strong>
+              <span className={styles.hint}>{page.comparisonNote}</span>
+              {expected.length > 0 ? (
+                <span className={styles.hint}>
+                  Expect: {expected.map((row) => `${row.label} ${row.expected}`).join(" · ")}
+                </span>
+              ) : null}
+            </div>
+            <button type="button" disabled={disabled} onClick={() => onOpen(page.id)}>
+              {page.requiresUserAction ? "Open and finish by hand" : "Open"}
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
+}
+
+/**
+ * The expected rows, or none.
+ *
+ * The guidance builder validates the page it is handed and throws on anything it
+ * does not recognise. A page this build has no guidance for is not a reason to
+ * hide the page -- the user can still open it and read it themselves.
+ */
+function expectedRowsFor(identity: ProfileIdentity, page: IdentityAuditPlanResult["pages"][number]) {
+  try {
+    return buildIdentityAuditGuidance(identity, page).expectedRows;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -92,7 +124,7 @@ export function AuditPageList({ pages, disabled, onOpen }: AuditPageListProps) {
  * whose browser is running copies a database mid-write, and checking a proxy
  * needs a browser to check it through.
  */
-export function ProfileTools({ profileId, running }: ProfileToolsProps) {
+export function ProfileTools({ profileId, running, identity }: ProfileToolsProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<Note | null>(null);
@@ -263,7 +295,12 @@ export function ProfileTools({ profileId, running }: ProfileToolsProps) {
         </div>
 
         {auditPlan !== null ? (
-          <AuditPageList pages={auditPlan.pages} disabled={busy !== null} onOpen={openPage} />
+          <AuditPageList
+            pages={auditPlan.pages}
+            disabled={busy !== null}
+            identity={identity}
+            onOpen={openPage}
+          />
         ) : null}
 
         {auditResults !== null ? (
