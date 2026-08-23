@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from theprivator_sidecar.identity import IDENTITY_VERSION
 from theprivator_sidecar.profiles import STORE_VERSION
 
 from theprivator import __version__ as app_version
@@ -814,7 +815,7 @@ def test_identity_commands_list_validate_apply_update_and_reload_with_redacted_d
     presets_response = parse_ndjson(presets_proc.stdout)[0]
     assert presets_response["ok"] is True
     presets_result = presets_response["result"]
-    assert presets_result["identityVersion"] == 1
+    assert presets_result["identityVersion"] == IDENTITY_VERSION
     assert presets_result["count"] == len(presets_result["presets"])
     preset_ids = [preset["presetId"] for preset in presets_result["presets"]]
     assert preset_ids == sorted(preset_ids)

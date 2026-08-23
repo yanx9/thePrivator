@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, IDENTITY_VERSION, curated_preset
 from theprivator_sidecar.proxy import (
     CREDENTIAL_STATE_CONFIGURED,
     CREDENTIAL_STATE_NONE,
@@ -55,7 +55,7 @@ def profile_names(result):
 
 def assert_default_identity(profile: Mapping[str, Any]) -> None:
     assert profile["identity"] == DEFAULT_REAL_IDENTITY
-    assert profile["identity"]["identityVersion"] == 1
+    assert profile["identity"]["identityVersion"] == IDENTITY_VERSION
 
 
 def assert_public_direct_proxy(profile: Mapping[str, Any]) -> None:

@@ -10,7 +10,7 @@ from typing import Any, Mapping, Optional
 from .identity import IDENTITY_VERSION, normalize_identity
 from .protocol import IDENTITY_CDP_FAILED, JsonObject, SidecarError
 
-RUNTIME_PLAN_SCHEMA_VERSION = 1
+RUNTIME_PLAN_SCHEMA_VERSION = 2
 WEBRTC_DISABLE_NON_PROXIED_UDP_FLAG = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
 
 
@@ -130,9 +130,57 @@ def _build_extension_config(identity: Mapping[str, Any]) -> JsonObject:
     if webrtc.get("policy") != "real":
         config["webrtc"] = {"policy": webrtc["policy"]}
 
+    geolocation = identity["geolocation"]
+    if geolocation.get("mode") != "real" or geolocation.get("permission") != "prompt":
+        geolocation_config: JsonObject = {"permission": geolocation.get("permission", "prompt")}
+        if geolocation.get("mode") == "custom":
+            geolocation_config.update(
+                {
+                    "latitude": geolocation["latitude"],
+                    "longitude": geolocation["longitude"],
+                    "accuracy": geolocation["accuracy"],
+                    "altitude": geolocation.get("altitude"),
+                }
+            )
+        config["geolocation"] = geolocation_config
+
+    media = identity["mediaDevices"]
+    if media.get("mode") != "real":
+        config["mediaDevices"] = _media_device_config(media)
+
+    ports = identity["ports"]
+    if ports.get("mode") != "real":
+        config["ports"] = {
+            "mode": ports["mode"],
+            "allowedPorts": list(ports.get("allowedPorts", [])),
+        }
+
     if not config:
         return {}
     return {"schemaVersion": RUNTIME_PLAN_SCHEMA_VERSION, **config}
+
+
+def _media_device_config(media: Mapping[str, Any]) -> JsonObject:
+    """Device counts plus the seed the page-side ids derive from.
+
+    Masked mode derives its counts from the seed so a profile keeps the same
+    hardware across sessions. A device list that changes on every launch is a
+    stronger signal than an unusual one that stays put.
+    """
+    if media.get("mode") == "masked":
+        seed = int(media.get("noiseSeed", 0))
+        return {
+            "seed": seed,
+            "videoInputs": seed % 2,
+            "audioInputs": 1 + (seed // 2) % 2,
+            "audioOutputs": 1 + (seed // 4) % 2,
+        }
+    return {
+        "seed": 0,
+        "videoInputs": media["videoInputs"],
+        "audioInputs": media["audioInputs"],
+        "audioOutputs": media["audioOutputs"],
+    }
 
 
 def _build_cdp_overrides(identity: Mapping[str, Any]) -> JsonObject:
@@ -166,6 +214,14 @@ def _build_cdp_overrides(identity: Mapping[str, Any]) -> JsonObject:
             "mobile": _identity_mobile(identity),
             "screenWidth": screen["width"],
             "screenHeight": screen["height"],
+        }
+
+    geolocation = identity["geolocation"]
+    if geolocation.get("mode") == "custom":
+        overrides["geolocation"] = {
+            "latitude": geolocation["latitude"],
+            "longitude": geolocation["longitude"],
+            "accuracy": geolocation["accuracy"],
         }
 
     return overrides

@@ -546,6 +546,16 @@ def apply_identity_cdp_overrides(
                 raise _cdp_error()
             set_locale_override(client, locale, timeout_seconds=timeout_seconds)
             applied.append("locale")
+        if "geolocation" in overrides:
+            geolocation = _require_object(overrides["geolocation"])
+            set_geolocation_override(
+                client,
+                latitude=geolocation.get("latitude"),
+                longitude=geolocation.get("longitude"),
+                accuracy=geolocation.get("accuracy"),
+                timeout_seconds=timeout_seconds,
+            )
+            applied.append("geolocation")
 
     return {"applied": applied}
 
@@ -604,6 +614,43 @@ def set_locale_override(
         {"locale": locale},
         timeout_seconds=timeout_seconds,
     )
+
+
+def set_geolocation_override(
+    client: CdpClient,
+    *,
+    latitude: float,
+    longitude: float,
+    accuracy: int,
+    timeout_seconds: Optional[float] = None,
+) -> JsonObject:
+    """Pin the position the browser reports.
+
+    Applied alongside the extension rather than instead of it: this covers
+    automation clients driving the same browser over CDP, while the extension is
+    what makes the three permission modes behave consistently in the page.
+    """
+    for value, label in ((latitude, "latitude"), (longitude, "longitude")):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _cdp_error()
+        del label
+    if isinstance(accuracy, bool) or not isinstance(accuracy, int) or accuracy < 1:
+        raise _cdp_error()
+    return client.command(
+        "Emulation.setGeolocationOverride",
+        {"latitude": float(latitude), "longitude": float(longitude), "accuracy": accuracy},
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def clear_geolocation_override(
+    client: CdpClient,
+    *,
+    timeout_seconds: Optional[float] = None,
+) -> JsonObject:
+    """Restore the real position. Emulation.setGeolocationOverride with no
+    parameters is the documented way to clear it."""
+    return client.command("Emulation.setGeolocationOverride", {}, timeout_seconds=timeout_seconds)
 
 
 def page_navigate(
@@ -810,6 +857,8 @@ __all__ = [
     "read_devtools_active_port",
     "runtime_evaluate",
     "set_device_metrics_override",
+    "set_geolocation_override",
+    "clear_geolocation_override",
     "set_locale_override",
     "set_timezone_override",
     "set_user_agent_override",

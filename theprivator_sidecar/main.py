@@ -11,7 +11,14 @@ from typing import Any, Callable, Dict, Optional, Sequence, TextIO, Tuple
 
 from . import chromium, cookies, identity_audit, legacy_import, profile_package, proxy_check
 from .diagnostics import append_events
-from .identity import IDENTITY_PRESETS, IDENTITY_VERSION, curated_preset, validate_identity, warnings_for_identity
+from .identity import (
+    IDENTITY_PRESETS,
+    IDENTITY_VERSION,
+    curated_preset,
+    describe_surfaces,
+    validate_identity,
+    warnings_for_identity,
+)
 from .profiles import ProfileStore, require_string_param
 from .proxy import PROXY_VERSION, public_proxy_summary
 from .protocol import (
@@ -222,6 +229,8 @@ def dispatch_identity_request(request: SidecarRequest) -> JsonObject:
                 "count": len(presets),
             }
 
+        if request.method == "identity.surfaces.describe":
+            return describe_surfaces()
         if request.method == "identity.validate":
             normalized = validate_identity(request.params.get("identity"))
             return {

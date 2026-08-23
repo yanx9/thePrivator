@@ -399,7 +399,7 @@ def test_import_profile_package_validates_then_creates_copy_and_restores_payload
     assert imported_profile["metadata"] == {
         "source": "profile-package",
         "format": PACKAGE_FORMAT,
-        "formatVersion": "1",
+        "formatVersion": str(PACKAGE_VERSION),
         "originalName": "Research",
         "hasUserData": True,
     }

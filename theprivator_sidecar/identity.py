@@ -22,7 +22,11 @@ from .protocol import (
     SidecarError,
 )
 
-IDENTITY_VERSION = 1
+IDENTITY_VERSION = 2
+# v1 identities are upgraded in place on read rather than rejected. Every stored
+# profile predates the new surfaces, so refusing them would make the app
+# unreadable after an update; the new surfaces start inert instead.
+SUPPORTED_IDENTITY_VERSIONS = frozenset({1, IDENTITY_VERSION})
 MAX_LABEL_LENGTH = 128
 MAX_STRING_LENGTH = 512
 MAX_SHORT_STRING_LENGTH = 80
@@ -32,6 +36,18 @@ MAX_NOISE_SEED = 1_000_000
 MAX_SCREEN_DIMENSION = 10_000
 MAX_HARDWARE_CONCURRENCY = 128
 MAX_DEVICE_MEMORY = 128
+MAX_GEOLOCATION_ACCURACY_METERS = 100_000
+MIN_GEOLOCATION_ACCURACY_METERS = 1
+MAX_ALTITUDE_METERS = 100_000
+MIN_ALTITUDE_METERS = -1_000
+# Coordinates are rounded because precision is itself a fingerprint: a real
+# device reports a handful of decimals, and seventeen significant digits marks a
+# profile out more clearly than a wrong city would.
+GEOLOCATION_COORDINATE_DECIMALS = 6
+MAX_MEDIA_VIDEO_INPUTS = 1
+MAX_MEDIA_AUDIO_INPUTS = 4
+MAX_MEDIA_AUDIO_OUTPUTS = 4
+MAX_ALLOWED_PORTS = 50
 
 SUPPORTED_MODES_BY_SURFACE: Dict[str, Set[str]] = {
     "browser": {"real", "masked", "custom"},
@@ -42,12 +58,22 @@ SUPPORTED_MODES_BY_SURFACE: Dict[str, Set[str]] = {
     "audio": {"real", "noise"},
     "webgl": {"real", "masked", "custom"},
     "webrtc": {"real", "masked", "custom"},
+    # No "masked" for geolocation. In other products that means "derive it from
+    # the proxy exit", which needs a geo-IP lookup inside the launch budget on
+    # every start -- leaking the exit to a third party to hide it from the page.
+    # The UI offers "fill from the last proxy check" instead, which uses a result
+    # the user already asked for.
+    "geolocation": {"real", "custom"},
+    "mediaDevices": {"real", "masked", "custom"},
+    "ports": {"real", "masked", "custom"},
 }
 
 REQUIRED_SURFACES = tuple(SUPPORTED_MODES_BY_SURFACE.keys())
 _ROOT_FIELDS = {"identityVersion", "label", "presetId", *REQUIRED_SURFACES}
+_SURFACES_ADDED_IN_V2 = frozenset({"geolocation", "mediaDevices", "ports"})
 _CLIENT_HINT_FIELDS = {"platform", "platformVersion", "architecture", "mobile", "bitness", "model"}
 _WEBRTC_POLICIES = {"real", "disableNonProxiedUdp", "block"}
+_GEOLOCATION_PERMISSIONS = {"prompt", "allow", "block"}
 _COMMON_DESKTOP_PLATFORMS = {"Win32", "MacIntel", "Linux x86_64"}
 _COMMON_CPU_COUNTS = {1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 64}
 _COMMON_DEVICE_MEMORY = {2, 4, 8, 16, 32, 64}
@@ -80,6 +106,9 @@ DEFAULT_REAL_IDENTITY: JsonObject = {
     "audio": {"mode": "real"},
     "webgl": {"mode": "real"},
     "webrtc": {"mode": "real", "policy": "real"},
+    "geolocation": {"mode": "real", "permission": "prompt"},
+    "mediaDevices": {"mode": "real"},
+    "ports": {"mode": "real"},
 }
 
 
@@ -134,6 +163,12 @@ CURATED_PRESETS: Dict[str, JsonObject] = {
             "noiseSeed": 120012,
         },
         "webrtc": {"mode": "masked", "policy": "disableNonProxiedUdp"},
+        # The new v2 surfaces start inert in every curated preset. They are
+        # validated at import time and must be warning-free, so a hardened default
+        # here would fail the whole module rather than the one preset.
+        "geolocation": {"mode": "real", "permission": "prompt"},
+        "mediaDevices": {"mode": "real"},
+        "ports": {"mode": "real"},
     },
     "windows-11-chrome-121": {
         "identityVersion": IDENTITY_VERSION,
@@ -183,6 +218,12 @@ CURATED_PRESETS: Dict[str, JsonObject] = {
             "noiseSeed": 121012,
         },
         "webrtc": {"mode": "masked", "policy": "disableNonProxiedUdp"},
+        # The new v2 surfaces start inert in every curated preset. They are
+        # validated at import time and must be warning-free, so a hardened default
+        # here would fail the whole module rather than the one preset.
+        "geolocation": {"mode": "real", "permission": "prompt"},
+        "mediaDevices": {"mode": "real"},
+        "ports": {"mode": "real"},
     },
     "macos-ventura-chrome-120": {
         "identityVersion": IDENTITY_VERSION,
@@ -232,6 +273,12 @@ CURATED_PRESETS: Dict[str, JsonObject] = {
             "noiseSeed": 120022,
         },
         "webrtc": {"mode": "masked", "policy": "disableNonProxiedUdp"},
+        # The new v2 surfaces start inert in every curated preset. They are
+        # validated at import time and must be warning-free, so a hardened default
+        # here would fail the whole module rather than the one preset.
+        "geolocation": {"mode": "real", "permission": "prompt"},
+        "mediaDevices": {"mode": "real"},
+        "ports": {"mode": "real"},
     },
     "ubuntu-linux-chrome-120": {
         "identityVersion": IDENTITY_VERSION,
@@ -281,6 +328,12 @@ CURATED_PRESETS: Dict[str, JsonObject] = {
             "noiseSeed": 120032,
         },
         "webrtc": {"mode": "masked", "policy": "disableNonProxiedUdp"},
+        # The new v2 surfaces start inert in every curated preset. They are
+        # validated at import time and must be warning-free, so a hardened default
+        # here would fail the whole module rather than the one preset.
+        "geolocation": {"mode": "real", "permission": "prompt"},
+        "mediaDevices": {"mode": "real"},
+        "ports": {"mode": "real"},
     },
 }
 
@@ -345,6 +398,83 @@ def validate_curated_presets(
     return normalized
 
 
+def describe_surfaces() -> JsonObject:
+    """The identity contract, as data the UI can build a form from.
+
+    The frontend keeps its own descriptor table -- it needs labels, help text and
+    control kinds this module has no business owning. What it must not do is
+    disagree about which surfaces exist or what their bounds are, so it compares
+    itself against this and fails its own test when the two drift apart.
+    """
+    return {
+        "identityVersion": IDENTITY_VERSION,
+        "surfaces": [
+            {
+                "id": surface,
+                "modes": sorted(SUPPORTED_MODES_BY_SURFACE[surface]),
+                "fields": _describe_surface_fields(surface),
+            }
+            for surface in REQUIRED_SURFACES
+        ],
+    }
+
+
+def _describe_surface_fields(surface: str) -> list[JsonObject]:
+    def field(name: str, kind: str, **bounds: Any) -> JsonObject:
+        return {"name": name, "type": kind, **bounds}
+
+    if surface == "browser":
+        return [field("userAgent", "text", maxLength=MAX_STRING_LENGTH, required=True)]
+    if surface == "navigator":
+        return [
+            field("platform", "text", maxLength=MAX_SHORT_STRING_LENGTH, required=True),
+            field("hardwareConcurrency", "integer", min=1, max=MAX_HARDWARE_CONCURRENCY, required=True),
+            field("deviceMemory", "number", min=0.25, max=MAX_DEVICE_MEMORY, required=True),
+        ]
+    if surface == "screen":
+        return [
+            field(name, "integer", min=1, max=MAX_SCREEN_DIMENSION, required=True)
+            for name in ("width", "height", "viewportWidth", "viewportHeight")
+        ] + [
+            field("colorDepth", "integer", min=1, max=64, required=True),
+            field("pixelRatio", "number", min=0.25, max=8.0, required=True),
+        ]
+    if surface == "locale":
+        return [
+            field("locale", "text", maxLength=MAX_LANGUAGE_LENGTH, required=True),
+            field("languages", "list", maxItems=MAX_LANGUAGE_COUNT, required=True),
+            field("timezoneId", "text", maxLength=MAX_SHORT_STRING_LENGTH, required=True),
+        ]
+    if surface in {"canvas", "audio"}:
+        return [field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=True)]
+    if surface == "webgl":
+        return [
+            field("vendor", "text", maxLength=MAX_SHORT_STRING_LENGTH, required=True),
+            field("renderer", "text", maxLength=MAX_STRING_LENGTH, required=True),
+            field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=False),
+        ]
+    if surface == "webrtc":
+        return [field("policy", "enum", options=sorted(_WEBRTC_POLICIES), required=True)]
+    if surface == "geolocation":
+        return [
+            field("permission", "enum", options=sorted(_GEOLOCATION_PERMISSIONS), required=True),
+            field("latitude", "number", min=-90.0, max=90.0, required=True),
+            field("longitude", "number", min=-180.0, max=180.0, required=True),
+            field("accuracy", "integer", min=MIN_GEOLOCATION_ACCURACY_METERS, max=MAX_GEOLOCATION_ACCURACY_METERS, required=True),
+            field("altitude", "number", min=MIN_ALTITUDE_METERS, max=MAX_ALTITUDE_METERS, required=False),
+        ]
+    if surface == "mediaDevices":
+        return [
+            field("videoInputs", "integer", min=0, max=MAX_MEDIA_VIDEO_INPUTS, required=True),
+            field("audioInputs", "integer", min=1, max=MAX_MEDIA_AUDIO_INPUTS, required=True),
+            field("audioOutputs", "integer", min=1, max=MAX_MEDIA_AUDIO_OUTPUTS, required=True),
+            field("noiseSeed", "integer", min=0, max=MAX_NOISE_SEED, required=False),
+        ]
+    if surface == "ports":
+        return [field("allowedPorts", "list", maxItems=MAX_ALLOWED_PORTS, required=True)]
+    return []
+
+
 def _normalize_identity(identity: Any, *, preset_ids: Set[str]) -> JsonObject:
     if not isinstance(identity, Mapping):
         _raise_invalid("Identity payload must be a JSON object.")
@@ -354,8 +484,8 @@ def _normalize_identity(identity: Any, *, preset_ids: Set[str]) -> JsonObject:
         _raise_invalid("Identity payload contains unknown fields.")
 
     version = identity.get("identityVersion")
-    if type(version) is not int or version != IDENTITY_VERSION:
-        _raise_invalid("Identity version is required and must be 1.")
+    if type(version) is not int or version not in SUPPORTED_IDENTITY_VERSIONS:
+        _raise_invalid("Identity version is required and must be 1 or 2.")
 
     label = _require_string(identity.get("label"), "label", max_length=MAX_LABEL_LENGTH)
     preset_id = identity.get("presetId")
@@ -375,6 +505,11 @@ def _normalize_identity(identity: Any, *, preset_ids: Set[str]) -> JsonObject:
     }
     for surface in REQUIRED_SURFACES:
         if surface not in identity:
+            if version < IDENTITY_VERSION and surface in _SURFACES_ADDED_IN_V2:
+                # Absent because this identity predates the surface, not because
+                # it is malformed. Starting it inert leaves behaviour unchanged.
+                normalized[surface] = dict(DEFAULT_REAL_IDENTITY[surface])
+                continue
             _raise_invalid(f"Identity surface '{surface}' is required.")
         normalized[surface] = _normalize_surface(surface, identity[surface])
     return normalized
@@ -407,6 +542,12 @@ def _normalize_surface(surface: str, raw_surface: Any) -> JsonObject:
         return _normalize_webgl(raw_surface, mode)
     if surface == "webrtc":
         return _normalize_webrtc(raw_surface, mode)
+    if surface == "geolocation":
+        return _normalize_geolocation(raw_surface, mode)
+    if surface == "mediaDevices":
+        return _normalize_media_devices(raw_surface, mode)
+    if surface == "ports":
+        return _normalize_ports(raw_surface, mode)
 
     _raise_invalid("Identity payload contains an unknown surface.")
 
@@ -540,6 +681,105 @@ def _normalize_webrtc(raw_surface: Mapping[str, Any], mode: str) -> JsonObject:
     return {"mode": mode, "policy": policy}
 
 
+def _normalize_geolocation(raw_surface: Mapping[str, Any], mode: str) -> JsonObject:
+    """Validate the geolocation permission and, when custom, the fixed position.
+
+    The permission is present in both modes: a profile that reports its real
+    position still needs to say whether the page may ask for it, and "block"
+    with no coordinates is a perfectly ordinary configuration.
+    """
+    permission = raw_surface.get("permission", "prompt")
+    if permission not in _GEOLOCATION_PERMISSIONS:
+        _raise_invalid("Identity geolocation permission must be prompt, allow, or block.")
+
+    if mode == "real":
+        _ensure_keys(raw_surface, allowed={"mode", "permission"}, required={"mode", "permission"}, context="geolocation")
+        return {"mode": mode, "permission": permission}
+
+    _ensure_keys(
+        raw_surface,
+        allowed={"mode", "permission", "latitude", "longitude", "accuracy", "altitude"},
+        required={"mode", "latitude", "longitude", "accuracy"},
+        context="geolocation",
+    )
+    latitude = _require_rounded_coordinate(raw_surface.get("latitude"), "latitude", limit=90.0)
+    longitude = _require_rounded_coordinate(raw_surface.get("longitude"), "longitude", limit=180.0)
+    accuracy = _require_int(raw_surface.get("accuracy"), "geolocation.accuracy", min_value=MIN_GEOLOCATION_ACCURACY_METERS, max_value=MAX_GEOLOCATION_ACCURACY_METERS)
+    altitude = raw_surface.get("altitude")
+    if altitude is not None:
+        altitude = _require_rounded_number(
+            altitude,
+            "geolocation.altitude",
+            minimum=MIN_ALTITUDE_METERS,
+            maximum=MAX_ALTITUDE_METERS,
+        )
+    return {
+        "mode": mode,
+        "permission": permission,
+        "latitude": latitude,
+        "longitude": longitude,
+        "accuracy": accuracy,
+        "altitude": altitude,
+    }
+
+
+def _normalize_media_devices(raw_surface: Mapping[str, Any], mode: str) -> JsonObject:
+    if mode == "real":
+        _ensure_keys(raw_surface, allowed={"mode"}, required={"mode"}, context="mediaDevices")
+        return {"mode": mode}
+    if mode == "masked":
+        _ensure_keys(raw_surface, allowed={"mode", "noiseSeed"}, required={"mode", "noiseSeed"}, context="mediaDevices")
+        return {
+            "mode": mode,
+            "noiseSeed": _require_int(raw_surface.get("noiseSeed"), "mediaDevices.noiseSeed", min_value=0, max_value=MAX_NOISE_SEED
+            ),
+        }
+
+    _ensure_keys(raw_surface, allowed={"mode", "videoInputs", "audioInputs", "audioOutputs"}, required={"mode", "videoInputs", "audioInputs", "audioOutputs"}, context="mediaDevices")
+    video_inputs = _require_int(raw_surface.get("videoInputs"), "mediaDevices.videoInputs", min_value=0, max_value=MAX_MEDIA_VIDEO_INPUTS
+    )
+    audio_inputs = _require_int(raw_surface.get("audioInputs"), "mediaDevices.audioInputs", min_value=1, max_value=MAX_MEDIA_AUDIO_INPUTS
+    )
+    audio_outputs = _require_int(raw_surface.get("audioOutputs"), "mediaDevices.audioOutputs", min_value=1, max_value=MAX_MEDIA_AUDIO_OUTPUTS
+    )
+    return {
+        "mode": mode,
+        "videoInputs": video_inputs,
+        "audioInputs": audio_inputs,
+        "audioOutputs": audio_outputs,
+    }
+
+
+def _normalize_ports(raw_surface: Mapping[str, Any], mode: str) -> JsonObject:
+    if mode in {"real", "masked"}:
+        _ensure_keys(raw_surface, allowed={"mode"}, required={"mode"}, context="ports")
+        return {"mode": mode}
+
+    _ensure_keys(raw_surface, allowed={"mode", "allowedPorts"}, required={"mode", "allowedPorts"}, context="ports")
+    raw_ports = raw_surface.get("allowedPorts")
+    if not isinstance(raw_ports, list) or len(raw_ports) > MAX_ALLOWED_PORTS:
+        _raise_invalid(f"Identity ports.allowedPorts must be a list of at most {MAX_ALLOWED_PORTS} ports.")
+    ports: list[int] = []
+    for candidate in raw_ports:
+        port = _require_int(candidate, "ports.allowedPorts", min_value=1, max_value=65535)
+        if port not in ports:
+            ports.append(port)
+    return {"mode": mode, "allowedPorts": sorted(ports)}
+
+
+def _require_rounded_coordinate(value: Any, label: str, *, limit: float) -> float:
+    return _require_rounded_number(value, f"geolocation.{label}", minimum=-limit, maximum=limit)
+
+
+def _require_rounded_number(value: Any, label: str, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _raise_invalid(f"Identity {label} must be a number.")
+    number = float(value)
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        _raise_invalid(f"Identity {label} must be between {minimum} and {maximum}.")
+    return round(number, GEOLOCATION_COORDINATE_DECIMALS)
+
+
 def _warnings_for_normalized_identity(identity: Mapping[str, Any]) -> list[IdentityWarning]:
     warnings: list[IdentityWarning] = []
     browser = identity.get("browser", {})
@@ -624,8 +864,95 @@ def _warnings_for_normalized_identity(identity: Mapping[str, Any]) -> list[Ident
     _append_locale_warnings(warnings, locale)
     _append_noise_seed_warnings(warnings, identity)
     _append_webgl_os_warning(warnings, browser, navigator, webgl)
+    _append_cross_surface_warnings(warnings, identity)
 
     return warnings
+
+
+# Rough centre of each IANA region, used only to notice a configured position on
+# the wrong continent. Deliberately coarse: the point is to catch a profile
+# claiming Warsaw with a Los Angeles timezone, not to geocode.
+_REGION_CENTRES: Dict[str, tuple[float, float]] = {
+    "Africa": (0.0, 20.0),
+    "America": (10.0, -80.0),
+    "Antarctica": (-80.0, 0.0),
+    "Asia": (35.0, 100.0),
+    "Atlantic": (35.0, -30.0),
+    "Australia": (-25.0, 135.0),
+    "Europe": (50.0, 15.0),
+    "Indian": (-20.0, 75.0),
+    "Pacific": (-10.0, -160.0),
+}
+# Generous enough that a country on the edge of its region does not warn.
+_REGION_MATCH_DEGREES = 75.0
+
+
+def _append_cross_surface_warnings(warnings: list[IdentityWarning], identity: Mapping[str, Any]) -> None:
+    """Flag combinations that are individually valid but implausible together.
+
+    Masking is not monotonic. A profile claiming a Warsaw position with a Los
+    Angeles timezone, or a camera on a platform that reports none, is *more*
+    identifiable than one that masked nothing -- the inconsistency is itself the
+    signal. These are warnings rather than errors because the sidecar cannot know
+    the user's intent, only that the combination is unusual.
+    """
+    geolocation = identity.get("geolocation", {})
+    locale = identity.get("locale", {})
+    media = identity.get("mediaDevices", {})
+    ports = identity.get("ports", {})
+
+    if geolocation.get("mode") == "custom" and geolocation.get("permission") == "block":
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_GEOLOCATION_WITHOUT_PERMISSION",
+                message="A fixed position is configured but pages are blocked from reading it.",
+                surface="geolocation",
+                path="geolocation.permission",
+            )
+        )
+
+    if geolocation.get("mode") == "custom" and locale.get("mode") != "real":
+        region = str(locale.get("timezoneId", "")).split("/", 1)[0]
+        centre = _REGION_CENTRES.get(region)
+        if centre is not None:
+            latitude = float(geolocation.get("latitude", 0.0))
+            longitude = float(geolocation.get("longitude", 0.0))
+            if (
+                abs(latitude - centre[0]) > _REGION_MATCH_DEGREES
+                or abs(longitude - centre[1]) > _REGION_MATCH_DEGREES
+            ):
+                warnings.append(
+                    IdentityWarning(
+                        code="IDENTITY_GEOLOCATION_TIMEZONE_MISMATCH",
+                        message="The configured position is far from the region of the configured timezone.",
+                        surface="geolocation",
+                        path="geolocation.latitude",
+                    )
+                )
+
+    if media.get("mode") == "custom":
+        video = media.get("videoInputs", 0)
+        audio_in = media.get("audioInputs", 0)
+        if video > 0 and audio_in == 0:
+            warnings.append(
+                IdentityWarning(
+                    code="IDENTITY_MEDIA_DEVICES_UNUSUAL",
+                    message="A camera with no microphone is an unusual device combination.",
+                    surface="mediaDevices",
+                    path="mediaDevices.audioInputs",
+                )
+            )
+
+    allowed_ports = ports.get("allowedPorts")
+    if isinstance(allowed_ports, list) and len(allowed_ports) > 20:
+        warnings.append(
+            IdentityWarning(
+                code="IDENTITY_PORTS_ALLOWLIST_BROAD",
+                message="A large allowed-port list gives back much of what port masking hides.",
+                surface="ports",
+                path="ports.allowedPorts",
+            )
+        )
 
 
 def _append_client_hint_warnings(

@@ -48,7 +48,13 @@ from .protocol import (
 from .proxy import is_proxy_secret_key, normalize_proxy_config, public_proxy_summary
 
 PACKAGE_FORMAT = "theprivator.profile-package"
-PACKAGE_VERSION = 1
+# Bumped with identity v2: a package carrying a v2 identity while claiming
+# version 1 is a format that lies about its own contents.
+PACKAGE_VERSION = 2
+# Version 1 packages still import. Their identity is upgraded on read like any
+# other v1 identity, so refusing them would strand every package exported before
+# this release -- and a package is exactly the artifact a user keeps around.
+SUPPORTED_PACKAGE_VERSIONS = frozenset({1, PACKAGE_VERSION})
 PACKAGE_FILE_SUFFIX = ".tpkg"
 MANIFEST_MEMBER = "manifest.json"
 COOKIE_MEMBER = "cookies/theprivator-cookies.json"
@@ -641,7 +647,7 @@ def _validate_manifest(
     version = manifest.get("version")
     if isinstance(version, bool) or not isinstance(version, int):
         _raise_invalid_package()
-    if version != PACKAGE_VERSION:
+    if version not in SUPPORTED_PACKAGE_VERSIONS:
         raise PackageValidationError(
             code=PORTABILITY_PACKAGE_UNSUPPORTED_VERSION,
             message="Profile package version is not supported.",

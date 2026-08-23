@@ -29,6 +29,9 @@ _ALLOWED_TOP_LEVEL = {
     "audio",
     "webgl",
     "webrtc",
+    "geolocation",
+    "mediaDevices",
+    "ports",
 }
 _ALLOWED_NAVIGATOR = {"platform", "hardwareConcurrency", "deviceMemory", "userAgentData"}
 _ALLOWED_USER_AGENT_DATA = {
@@ -49,6 +52,9 @@ _ALLOWED_SCREEN = {"width", "height", "viewportWidth", "viewportHeight", "colorD
 _ALLOWED_NOISE = {"enabled", "noiseSeed"}
 _ALLOWED_WEBGL = {"enabled", "vendor", "renderer", "noiseSeed"}
 _ALLOWED_WEBRTC_POLICIES = {"disableNonProxiedUdp", "block"}
+_ALLOWED_GEOLOCATION = {"permission", "latitude", "longitude", "accuracy", "altitude"}
+_ALLOWED_MEDIA_DEVICES = {"seed", "videoInputs", "audioInputs", "audioOutputs"}
+_ALLOWED_PORTS = {"mode", "allowedPorts"}
 _FORBIDDEN_TEXT_MARKERS = (
     "DevToolsActivePort",
     "ws://",
@@ -167,7 +173,7 @@ def _validate_extension_config(config: Mapping[str, Any]) -> None:
     if not config:
         raise _extension_error()
     _ensure_keys(config, _ALLOWED_TOP_LEVEL)
-    if config.get("schemaVersion") != 1:
+    if config.get("schemaVersion") != 2:
         raise _extension_error()
     if set(config) == {"schemaVersion"}:
         raise _extension_error()
@@ -227,6 +233,38 @@ def _validate_extension_config(config: Mapping[str, Any]) -> None:
         _ensure_keys(webrtc, {"policy"})
         if webrtc.get("policy") not in _ALLOWED_WEBRTC_POLICIES:
             raise _extension_error()
+
+    if "geolocation" in config:
+        geolocation = _require_object(config["geolocation"])
+        _ensure_keys(geolocation, _ALLOWED_GEOLOCATION)
+        if geolocation.get("permission") not in {"prompt", "allow", "block"}:
+            raise _extension_error()
+        if "latitude" in geolocation:
+            _require_number(geolocation.get("latitude"), minimum=-90, maximum=90)
+            _require_number(geolocation.get("longitude"), minimum=-180, maximum=180)
+            _require_int(geolocation.get("accuracy"), minimum=1, maximum=100_000)
+            altitude = geolocation.get("altitude")
+            if altitude is not None:
+                _require_number(altitude, minimum=-1_000, maximum=100_000)
+
+    if "mediaDevices" in config:
+        media = _require_object(config["mediaDevices"])
+        _ensure_keys(media, _ALLOWED_MEDIA_DEVICES)
+        _require_int(media.get("seed"), minimum=0, maximum=1_000_000)
+        _require_int(media.get("videoInputs"), minimum=0, maximum=1)
+        _require_int(media.get("audioInputs"), minimum=1, maximum=4)
+        _require_int(media.get("audioOutputs"), minimum=1, maximum=4)
+
+    if "ports" in config:
+        ports = _require_object(config["ports"])
+        _ensure_keys(ports, _ALLOWED_PORTS)
+        if ports.get("mode") not in {"masked", "custom"}:
+            raise _extension_error()
+        allowed_ports = ports.get("allowedPorts")
+        if not isinstance(allowed_ports, list) or len(allowed_ports) > 50:
+            raise _extension_error()
+        for port in allowed_ports:
+            _require_int(port, minimum=1, maximum=65535)
 
     _assert_no_forbidden_text(json.dumps(config, ensure_ascii=True, allow_nan=False, sort_keys=True))
 
@@ -531,6 +569,160 @@ def _protector_script() -> str:
       const nextConfiguration = Object.assign({}, configuration || {}, { iceTransportPolicy: 'relay' });
       return new OriginalPeerConnection(nextConfiguration, ...rest);
     }, OriginalPeerConnection);
+  }
+
+  const geolocationConfig = config.geolocation;
+  if (geolocationConfig && navigator.geolocation) {
+    const permission = geolocationConfig.permission || 'prompt';
+    const hasFixedPosition = typeof geolocationConfig.latitude === 'number';
+    const makeDeniedError = () => {
+      const error = new Error('User denied Geolocation');
+      error.code = 1;
+      error.PERMISSION_DENIED = 1;
+      return error;
+    };
+    const makePosition = () => ({
+      coords: {
+        latitude: geolocationConfig.latitude,
+        longitude: geolocationConfig.longitude,
+        accuracy: geolocationConfig.accuracy,
+        altitude: geolocationConfig.altitude === undefined ? null : geolocationConfig.altitude,
+        altitudeAccuracy: null,
+        heading: null,
+        speed: null,
+      },
+      timestamp: Date.now(),
+    });
+
+    const originalGetCurrent = navigator.geolocation.getCurrentPosition;
+    const originalWatch = navigator.geolocation.watchPosition;
+    navigator.geolocation.getCurrentPosition = maskFunction(function (onSuccess, onError, options) {
+      if (permission === 'block') {
+        if (typeof onError === 'function') onError(makeDeniedError());
+        return undefined;
+      }
+      if (permission === 'allow' && hasFixedPosition) {
+        if (typeof onSuccess === 'function') onSuccess(makePosition());
+        return undefined;
+      }
+      return originalGetCurrent.call(navigator.geolocation, onSuccess, onError, options);
+    }, originalGetCurrent);
+
+    navigator.geolocation.watchPosition = maskFunction(function (onSuccess, onError, options) {
+      if (permission === 'block') {
+        if (typeof onError === 'function') onError(makeDeniedError());
+        return 0;
+      }
+      if (permission === 'allow' && hasFixedPosition) {
+        if (typeof onSuccess === 'function') onSuccess(makePosition());
+        return 0;
+      }
+      return originalWatch.call(navigator.geolocation, onSuccess, onError, options);
+    }, originalWatch);
+
+    if (navigator.permissions && navigator.permissions.query) {
+      const originalQuery = navigator.permissions.query;
+      navigator.permissions.query = maskFunction(function (descriptor) {
+        if (descriptor && descriptor.name === 'geolocation' && permission !== 'prompt') {
+          return Promise.resolve({
+            state: permission === 'allow' ? 'granted' : 'denied',
+            onchange: null,
+          });
+        }
+        return originalQuery.call(navigator.permissions, descriptor);
+      }, originalQuery);
+    }
+  }
+
+  const mediaConfig = config.mediaDevices;
+  if (mediaConfig && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    const originalEnumerate = navigator.mediaDevices.enumerateDevices;
+    const stableId = (kind, index) => {
+      let hash = Number(mediaConfig.seed) || 0;
+      const material = kind + ':' + index;
+      for (let position = 0; position < material.length; position += 1) {
+        hash = (hash * 31 + material.charCodeAt(position)) >>> 0;
+      }
+      let out = '';
+      for (let round = 0; round < 8; round += 1) {
+        hash = (hash * 1103515245 + 12345) >>> 0;
+        out += hash.toString(16).padStart(8, '0');
+      }
+      return out.slice(0, 64);
+    };
+    const buildDevices = () => {
+      const devices = [];
+      const kinds = [
+        ['videoinput', mediaConfig.videoInputs],
+        ['audioinput', mediaConfig.audioInputs],
+        ['audiooutput', mediaConfig.audioOutputs],
+      ];
+      for (const [kind, count] of kinds) {
+        for (let index = 0; index < (Number(count) || 0); index += 1) {
+          devices.push({
+            deviceId: stableId(kind, index),
+            kind,
+            // Chrome returns an empty label until camera or microphone
+            // permission is granted, so a populated one is itself a tell.
+            label: '',
+            groupId: stableId('group:' + kind, index),
+            toJSON() { return this; },
+          });
+        }
+      }
+      return devices;
+    };
+    navigator.mediaDevices.enumerateDevices = maskFunction(
+      function () { return Promise.resolve(buildDevices()); },
+      originalEnumerate,
+    );
+  }
+
+  const portsConfig = config.ports;
+  if (portsConfig) {
+    const allowedPorts = new Set((portsConfig.allowedPorts || []).map(Number));
+    const isLoopbackHost = (host) => host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+    // Only pages served from somewhere else are blocked from probing loopback.
+    // A local page reaching its own host is not a fingerprinting attempt, and
+    // blocking it unconditionally breaks the sidecar's own local proof fixture
+    // and the audit checkers, which the extension also matches.
+    const pageIsLocal = isLoopbackHost(location.hostname);
+    const isBlockedTarget = (rawUrl) => {
+      if (pageIsLocal) return false;
+      let parsed;
+      try { parsed = new URL(rawUrl, location.href); } catch (_) { return false; }
+      if (!isLoopbackHost(parsed.hostname)) return false;
+      const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
+      return !allowedPorts.has(port);
+    };
+    const makeBlockedError = () => {
+      if (typeof DOMException === 'function') return new DOMException('Failed to fetch', 'NetworkError');
+      return new Error('Failed to fetch');
+    };
+
+    if (typeof fetch === 'function') {
+      const originalFetch = fetch;
+      globalThis.fetch = maskFunction(function (input, init) {
+        const target = typeof input === 'string' ? input : (input && input.url);
+        if (target && isBlockedTarget(target)) return Promise.reject(makeBlockedError());
+        return originalFetch.call(globalThis, input, init);
+      }, originalFetch);
+    }
+    if (globalThis.XMLHttpRequest) {
+      const originalOpen = globalThis.XMLHttpRequest.prototype.open;
+      globalThis.XMLHttpRequest.prototype.open = maskFunction(function (method, url, ...rest) {
+        if (url && isBlockedTarget(url)) throw makeBlockedError();
+        return originalOpen.call(this, method, url, ...rest);
+      }, originalOpen);
+    }
+    if (typeof WebSocket === 'function') {
+      const OriginalWebSocket = WebSocket;
+      globalThis.WebSocket = maskFunction(function (url, protocols) {
+        if (url && isBlockedTarget(url)) throw makeBlockedError();
+        return protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
+      }, OriginalWebSocket);
+      globalThis.WebSocket.prototype = OriginalWebSocket.prototype;
+    }
   }
 })();
 """.lstrip()

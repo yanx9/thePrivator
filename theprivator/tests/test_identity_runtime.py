@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, curated_preset, warnings_for_identity
+from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY, IDENTITY_VERSION, curated_preset, warnings_for_identity
 from theprivator_sidecar.protocol import IDENTITY_EXTENSION_FAILED, IDENTITY_INVALID, SidecarError
 from theprivator_sidecar.identity_extension import (
     CONFIG_SCRIPT_NAME,
@@ -14,7 +14,7 @@ from theprivator_sidecar.identity_extension import (
     generate_identity_extension,
     validate_identity_extension,
 )
-from theprivator_sidecar.identity_runtime import build_identity_runtime_plan
+from theprivator_sidecar.identity_runtime import RUNTIME_PLAN_SCHEMA_VERSION, build_identity_runtime_plan
 
 
 FORBIDDEN_GENERATED_TEXT = (
@@ -60,7 +60,7 @@ def test_curated_preset_maps_to_bounded_extension_cdp_and_webrtc_artifacts():
     assert plan.requires_extension is True
     assert plan.requires_cdp is True
     assert plan.extension_config == {
-        "schemaVersion": 1,
+        "schemaVersion": RUNTIME_PLAN_SCHEMA_VERSION,
         "navigator": {
             "platform": "Linux x86_64",
             "hardwareConcurrency": 8,
@@ -200,7 +200,7 @@ def test_default_real_identity_maps_to_noop_runtime_plan():
     assert plan.cdp_overrides == {}
     assert plan.launch_flags == []
     assert plan.to_dict() == {
-        "identityVersion": 1,
+        "identityVersion": IDENTITY_VERSION,
         "presetId": None,
         "requiresExtension": False,
         "requiresCdp": False,
@@ -323,9 +323,20 @@ def test_runtime_mapping_rejects_invalid_identity_before_artifact_planning():
 
 
 def test_runtime_and_extension_modules_do_not_import_legacy_fingerprint_dataclasses():
+    """These modules must not couple to the legacy GUI package.
+
+    The check is on imports and the legacy type names, not on the word
+    "fingerprint" appearing anywhere. Banning the word bans it from comments too,
+    and these are the fingerprinting modules -- a comment explaining why a local
+    page probing its own host is not a fingerprinting attempt is exactly the kind
+    of prose that belongs here.
+    """
     for relative in ("theprivator_sidecar/identity_runtime.py", "theprivator_sidecar/identity_extension.py"):
         source = Path(relative).read_text(encoding="utf-8")
         assert "ChromiumProfile" not in source
         assert "FingerprintConfig" not in source
         assert "profile_manager" not in source
-        assert "fingerprint" not in source.lower()
+        assert "from theprivator." not in source
+        assert "import theprivator." not in source
+        assert "theprivator.core" not in source
+        assert "theprivator.utils" not in source

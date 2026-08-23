@@ -40,6 +40,9 @@ EXPECTED_SURFACES = {
     "audio",
     "webgl",
     "webrtc",
+    "geolocation",
+    "mediaDevices",
+    "ports",
 }
 
 
@@ -97,6 +100,9 @@ def test_default_real_identity_validates_with_zero_warnings():
         "audio": "real",
         "webgl": "real",
         "webrtc": "real",
+        "geolocation": "real",
+        "mediaDevices": "real",
+        "ports": "real",
     }
     assert warning_codes(normalized) == set()
     assert_json_safe(normalized)
@@ -113,6 +119,11 @@ def test_curated_preset_table_has_stable_desktop_chromium_ids_only():
         "audio": {"real", "noise"},
         "webgl": {"real", "masked", "custom"},
         "webrtc": {"real", "masked", "custom"},
+        # No "masked" for geolocation: deriving a position from the proxy exit
+        # would need a geo-IP lookup inside the launch budget on every start.
+        "geolocation": {"real", "custom"},
+        "mediaDevices": {"real", "masked", "custom"},
+        "ports": {"real", "masked", "custom"},
     }
 
 
@@ -149,7 +160,7 @@ def test_unknown_preset_id_raises_typed_recoverable_error():
     [
         ("not-an-object", IDENTITY_INVALID),
         ({"label": "missing version"}, IDENTITY_INVALID),
-        (with_change(DEFAULT_REAL_IDENTITY, ["identityVersion"], 2), IDENTITY_INVALID),
+        (with_change(DEFAULT_REAL_IDENTITY, ["identityVersion"], 3), IDENTITY_INVALID),
         ({**DEFAULT_REAL_IDENTITY, "unknownSurface": {"mode": "real"}}, IDENTITY_INVALID),
         (with_change(curated_preset("windows-10-chrome-120"), ["browser", "mode"], "spoofed"), IDENTITY_UNSUPPORTED_MODE),
         (with_change(curated_preset("windows-10-chrome-120"), ["browser", "mode"], "noise"), IDENTITY_UNSUPPORTED_MODE),
