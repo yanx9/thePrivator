@@ -1,6 +1,6 @@
 {
   "name": "theprivator-desktop",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "description": "ThePrivator Tauri 2 desktop rewrite spine.",
@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest",
     "tauri": "tauri",
+    "verify:release": "node scripts/verify-release.mjs",
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "verify:sidecar": "node scripts/verify-sidecar.mjs",
     "verify:m004:s01": "node scripts/verify-m004-s01.mjs",

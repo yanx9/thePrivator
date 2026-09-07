@@ -1,0 +1,4 @@
+include package.json
+include requirements.txt
+include requirements-dev.txt
+include README.md

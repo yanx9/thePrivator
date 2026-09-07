@@ -1,6 +1,6 @@
 name: Release
 
-# Three runners, because the sidecar decides.
+# Platform runners, because the sidecar decides.
 #
 # scripts/build-sidecar.mjs packs the Python sidecar with PyInstaller and names
 # the binary after `rustc --print host-tuple`. PyInstaller bundles the host's
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish under, e.g. v2.2.0. Leave blank to build artifacts only."
+        description: "Tag to publish under, e.g. v3.0.0. Leave blank to build artifacts only."
         required: false
         type: string
   push:
@@ -25,6 +25,8 @@ concurrency:
 jobs:
   bundle:
     name: ${{ matrix.label }}
+    permissions:
+      contents: write
     runs-on: ${{ matrix.os }}
     strategy:
       # One platform failing must not cancel the other two: a macOS signing
@@ -40,11 +42,11 @@ jobs:
             bundles: deb,rpm,appimage
             artifact: linux
           - label: macOS (Apple silicon)
-            os: macos-14
+            os: macos-15
             bundles: app,dmg
             artifact: macos-aarch64
           - label: macOS (Intel)
-            os: macos-13
+            os: macos-15-intel
             bundles: app,dmg
             artifact: macos-x86_64
           - label: Windows (msi, nsis)
@@ -81,6 +83,12 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - run: npm ci
+
+      - name: Verify release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}
+        run: node scripts/verify-release.mjs "$RELEASE_TAG"
 
       - name: Install Python dependencies
         run: |
@@ -124,6 +132,12 @@ jobs:
           releaseName: ${{ (startsWith(github.ref, 'refs/tags/') || inputs.tag) && format('ThePrivator {0}', startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag) || '' }}
           releaseDraft: true
           prerelease: false
+
+      - name: Verify the bundled macOS sidecar
+        if: runner.os == 'macOS'
+        env:
+          THEPRIVATOR_VERIFY_SIDECAR_BINARY: src-tauri/target/release/bundle/macos/ThePrivator.app/Contents/MacOS/theprivator-sidecar
+        run: npm run verify:sidecar
 
       - uses: actions/upload-artifact@v4
         with:

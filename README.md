@@ -102,6 +102,14 @@ npm run tauri build
 
 Installers land in `src-tauri/target/release/bundle/`.
 
+On macOS, build with `npm run tauri build -- --bundles app,dmg`. The sidecar
+uses a directory-based Python runtime in `Contents/Frameworks`, avoiding
+temporary library extraction on every launch. To verify the shipped runtime:
+
+```bash
+THEPRIVATOR_VERIFY_SIDECAR_BINARY="src-tauri/target/release/bundle/macos/ThePrivator.app/Contents/MacOS/theprivator-sidecar" npm run verify:sidecar
+```
+
 For development, `npm run tauri dev` rebuilds the frontend on save.
 
 **One build produces one platform.** The Python sidecar is packed with

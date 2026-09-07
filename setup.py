@@ -4,15 +4,12 @@
 from setuptools import setup, find_packages
 from pathlib import Path
 
-# Read version from the sidecar, which is the only Python package now: the
-# customtkinter desktop GUI it used to sit beside has been removed.
+# Keep the Python distribution aligned with the desktop release without importing
+# runtime dependencies during package metadata generation.
+import json
+
 here = Path(__file__).parent
-about = {}
-with open(here / "theprivator_sidecar" / "__init__.py", encoding="utf-8") as f:
-    for line in f:
-        if line.startswith("__version__"):
-            exec(line, about)
-            break
+version = json.loads((here / "package.json").read_text(encoding="utf-8"))["version"]
 
 # Read long description from README
 try:
@@ -35,7 +32,7 @@ dev_requires = read_requirements("requirements-dev.txt")
 
 setup(
     name="theprivator",
-    version=about.get("__version__", "2.1.0"),
+    version=version,
     description="Chromium multi-instance manager with configurable fingerprints",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -53,8 +50,8 @@ setup(
     },
     
     # Package info
-    packages=find_packages(),
-    python_requires=">=3.8",
+    packages=find_packages(include=["theprivator_sidecar", "theprivator_sidecar.*"]),
+    python_requires=">=3.11",
     
     # Dependencies
     install_requires=install_requires,
@@ -88,9 +85,6 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Topic :: Internet :: WWW/HTTP :: Browsers",

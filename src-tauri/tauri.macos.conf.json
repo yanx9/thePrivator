@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ThePrivator",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "titleBarStyle": "Visible"
+      }
+    ]
+  },
+  "bundle": {
+    "macOS": {
+      "files": {
+        "Frameworks": "binaries/_internal"
+      }
+    }
+  }
+}

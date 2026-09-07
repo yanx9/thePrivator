@@ -40,12 +40,15 @@ export function AppShell({
   showSidebar,
   children,
 }: AppShellProps) {
+  // The macOS Tauri configuration supplies the native title bar and controls.
+  const nativeTitleBar = navigator.platform.startsWith("Mac");
+
   return (
-    <div className={styles.shell}>
+    <div className={`${styles.shell}${nativeTitleBar ? ` ${styles.nativeTitleBar}` : ""}`}>
       <a className={styles.skipLink} href="#workspace">
         Skip to workspace
       </a>
-      <WindowChrome />
+      {nativeTitleBar ? null : <WindowChrome />}
       <TopNav route={route} search={search} onSearchChange={onSearchChange} />
       <div className={styles.body} style={showSidebar ? undefined : { gridTemplateColumns: "1fr" }}>
         {showSidebar ? (

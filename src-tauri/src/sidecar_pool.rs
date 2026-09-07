@@ -59,6 +59,13 @@ struct Worker {
 
 impl Worker {
     fn spawn(mut command: StdCommand) -> Result<Self, SidecarRunnerError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // A onefile launcher has a Python child. Isolate both so timeout
+            // cleanup cannot leave the child behind or signal the desktop app.
+            command.process_group(0);
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,6 +163,11 @@ impl Worker {
                 Ok(None) => thread::sleep(Duration::from_millis(10)),
                 Err(_) => break,
             }
+        }
+        #[cfg(unix)]
+        unsafe {
+            // The group was created above with the child's PID as its ID.
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -428,6 +440,31 @@ for raw in sys.stdin:
 
         assert_eq!(error, SidecarRunnerError::Io);
         assert_eq!(pool.idle_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_kills_a_stalled_launchers_child() {
+        let mut command = StdCommand::new("python3");
+        command.arg("-c").arg(r#"
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+print(child.pid, flush=True)
+time.sleep(60)
+"#);
+        let worker = Worker::spawn(command).expect("launcher starts");
+        let child_pid: i32 = worker.stdout_rx.recv_timeout(Duration::from_secs(10))
+            .expect("launcher reports its child").parse().unwrap();
+        worker.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if unsafe { libc::kill(child_pid, 0) } == -1 {
+                assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+                break;
+            }
+            assert!(Instant::now() < deadline, "launcher child survived shutdown");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
