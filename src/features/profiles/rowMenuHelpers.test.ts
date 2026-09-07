@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { makeProfile } from "../../testing/profileFactory";
-import { type MenuItem, type RowMenuContext, buildRowMenu, requiresConfirmation } from "./rowMenu";
+import { type MenuItem, type RowMenuContext, buildRowMenu, requiresConfirmation } from "./rowMenuHelpers";
 
 function context(overrides: Partial<RowMenuContext> = {}): RowMenuContext {
   return {

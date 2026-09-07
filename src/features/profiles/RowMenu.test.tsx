@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { RowMenu } from "./RowMenu";
-import { buildRowMenu } from "./rowMenu";
+import { buildRowMenu } from "./rowMenuHelpers";
 import { makeProfile } from "../../testing/profileFactory";
 
 it("flips a right-edge submenu left and supports keyboard return", () => {

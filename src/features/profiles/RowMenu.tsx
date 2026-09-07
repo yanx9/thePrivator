@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { MenuItem, RowAction } from "./rowMenu";
+import type { MenuItem, RowAction } from "./rowMenuHelpers";
 import styles from "./RowMenu.module.css";
 
 interface RowMenuProps {

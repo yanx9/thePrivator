@@ -30,7 +30,7 @@ import {
   nextSort,
   setColumnWidth,
 } from "./columns";
-import { type RowAction, buildRowMenu, requiresConfirmation } from "./rowMenu";
+import { type RowAction, buildRowMenu, requiresConfirmation } from "./rowMenuHelpers";
 import {
   EMPTY_SELECTION,
   type ProfileRow,
