@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isCountryCode } from "./countries";
 import type {
+  CookieBotConfig,
+  CookieBotJob,
+  CookieBotStatus,
+  CookieBotSnapshot,
+  CookieBotDefaultsSnapshot,
   AutomationApiEndpointSnapshot,
   AutomationApiErrorSnapshot,
   AutomationApiLifecycleStatus,
@@ -1140,6 +1146,90 @@ export async function bulkStopChromiumProfiles(profileIds?: string[]): Promise<C
   } catch (error) {
     throw normalizeSidecarError(error);
   }
+}
+
+export async function getCookieBotDefaults(): Promise<CookieBotDefaultsSnapshot> {
+  try {
+    return withEnvelope(await invoke<unknown>("cookie_bot_defaults"), (value) => {
+      const record = requireRecord(value, "Cookie bot defaults must be an object.");
+      return { config: parseCookieBotConfig(record.config) };
+    });
+  } catch (error) { throw normalizeSidecarError(error); }
+}
+
+export function startCookieBot(profileId: string, config: Partial<CookieBotConfig>): Promise<CookieBotSnapshot> {
+  return cookieBotRequest("cookie_bot_start", profileId, { profileId, config });
+}
+
+export function getCookieBotStatus(profileId: string): Promise<CookieBotSnapshot> {
+  return cookieBotRequest("cookie_bot_status", profileId, { profileId });
+}
+
+export function cancelCookieBot(profileId: string, jobId: string): Promise<CookieBotSnapshot> {
+  return cookieBotRequest("cookie_bot_cancel", profileId, { profileId, jobId });
+}
+
+async function cookieBotRequest(command: string, profileId: string, args: Record<string, unknown>): Promise<CookieBotSnapshot> {
+  try {
+    return withEnvelope(await invoke<unknown>(command, args), (value) => {
+      const result = requireRecord(value, "Cookie bot result must be an object.");
+      if (result.job === null) return { job: null };
+      const job = parseCookieBotJob(result.job);
+      if (job.profileId !== profileId) throw makeProtocolError("Cookie bot profile does not match request.");
+      return { job };
+    });
+  } catch (error) { throw normalizeSidecarError(error); }
+}
+
+function cookieBotUrl(value: unknown): string {
+  const text = requireNonBlankString(value, "cookieBot.url");
+  try {
+    const url = new URL(text);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || text.length > 2048) throw new Error();
+    return text;
+  } catch { throw makeProtocolError("Cookie bot URL must be a safe HTTP(S) URL without credentials or query strings."); }
+}
+
+function cookieBotInteger(value: unknown, field: string, min: number, max: number): number {
+  const number = requireNonNegativeInteger(value, field);
+  if (number < min || number > max) throw makeProtocolError(`Cookie bot ${field} is outside its bounds.`);
+  return number;
+}
+
+function parseCookieBotConfig(value: unknown): CookieBotConfig {
+  const record = requireRecord(value, "Cookie bot config must be an object.");
+  if (!Array.isArray(record.urls) || record.urls.length < 1 || record.urls.length > 25 || typeof record.closeAfterCompletion !== "boolean") {
+    throw makeProtocolError("Cookie bot config has invalid URLs or close option.");
+  }
+  return {
+    urls: record.urls.map(cookieBotUrl),
+    maxPages: cookieBotInteger(record.maxPages, "maxPages", 1, 50),
+    maxDepth: cookieBotInteger(record.maxDepth, "maxDepth", 0, 2),
+    dwellSeconds: cookieBotInteger(record.dwellSeconds, "dwellSeconds", 1, 30),
+    maxDurationSeconds: cookieBotInteger(record.maxDurationSeconds, "maxDurationSeconds", 10, 600),
+    closeAfterCompletion: record.closeAfterCompletion,
+  };
+}
+
+function parseCookieBotJob(value: unknown): CookieBotJob {
+  const record = requireRecord(value, "Cookie bot job must be an object.");
+  const status = requireNonBlankString(record.status, "status");
+  if (!["queued", "running", "cancelling", "completed", "cancelled", "failed"].includes(status) || !Array.isArray(record.errors) || record.errors.length > 20) {
+    throw makeProtocolError("Cookie bot job has invalid status or errors.");
+  }
+  return {
+    jobId: requireNonBlankString(record.jobId, "jobId"),
+    profileId: requireNonBlankString(record.profileId, "profileId"),
+    status: status as CookieBotStatus,
+    config: parseCookieBotConfig(record.config),
+    createdAt: requireIsoTimestamp(record.createdAt, "createdAt"),
+    finishedAt: record.finishedAt === null ? null : requireIsoTimestamp(record.finishedAt, "finishedAt"),
+    currentUrl: record.currentUrl === null ? null : cookieBotUrl(record.currentUrl),
+    visitedPages: cookieBotInteger(record.visitedPages, "visitedPages", 0, 50),
+    failedPages: cookieBotInteger(record.failedPages, "failedPages", 0, 50),
+    errors: record.errors.map((error) => requireNonBlankString(error, "error")),
+    stopReason: record.stopReason === null ? null : requireNonBlankString(record.stopReason, "stopReason"),
+  };
 }
 
 export async function getSyncStatus(): Promise<SyncStatusSnapshot> {
@@ -2913,8 +3003,14 @@ function parseProxyCheckPublicExitLocation(value: unknown): ProxyCheckIpHiding["
   }
   const record = requireRecord(value, "The sidecar proxy check public exit location must be null or an object.");
   assertNoForbiddenProxyCheckFields(record, "ipHiding.publicExitLocation");
-  requireExactProxyCheckKeys(record, ["country", "region", "city", "timezone", "isp"], "ipHiding.publicExitLocation");
+  const hasCode = Object.prototype.hasOwnProperty.call(record, "countryCode");
+  requireExactProxyCheckKeys(record, ["country", "region", "city", "timezone", "isp", ...(hasCode ? ["countryCode"] : [])], "ipHiding.publicExitLocation");
+  const countryCode = hasCode ? record.countryCode : null;
+  if (countryCode !== null && !isCountryCode(countryCode)) {
+    throw makeProtocolError("The sidecar proxy check countryCode must be an ISO alpha-2 code or null.");
+  }
   return {
+    countryCode,
     country: record.country === null ? null : requireProxyCheckSafeText(record.country, "ipHiding.publicExitLocation.country", { maxLength: 128 }),
     region: record.region === null ? null : requireProxyCheckSafeText(record.region, "ipHiding.publicExitLocation.region", { maxLength: 128 }),
     city: record.city === null ? null : requireProxyCheckSafeText(record.city, "ipHiding.publicExitLocation.city", { maxLength: 128 }),

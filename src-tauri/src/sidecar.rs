@@ -315,6 +315,39 @@ pub async fn profiles_proxy_check(
 }
 
 #[tauri::command]
+pub async fn cookie_bot_defaults(app: tauri::AppHandle) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    cookie_bot_with_runner(&TauriSidecarRunner::new(app), "defaults", json!({})).await
+}
+
+#[tauri::command]
+pub async fn cookie_bot_start(app: tauri::AppHandle, profile_id: String, config: Value) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let root = resolve_profile_store_root(&app)?;
+    cookie_bot_with_runner(&TauriSidecarRunner::new(app), "start", json!({"storeRoot": root, "profileId": profile_id, "config": config})).await
+}
+
+#[tauri::command]
+pub async fn cookie_bot_status(app: tauri::AppHandle, profile_id: String) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let root = resolve_profile_store_root(&app)?;
+    cookie_bot_with_runner(&TauriSidecarRunner::new(app), "status", json!({"storeRoot": root, "profileId": profile_id})).await
+}
+
+#[tauri::command]
+pub async fn cookie_bot_cancel(app: tauri::AppHandle, profile_id: String, job_id: String) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let root = resolve_profile_store_root(&app)?;
+    cookie_bot_with_runner(&TauriSidecarRunner::new(app), "cancel", json!({"storeRoot": root, "profileId": profile_id, "jobId": job_id})).await
+}
+
+async fn cookie_bot_with_runner<R: SidecarRunner>(runner: &R, action: &str, params: Value) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let method = match action {
+        "start" => "cookieBot.start",
+        "status" => "cookieBot.status",
+        "cancel" => "cookieBot.cancel",
+        _ => "cookieBot.defaults",
+    };
+    invoke_method_with_params(runner, method, params).await
+}
+
+#[tauri::command]
 pub async fn profile_cookies_export(
     app: tauri::AppHandle,
     profile_id: String,
@@ -3076,6 +3109,22 @@ mod tests {
             ],
         );
         assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+    }
+
+    #[test]
+    fn cookie_bot_requests_keep_normal_short_command_budget() {
+        let runner = FakeRunner::new(FakeMode::HealthSuccess);
+        tauri::async_runtime::block_on(cookie_bot_with_runner(
+            &runner, "start", json!({"storeRoot": "/app/data/root", "profileId": "profile-id", "config": {"maxPages": 2}}),
+        )).expect("start returns job immediately");
+        assert_request_params(&runner.last_request(), "cookieBot.start", &[
+            ("storeRoot", json!("/app/data/root")), ("profileId", json!("profile-id")), ("config", json!({"maxPages": 2})),
+        ]);
+        assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+        for action in ["defaults", "status", "cancel"] {
+            tauri::async_runtime::block_on(cookie_bot_with_runner(&runner, action, json!({}))).unwrap();
+            assert_eq!(runner.last_timeout(), BRIDGE_TIMEOUT);
+        }
     }
 
     #[test]

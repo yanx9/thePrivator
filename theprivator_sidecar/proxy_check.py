@@ -14,6 +14,7 @@ import math
 import ipaddress
 import socket
 import threading
+from http.client import HTTPResponse
 from pathlib import Path
 from typing import Any, Mapping, Sequence, Union
 from urllib.parse import quote
@@ -41,7 +42,7 @@ PROXY_CHECK_TIMEOUT_SECONDS = 5.0
 # TypeScript client's 64-character bound for this field.
 MAX_PUBLIC_EXIT_IP_LENGTH = 45
 _PUBLIC_EXIT_LOOKUP_HOST = "ip-api.com"
-_PUBLIC_EXIT_LOOKUP_PATH = "/json/?fields=status,message,query,country,regionName,city,timezone,isp"
+_PUBLIC_EXIT_LOOKUP_PATH = "/json/?fields=status,message,query,country,countryCode,regionName,city,timezone,isp"
 _PUBLIC_EXIT_LOOKUP_URL = f"http://{_PUBLIC_EXIT_LOOKUP_HOST}{_PUBLIC_EXIT_LOOKUP_PATH}"
 
 _ROUTE_PROOF_KEYS = frozenset(
@@ -69,7 +70,7 @@ _IP_HIDING_KEYS = frozenset(
         "localFixtureConclusion",
     }
 )
-_PUBLIC_EXIT_LOCATION_KEYS = frozenset({"country", "region", "city", "timezone", "isp"})
+_PUBLIC_EXIT_LOCATION_KEYS = frozenset({"country", "countryCode", "region", "city", "timezone", "isp"})
 _WEBRTC_KEYS = frozenset({"status", "basis", "mode", "policy", "localIpExposure"})
 _PUBLIC_CHECKERS_KEYS = frozenset({"status", "basis", "networkDependency", "pages"})
 _PUBLIC_CHECKER_PAGE_KEYS = frozenset({"id", "label", "url", "surfaces", "advisory"})
@@ -294,6 +295,7 @@ def _public_exit_location(location: Any) -> JsonObject:
     return _exact_keys(
         {
             "country": _optional_safe_text(location.get("country")),
+            "countryCode": _optional_country_code(location.get("countryCode")),
             "region": _optional_safe_text(location.get("region")),
             "city": _optional_safe_text(location.get("city")),
             "timezone": _optional_safe_text(location.get("timezone")),
@@ -301,6 +303,26 @@ def _public_exit_location(location: Any) -> JsonObject:
         },
         _PUBLIC_EXIT_LOCATION_KEYS,
     )
+
+
+# Assigned ISO 3166-1 alpha-2 codes, kept in sync with src/sidecar/countries.ts.
+# Local data avoids a TypeScript/runtime dependency in the packaged sidecar.
+_ASSIGNED_COUNTRY_CODES = frozenset(
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ "
+    "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR "
+    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT "
+    "JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN "
+    "MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY "
+    "QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO "
+    "TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split()
+)
+
+
+def _optional_country_code(value: Any) -> str | None:
+    """Accept assigned ISO alpha-2 codes only; never repair untrusted tokens."""
+    if isinstance(value, str) and value in _ASSIGNED_COUNTRY_CODES:
+        return value
+    return None
 
 
 def _optional_safe_text(value: Any, *, max_length: int = 128) -> str | None:
@@ -346,13 +368,18 @@ def _public_exit_via_requests(proxy: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(protocol, str) or not isinstance(host, str) or not isinstance(port, int):
         raise ValueError("invalid proxy")
     proxy_url = f"{protocol}://{_proxy_authority(proxy)}{host}:{port}"
-    response = requests.get(
-        _PUBLIC_EXIT_LOOKUP_URL,
-        proxies={"http": proxy_url},
-        timeout=PROXY_CHECK_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    # Never inherit environment proxies/netrc or follow a redirect onto a
+    # different route. Advisory failure must not become a direct-IP lookup.
+    with requests.Session() as session:
+        session.trust_env = False
+        with session.get(
+            _PUBLIC_EXIT_LOOKUP_URL,
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=PROXY_CHECK_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        ) as response:
+            response.raise_for_status()
+            payload = response.json()
     if not isinstance(payload, Mapping):
         raise ValueError("invalid public exit payload")
     return payload
@@ -386,10 +413,7 @@ def _public_exit_via_socks5(proxy: Mapping[str, Any]) -> Mapping[str, Any]:
             "User-Agent: ThePrivatorProxyCheck/1\r\n\r\n"
         )
         sock.sendall(request.encode("ascii"))
-        raw = _read_http_response(sock)
-    header, _, body = raw.partition(b"\r\n\r\n")
-    if b" 200 " not in header.split(b"\r\n", 1)[0]:
-        raise ValueError("public exit lookup failed")
+        body = _read_http_response(sock)
     payload = json.loads(body.decode("utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("invalid public exit payload")
@@ -467,6 +491,7 @@ def _public_exit_from_payload(payload: Mapping[str, Any]) -> JsonObject | None:
         "location": _public_exit_location(
             {
                 "country": payload.get("country"),
+                "countryCode": payload.get("countryCode"),
                 "region": payload.get("regionName"),
                 "city": payload.get("city"),
                 "timezone": payload.get("timezone"),
@@ -489,17 +514,16 @@ def _read_exact(sock: socket.socket, length: int) -> bytes:
 
 
 def _read_http_response(sock: socket.socket) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > 65536:
+    # Decode HTTP framing (including chunked bodies) without making any new
+    # connection or following redirects outside the established proxy tunnel.
+    with HTTPResponse(sock) as response:
+        response.begin()
+        if response.status != 200:
+            raise ValueError("public exit lookup failed")
+        body = response.read(65537)
+        if len(body) > 65536:
             raise ValueError("public exit response too large")
-    return b"".join(chunks)
+        return body
 
 
 

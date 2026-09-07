@@ -1,0 +1,9 @@
+.root { display: flex; flex-direction: column; min-width: 0; max-width: 100%; gap: 2px; }
+.exit { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.flag { flex: 0 0 auto; line-height: 1; }
+.ip, .check { color: inherit; background: transparent; border: 0; padding: 2px 0; text-align: left; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ip { font-family: var(--font-mono, monospace); }
+.ip:hover, .check:hover:not(:disabled) { text-decoration: underline; }
+.ip:focus-visible, .check:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.check:disabled, .direct { opacity: 0.65; }
+.direct { font-size: 0.85em; }

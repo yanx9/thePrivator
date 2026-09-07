@@ -646,6 +646,18 @@ function proxyCheckEnvelope(result: unknown, overrides: Record<string, unknown> 
   };
 }
 
+describe("proxy exit country code compatibility", () => {
+  it.each([{}, { countryCode: null }, { countryCode: "DE" }])("accepts old and current location fields: %j", async (extra) => {
+    mockInvoke.mockResolvedValue(proxyCheckEnvelope(proxyCheckResult({ ipHiding: proxyCheckIpHidingDirect({ publicExitIpClaimed: true, publicExitIp: "203.0.113.9", publicExitLocation: { country: "Germany", region: null, city: null, timezone: null, isp: null, ...extra } }) })));
+    const result = await checkProfileProxy(PROXY_CHECK_PROFILE_ID);
+    expect(result.ipHiding.publicExitLocation?.countryCode).toBe("countryCode" in extra ? extra.countryCode : null);
+  });
+  it.each(["de", "DEU", "ZZ", "1A", "", 12, undefined])("rejects malformed country code %s", async (countryCode) => {
+    mockInvoke.mockResolvedValue(proxyCheckEnvelope(proxyCheckResult({ ipHiding: proxyCheckIpHidingDirect({ publicExitIpClaimed: true, publicExitIp: "203.0.113.9", publicExitLocation: { country: null, region: null, city: null, timezone: null, isp: null, countryCode } }) })));
+    await expect(checkProfileProxy(PROXY_CHECK_PROFILE_ID)).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+});
+
 function identityEnvelope(result: unknown, overrides: Record<string, unknown> = {}) {
   return {
     requestId: "bridge-identity-1",

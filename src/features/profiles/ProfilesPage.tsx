@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
+import { pickFile, pickSaveTarget } from "../../dialogs";
 import type { ProfileView } from "../../app/routes";
 import {
   bulkLaunchChromiumProfiles,
   bulkStopChromiumProfiles,
   deleteProfile,
+  exportProfileCookies,
+  replaceProfileCookies,
   launchChromiumProfile,
   normalizeSidecarError,
   purgeProfile,
@@ -12,8 +15,10 @@ import {
   stopChromiumProfile,
 } from "../../sidecar/client";
 import type { SidecarClientError } from "../../sidecar/types";
+import { CookieBotDialog } from "./CookieBotDialog";
 import { ColumnManager } from "./ColumnManager";
 import { ProfileTable } from "./ProfileTable";
+import { useProxyChecks } from "./useProxyChecks";
 import { RowMenu } from "./RowMenu";
 import {
   type ColumnKey,
@@ -107,13 +112,18 @@ export function ProfilesPage({
 }: ProfilesPageProps) {
   const { rows, trashed, loading, error, refresh } = data;
 
+  const { states: proxyChecks, check: onCheckProxy } = useProxyChecks(rows);
+
   const [layout, setLayout] = useState<ColumnLayout>(defaultLayout);
   const [sort, setSort] = useState(DEFAULT_SORT);
   const [selection, setSelection] = useState<SelectionState>(EMPTY_SELECTION);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [cookieBot, setCookieBot] = useState<{ id: string; name: string } | null>(null);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [busyIds, dispatchBusy] = useReducer(busyReducer, new Set<string>() as ReadonlySet<string>);
+  const [actionNote, setActionNote] = useState<string | null>(null);
+  const activeIds = useRef(new Set<string>());
   const [actionError, setActionError] = useState<SidecarClientError | null>(null);
 
   const sourceRows = useMemo<ProfileRow[]>(
@@ -139,6 +149,9 @@ export function ProfilesPage({
 
   const runFor = useCallback(
     async (ids: string[], work: () => Promise<unknown>) => {
+      if (ids.some((id) => activeIds.current.has(id))) return;
+      ids.forEach((id) => activeIds.current.add(id));
+      setActionNote(null);
       dispatchBusy({ type: "start", ids });
       setActionError(null);
       try {
@@ -146,6 +159,7 @@ export function ProfilesPage({
       } catch (caught) {
         setActionError(normalizeSidecarError(caught));
       } finally {
+        ids.forEach((id) => activeIds.current.delete(id));
         dispatchBusy({ type: "finish", ids });
         refresh();
       }
@@ -183,6 +197,26 @@ export function ProfilesPage({
   const performAction = useCallback(
     (action: RowAction, ids: string[]) => {
       switch (action) {
+        case "check-proxy":
+          return onCheckProxy(ids[0]);
+        case "cookies-export-json":
+        case "cookies-export-netscape":
+          return runFor(ids, async () => {
+            const netscape = action === "cookies-export-netscape";
+            const destination = await pickSaveTarget(netscape ? "Export cookies as cookies.txt" : "Export cookies as JSON", [
+              { name: netscape ? "Netscape cookies" : "ThePrivator cookies", extensions: [netscape ? "txt" : "json"] },
+            ]);
+            if (destination === null) return;
+            const result = await exportProfileCookies(ids[0], destination, netscape ? "netscape" : "theprivator-json");
+            setActionNote(`Exported ${result.exportedCount} cookies. ${result.skippedCount} skipped.`);
+          });
+        case "cookies-import":
+          return runFor(ids, async () => {
+            const source = await pickFile("Import cookies into this profile", [{ name: "Cookie files", extensions: ["txt", "json"] }]);
+            if (source === null) return;
+            const result = await replaceProfileCookies(ids[0], source);
+            setActionNote(`Imported ${result.importedCount} cookies, replacing ${result.replacedCount} previous cookies.`);
+          });
         case "launch":
           return runFor(ids, () => launchChromiumProfile(ids[0]));
         case "stop":
@@ -225,12 +259,13 @@ export function ProfilesPage({
           return Promise.resolve();
       }
     },
-    [onOpenProfile, runFor],
+    [onCheckProxy, onOpenProfile, runFor],
   );
 
   const describeConfirmation = useCallback((action: RowAction, ids: string[], name: string): ConfirmState => {
     const count = ids.length;
     const subject = count === 1 ? `"${name}"` : `${count} profiles`;
+    if (action === "cookies-import") return { action, ids, title: "Import cookies", body: `Importing replaces all existing cookies in ${subject}; it does not merge them. Cookie files contain sensitive login data. Continue only with a trusted file.`, confirmLabel: "Replace cookies" };
     if (action === "purge" || action === "bulk-purge") {
       return {
         action,
@@ -252,6 +287,8 @@ export function ProfilesPage({
   const chooseAction = useCallback(
     (action: RowAction, ids: string[], name: string) => {
       setMenu(null);
+      if (ids.some((id) => activeIds.current.has(id))) return;
+      if (action === "cookie-bot") { setCookieBot({ id: ids[0], name }); return; }
       if (requiresConfirmation(action)) {
         // The confirmation is rendered by this component rather than by the menu,
         // so closing the menu cannot take the dialog down with it -- which is
@@ -263,6 +300,12 @@ export function ProfilesPage({
     },
     [describeConfirmation, performAction],
   );
+
+  const onBotBusyChange = useCallback((busy: boolean) => {
+    if (cookieBot === null) return;
+    if (busy) activeIds.current.add(cookieBot.id); else activeIds.current.delete(cookieBot.id);
+    dispatchBusy({ type: busy ? "start" : "finish", ids: [cookieBot.id] });
+  }, [cookieBot]);
 
   const menuRow = menu === null ? null : (shown.find((row) => row.profile.id === menu.profileId) ?? null);
   const menuIds =
@@ -314,8 +357,12 @@ export function ProfilesPage({
         </p>
       ) : null}
 
+      {actionNote !== null ? <p role="status">{actionNote}</p> : null}
+
       <ProfileTable
         rows={shown}
+        proxyChecks={proxyChecks}
+        onCheckProxy={onCheckProxy}
         layout={layout}
         sort={sort}
         selection={selection.ids}
@@ -366,6 +413,7 @@ export function ProfilesPage({
           y={menu.y}
           items={buildRowMenu({
             profile: menuRow.profile,
+            checkingProxy: proxyChecks.get(menuRow.profile.id)?.status === "pending",
             running: menuRow.running,
             trashed: view === "trash",
             selectionSize: menuIds.length,
@@ -375,6 +423,9 @@ export function ProfilesPage({
           onClose={() => setMenu(null)}
         />
       ) : null}
+
+      {cookieBot !== null ? <CookieBotDialog profileId={cookieBot.id} profileName={cookieBot.name}
+        onClose={() => setCookieBot(null)} onRefresh={refresh} onBusyChange={onBotBusyChange} /> : null}
 
       {confirm !== null ? (
         <div className={styles.overlay} role="presentation" onClick={() => setConfirm(null)}>
