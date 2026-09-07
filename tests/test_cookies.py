@@ -34,6 +34,34 @@ def import_json(tmp_path, payload):
     return cookies._read_import_payload(source)
 
 
+@pytest.mark.parametrize("same_site", ["None", "none", "NONE"])
+def test_browser_same_site_none_is_unrestricted(tmp_path, same_site):
+    payload = import_json(tmp_path, [browser_cookie(sameSite=same_site)])
+    assert payload.cookies[0].same_site == "no_restriction"
+
+
+def test_browser_json_accepts_utf8_bom(tmp_path):
+    source = tmp_path / "cookies.json"
+    source.write_text(json.dumps([browser_cookie()]), encoding="utf-8-sig")
+    assert len(cookies._read_import_payload(source).cookies) == 1
+
+
+def test_browser_invalid_entry_reports_index_without_secret(tmp_path):
+    with pytest.raises(SidecarError) as error:
+        import_json(tmp_path, [browser_cookie(), browser_cookie(sameSite="SECRET-INVALID", value="SECRET-VALUE")])
+    assert "Cookie #2" in error.value.message
+    assert "SECRET" not in error.value.message
+
+
+def test_json_syntax_error_reports_position_without_source(tmp_path):
+    source = tmp_path / "cookies.json"
+    source.write_text('[\n{"value": "SECRET-VALUE",}\n]', encoding="utf-8")
+    with pytest.raises(SidecarError) as error:
+        cookies._read_import_payload(source)
+    assert "line 2" in error.value.message
+    assert "SECRET" not in error.value.message
+
+
 def test_import_browser_array_preserves_unix_epoch_and_flags(tmp_path):
     payload = import_json(tmp_path, [browser_cookie()])
     assert payload.cookies == [
@@ -194,7 +222,7 @@ def test_browser_partition_metadata_rejected_without_mutating_db(tmp_path, metad
     with pytest.raises(SidecarError) as error:
         cookies.replace_cookies(root, profile["id"], source)
     assert error.value.code == PORTABILITY_COOKIE_FILE_INVALID
-    assert error.value.message == "Cookie import file is invalid."
+    assert error.value.message == "Cookie import file is invalid. Cookie #2 failed validation."
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM cookies").fetchall() == before
     destination = tmp_path / "export.json"

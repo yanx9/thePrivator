@@ -493,14 +493,26 @@ def _parse_theprivator_json(
     text: str, *, allow_browser_array: bool = False
 ) -> tuple[list[CookieDTO], int, WarningAccumulator]:
     try:
-        payload = json.loads(text)
+        # A BOM is an encoding marker, not part of the JSON document. Keep
+        # package-embedded parsing strict; tolerate it for user-selected files.
+        payload = json.loads(text.removeprefix("\ufeff") if allow_browser_array else text)
     except json.JSONDecodeError as exc:
         raise SidecarError(
             code=PORTABILITY_COOKIE_FILE_INVALID,
-            message="Cookie import file is invalid.",
+            message=f"Cookie import file is invalid. JSON syntax error at line {exc.lineno}, column {exc.colno}.",
         ) from exc
     if allow_browser_array and isinstance(payload, list):
-        return [_normalize_browser_cookie(raw) for raw in payload], 0, WarningAccumulator()
+        browser_cookies = []
+        for index, raw in enumerate(payload, start=1):
+            try:
+                browser_cookies.append(_normalize_browser_cookie(raw))
+            except SidecarError as exc:
+                # No cookie names, domains, values or raw parser exceptions.
+                raise SidecarError(
+                    code=PORTABILITY_COOKIE_FILE_INVALID,
+                    message=f"Cookie import file is invalid. Cookie #{index} failed validation.",
+                ) from exc
+        return browser_cookies, 0, WarningAccumulator()
     if not isinstance(payload, Mapping):
         _raise_invalid_cookie_file()
     if payload.get("format") != THEPRIVATOR_COOKIE_FORMAT or payload.get("version") != THEPRIVATOR_COOKIE_SCHEMA_VERSION:
@@ -552,6 +564,11 @@ def _normalize_browser_cookie(raw: Any) -> CookieDTO:
     # storeId identifies the source browser store, not the destination profile;
     # it (and other extension-only metadata) is intentionally not persisted.
     normalized["expiresUnix"] = None if session or expiry is None else int(expiry)
+    # Browser exports call SameSite=None what the portable DTO calls
+    # no_restriction. It must not become unspecified (different semantics).
+    same_site = raw.get("sameSite")
+    if isinstance(same_site, str) and same_site.strip().casefold() == "none":
+        normalized["sameSite"] = "no_restriction"
     return normalize_cookie(normalized)
 
 
