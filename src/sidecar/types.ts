@@ -351,6 +351,7 @@ export interface ProxyCheckRouteProof {
 }
 
 export interface ProxyCheckPublicExitLocation {
+  countryCode: string | null;
   country: string | null;
   region: string | null;
   city: string | null;

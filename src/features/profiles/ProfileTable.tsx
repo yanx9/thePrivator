@@ -13,6 +13,7 @@ import {
 } from "./columns";
 import { type ProfileRow, type SelectionIntent, selectionKind } from "./tableModel";
 import styles from "./ProfileTable.module.css";
+import { ProxyExit, type ProxyCheckState } from "./ProxyExit";
 
 export interface FolderName {
   id: string;
@@ -35,6 +36,8 @@ interface ProfileTableProps {
   onStop: (id: string) => void;
   onRowMenu: (id: string, position: { x: number; y: number }) => void;
   emptyMessage: string;
+  proxyChecks?: ReadonlyMap<string, ProxyCheckState>;
+  onCheckProxy?: (id: string) => void;
 }
 
 function formatTimestamp(value: string | null): string {
@@ -54,12 +57,6 @@ function formatTimestamp(value: string | null): string {
   });
 }
 
-function proxyLabel(profile: ProfileRecord): string {
-  return profile.proxy.mode === "direct"
-    ? "Direct"
-    : `${profile.proxy.protocol}://${profile.proxy.host}:${profile.proxy.port}`;
-}
-
 function fingerprintLabel(profile: ProfileRecord): string {
   return profile.defaults.fingerprintMode === "managed" ? "Managed" : "Off";
 }
@@ -74,6 +71,8 @@ function tagHue(tag: string): number {
 }
 
 interface CellProps {
+  proxyCheck?: ProxyCheckState;
+  onCheckProxy?: (id: string) => void;
   row: ProfileRow;
   column: ColumnDescriptor;
   folderNames: ReadonlyMap<string, string>;
@@ -85,7 +84,7 @@ interface CellProps {
   onStop: (id: string) => void;
 }
 
-function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLaunch, onStop }: CellProps) {
+function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLaunch, onStop, proxyCheck, onCheckProxy }: CellProps) {
   const { profile, running } = row;
 
   switch (column.key) {
@@ -154,9 +153,11 @@ function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLa
     case "proxy":
       return (
         <div className={styles.cell} role="gridcell">
-          <span className={profile.proxy.mode === "direct" ? styles.muted : styles.mono}>
-            {proxyLabel(profile)}
-          </span>
+          {profile.lifecycle.deletedAt !== null && profile.proxy.mode === "fixedServer" ? (
+            <span className={styles.muted}>Restore profile to check proxy</span>
+          ) : (
+            <ProxyExit direct={profile.proxy.mode === "direct"} state={proxyCheck} onCheck={onCheckProxy ? () => onCheckProxy(profile.id) : undefined} />
+          )}
         </div>
       );
     case "fingerprint":
@@ -398,6 +399,8 @@ export function ProfileTable({
   onStop,
   onRowMenu,
   emptyMessage,
+  proxyChecks,
+  onCheckProxy,
 }: ProfileTableProps) {
   // Checking `typeof CSS` alone is not enough: an environment can expose CSS
   // without supports(), and content-visibility does nothing when unsupported
@@ -456,6 +459,8 @@ export function ProfileTable({
             folderNames={folderNames}
             selected={selection.has(row.profile.id)}
             busy={busyIds.has(row.profile.id)}
+            proxyCheck={proxyChecks?.get(row.profile.id)}
+            onCheckProxy={onCheckProxy}
             onSelect={onSelect}
             onOpen={onOpen}
             onLaunch={onLaunch}

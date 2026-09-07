@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isCountryCode } from "./countries";
 import type {
   CookieBotConfig,
   CookieBotJob,
@@ -3002,8 +3003,14 @@ function parseProxyCheckPublicExitLocation(value: unknown): ProxyCheckIpHiding["
   }
   const record = requireRecord(value, "The sidecar proxy check public exit location must be null or an object.");
   assertNoForbiddenProxyCheckFields(record, "ipHiding.publicExitLocation");
-  requireExactProxyCheckKeys(record, ["country", "region", "city", "timezone", "isp"], "ipHiding.publicExitLocation");
+  const hasCode = Object.prototype.hasOwnProperty.call(record, "countryCode");
+  requireExactProxyCheckKeys(record, ["country", "region", "city", "timezone", "isp", ...(hasCode ? ["countryCode"] : [])], "ipHiding.publicExitLocation");
+  const countryCode = hasCode ? record.countryCode : null;
+  if (countryCode !== null && !isCountryCode(countryCode)) {
+    throw makeProtocolError("The sidecar proxy check countryCode must be an ISO alpha-2 code or null.");
+  }
   return {
+    countryCode,
     country: record.country === null ? null : requireProxyCheckSafeText(record.country, "ipHiding.publicExitLocation.country", { maxLength: 128 }),
     region: record.region === null ? null : requireProxyCheckSafeText(record.region, "ipHiding.publicExitLocation.region", { maxLength: 128 }),
     city: record.city === null ? null : requireProxyCheckSafeText(record.city, "ipHiding.publicExitLocation.city", { maxLength: 128 }),

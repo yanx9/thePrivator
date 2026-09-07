@@ -24,7 +24,9 @@ a folder your own sync client already keeps up to date.
 - **Proxies per profile**, including authenticated SOCKS5 — Chromium cannot do
   SOCKS authentication itself, so the sidecar runs a local relay for it. A proxy
   check reports what it actually proved, and says "not established" when it
-  proved nothing.
+  proved nothing. Use **Check proxy** in a profile's context menu to refresh
+  its observed public exit IP and country flag in the proxy column. The country
+  is an IP-geolocation estimate, not a guarantee of the server's physical location.
 - **Cookie import and export** directly from a profile's **Cookies** context
   submenu. Import accepts browser-export JSON arrays as well as ThePrivator
   JSON and Netscape `cookies.txt`. Export supports ThePrivator JSON and Netscape,

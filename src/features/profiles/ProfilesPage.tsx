@@ -18,6 +18,7 @@ import type { SidecarClientError } from "../../sidecar/types";
 import { CookieBotDialog } from "./CookieBotDialog";
 import { ColumnManager } from "./ColumnManager";
 import { ProfileTable } from "./ProfileTable";
+import { useProxyChecks } from "./useProxyChecks";
 import { RowMenu } from "./RowMenu";
 import {
   type ColumnKey,
@@ -111,6 +112,8 @@ export function ProfilesPage({
 }: ProfilesPageProps) {
   const { rows, trashed, loading, error, refresh } = data;
 
+  const { states: proxyChecks, check: onCheckProxy } = useProxyChecks(rows);
+
   const [layout, setLayout] = useState<ColumnLayout>(defaultLayout);
   const [sort, setSort] = useState(DEFAULT_SORT);
   const [selection, setSelection] = useState<SelectionState>(EMPTY_SELECTION);
@@ -194,6 +197,8 @@ export function ProfilesPage({
   const performAction = useCallback(
     (action: RowAction, ids: string[]) => {
       switch (action) {
+        case "check-proxy":
+          return onCheckProxy(ids[0]);
         case "cookies-export-json":
         case "cookies-export-netscape":
           return runFor(ids, async () => {
@@ -254,7 +259,7 @@ export function ProfilesPage({
           return Promise.resolve();
       }
     },
-    [onOpenProfile, runFor],
+    [onCheckProxy, onOpenProfile, runFor],
   );
 
   const describeConfirmation = useCallback((action: RowAction, ids: string[], name: string): ConfirmState => {
@@ -356,6 +361,8 @@ export function ProfilesPage({
 
       <ProfileTable
         rows={shown}
+        proxyChecks={proxyChecks}
+        onCheckProxy={onCheckProxy}
         layout={layout}
         sort={sort}
         selection={selection.ids}
@@ -406,6 +413,7 @@ export function ProfilesPage({
           y={menu.y}
           items={buildRowMenu({
             profile: menuRow.profile,
+            checkingProxy: proxyChecks.get(menuRow.profile.id)?.status === "pending",
             running: menuRow.running,
             trashed: view === "trash",
             selectionSize: menuIds.length,

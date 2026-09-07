@@ -11,6 +11,7 @@ import type { ProfileRecord } from "../../sidecar/types";
  */
 
 export type RowAction =
+  | "check-proxy"
   | "cookies"
   | "cookies-export-json"
   | "cookies-export-netscape"
@@ -49,6 +50,7 @@ export interface MenuItem {
 }
 
 export interface RowMenuContext {
+  checkingProxy?: boolean;
   profile: ProfileRecord;
   running: boolean;
   trashed: boolean;
@@ -124,6 +126,7 @@ export function buildRowMenu(context: RowMenuContext): MenuItem[] {
       ? { action: "stop", label: "Stop" }
       : { action: "launch", label: "Launch" },
     { action: "open", label: "Edit profile" },
+    { action: "check-proxy", label: context.checkingProxy ? "Checking proxy…" : "Check proxy", disabledReason: context.checkingProxy ? "A proxy check is already running" : undefined },
     { action: "duplicate", label: "Duplicate", separatorBefore: true },
     profile.organization.favorite
       ? { action: "unfavorite", label: "Remove from favorites" }
