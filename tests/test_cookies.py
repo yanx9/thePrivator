@@ -34,6 +34,25 @@ def import_json(tmp_path, payload):
     return cookies._read_import_payload(source)
 
 
+@pytest.mark.parametrize("same_site", ["Lax", "Strict", "Unspecified", "None"])
+@pytest.mark.parametrize("session", [True, False])
+def test_public_json_export_uses_browser_array_contract(tmp_path, same_site, session):
+    root = tmp_path / "store"
+    profile = ProfileStore(root).create("Synthetic")["profile"]
+    source = tmp_path / "input.json"
+    expected = browser_cookie(
+        domain="example.invalid", hostOnly=True, sameSite=same_site,
+        session=session, expirationDate=0 if session else 1_900_000_000,
+        storeId="Default",
+    )
+    source.write_text(json.dumps([expected]))
+    cookies.replace_cookies(root, profile["id"], source)
+    destination = tmp_path / "output.json"
+    cookies.export_cookies(root, profile["id"], destination, "json")
+    assert json.loads(destination.read_text()) == [expected]
+    assert cookies.replace_cookies(root, profile["id"], destination)["importedCount"] == 1
+
+
 @pytest.mark.parametrize("same_site", ["None", "none", "NONE"])
 def test_browser_same_site_none_is_unrestricted(tmp_path, same_site):
     payload = import_json(tmp_path, [browser_cookie(sameSite=same_site)])
@@ -73,7 +92,7 @@ def test_import_browser_array_preserves_unix_epoch_and_flags(tmp_path):
             value="synthetic-value",
             secure=True,
             http_only=True,
-            expires_unix=13_462_401_644,
+            expires_unix=13_462_401_644.75,
             same_site="lax",
         )
     ]
@@ -81,7 +100,7 @@ def test_import_browser_array_preserves_unix_epoch_and_flags(tmp_path):
         cookies.chrome_time_to_unix(
             cookies.unix_time_to_chrome(payload.cookies[0].expires_unix)
         )
-        == 13_462_401_644
+        == 13_462_401_644.75
     )
     assert payload.skipped_count == 0
 
@@ -286,4 +305,18 @@ def test_browser_expiry_round_trip_through_sqlite(tmp_path, expiry):
         row = connection.execute(
             "SELECT expires_utc, is_secure, is_httponly, samesite FROM cookies"
         ).fetchone()
-    assert row == (cookies.unix_time_to_chrome(int(expiry)), 1, 1, 1)
+    assert row == (cookies.unix_time_to_chrome(expiry), 1, 1, 1)
+
+
+@pytest.mark.parametrize("expiry", [1_900_000_000.093325, 13_462_401_644.093325])
+def test_browser_json_preserves_fractional_expiry_through_database(tmp_path, expiry):
+    root = tmp_path / "store"
+    profile = ProfileStore(root).create("Synthetic")["profile"]
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps([browser_cookie(expirationDate=expiry)]))
+    cookies.replace_cookies(root, profile["id"], source)
+    destination = tmp_path / "output.json"
+    cookies.export_cookies(root, profile["id"], destination, "json")
+    exported = json.loads(destination.read_text())
+    assert exported[0]["expirationDate"] == expiry
+    assert cookies._read_import_payload(destination).cookies[0].expires_unix == expiry

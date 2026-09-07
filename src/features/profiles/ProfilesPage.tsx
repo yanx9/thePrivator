@@ -204,7 +204,7 @@ export function ProfilesPage({
           return runFor(ids, async () => {
             const netscape = action === "cookies-export-netscape";
             const destination = await pickSaveTarget(netscape ? "Export cookies as cookies.txt" : "Export cookies as JSON", [
-              { name: netscape ? "Netscape cookies" : "ThePrivator cookies", extensions: [netscape ? "txt" : "json"] },
+              { name: netscape ? "Netscape cookies" : "Browser cookies JSON", extensions: [netscape ? "txt" : "json"] },
             ]);
             if (destination === null) return;
             const result = await exportProfileCookies(ids[0], destination, netscape ? "netscape" : "theprivator-json");

@@ -29,7 +29,8 @@ a folder your own sync client already keeps up to date.
   is an IP-geolocation estimate, not a guarantee of the server's physical location.
 - **Cookie import and export** directly from a profile's **Cookies** context
   submenu. Import accepts browser-export JSON arrays as well as ThePrivator
-  JSON and Netscape `cookies.txt`. Export supports ThePrivator JSON and Netscape,
+  JSON and Netscape `cookies.txt`. JSON export uses the same browser-array format
+  as import; Netscape export remains available for compatibility,
   and whole-profile `.tpkg` packages that carry the fingerprint, the proxy and
   the browsing data — but never the proxy password.
 - **Cookie bot** visits your URLs in the selected profile with its proxy and
@@ -49,6 +50,17 @@ the profile list. Stop the profile before importing or exporting. Import
 replaces its existing cookie set, so export a backup first if you need one.
 Cookie exports can contain active login sessions: keep them private and only
 import sessions you are authorized to use.
+
+JSON cookie files are a top-level array (no wrapper), with `name`, `path`,
+`value`, `domain`, `secure`, `session`, `storeId`, `hostOnly`, `httpOnly`,
+`sameSite`, and `expirationDate`. Exports use `storeId: "Default"` and SameSite
+values `Lax`, `Strict`, `None`, or `Unspecified`. Session cookies have
+`expirationDate: 0`; persistent expiry is Unix seconds, preserving fractions
+up to Chromium's microsecond precision. No epoch is guessed from a number's size.
+Import honors `hostOnly` over a conflicting leading dot in `domain`, normalizing
+the domain to the scope Chromium stores. Source `storeId` does not select the
+destination profile. Internal `.tpkg` cookie payloads retain their versioned
+format and whole-second expiry for compatibility with older package readers.
 
 **Run Cookie Bot** accepts URLs separated by spaces, commas or newlines. Bare
 hostnames use HTTPS. Leaving the list empty uses the default websites shown in

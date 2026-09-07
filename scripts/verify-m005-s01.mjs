@@ -953,8 +953,7 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
       assert(payload.exportedCount === 0 && payload.skippedCount === 0 && payload.warningCount === 0, "Zero-cookie export did not report clean zero counts.", { phase: "zero-cookie" });
       const exported = JSON.parse(readFileSync(zeroExportJsonPath, "utf8"));
-      assert(exported.format === "theprivator.cookies" && exported.version === 1, "Zero-cookie JSON export used the wrong schema.", { phase: "zero-cookie" });
-      assert(Array.isArray(exported.cookies) && exported.cookies.length === 0, "Zero-cookie JSON export did not write an empty cookie list.", { phase: "zero-cookie" });
+      assert(Array.isArray(exported) && exported.length === 0, "Zero-cookie JSON export did not write an empty cookie array.", { phase: "zero-cookie" });
       sidecar.emptyExported = true;
       sidecar.counts.zeroJsonExported = payload.exportedCount;
       return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
@@ -979,8 +978,8 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
       assert(payload.exportedCount === 2, "JSON export did not report two exported cookies.", { phase: "export" });
       const exported = JSON.parse(readFileSync(exportJsonPath, "utf8"));
-      assert(exported.format === "theprivator.cookies" && exported.version === 1, "JSON export used the wrong schema.", { phase: "export" });
-      assert(Array.isArray(exported.cookies) && exported.cookies.length === 2, "JSON export did not write the expected cookie count.", { phase: "export" });
+      assert(Array.isArray(exported) && exported.length === 2, "JSON export did not write the expected cookie array.", { phase: "export" });
+      assert(exported.every((cookie) => cookie.storeId === "Default" && typeof cookie.session === "boolean" && typeof cookie.expirationDate === "number" && ["Lax", "Strict", "None", "Unspecified"].includes(cookie.sameSite)), "JSON export used the wrong cookie fields.", { phase: "export" });
       sidecar.exportedJson = true;
       sidecar.counts.jsonExported = payload.exportedCount;
       return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };

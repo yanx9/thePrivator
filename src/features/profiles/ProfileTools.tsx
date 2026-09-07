@@ -177,7 +177,7 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
         [
           format === "netscape"
             ? { name: "Netscape cookies", extensions: ["txt"] }
-            : { name: "ThePrivator cookies", extensions: ["json"] },
+            : { name: "Browser cookies JSON", extensions: ["json"] },
         ],
       );
       if (destination === null) {
@@ -249,6 +249,11 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
           them. A package carries the fingerprint, the proxy server and the browsing data, but never the
           proxy password. The browser must be stopped for all of these: copying a profile mid-write produces
           one that will not open.
+        </p>
+        <p className={styles.hint}>
+          JSON import and export use the same cookie array: expirationDate is Unix seconds,
+          session cookies use 0, and exports use storeId "Default". Older ThePrivator JSON
+          and cookies.txt can still be imported.
         </p>
         <div className={styles.toolActions}>
           <button type="button" disabled={busy !== null || running} onClick={exportPackage}>
