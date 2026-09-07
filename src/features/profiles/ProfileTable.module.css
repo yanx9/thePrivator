@@ -226,6 +226,34 @@
     text-overflow: ellipsis;
   }
 
+  .notesEditor {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    min-width: 0;
+  }
+
+  .notesEditor textarea {
+    width: 100%;
+    min-width: 0;
+    resize: none;
+    padding: 3px;
+    font: inherit;
+    color: inherit;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .notesEditor button {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+  }
+
   .tagList {
     display: flex;
     gap: var(--space-1);

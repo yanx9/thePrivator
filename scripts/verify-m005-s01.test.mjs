@@ -354,14 +354,15 @@ describe("verify-m005-s01 final summary", () => {
 });
 
 describe("verify-m005-s01 source sidecar smoke", () => {
-  it("proves JSON/Netscape export, replace semantics, validation-before-clear, busy rejection, and redacted diagnostics", () => {
+  it("proves JSON-only export, replace semantics, validation-before-clear, busy rejection, and redacted diagnostics", () => {
     const lines = captureConsole();
     const summary = runSidecarOnlySmoke();
 
     expect(summary.status).toBe("pass");
     expect(summary.sidecar.emptyExported).toBe(true);
     expect(summary.sidecar.exportedJson).toBe(true);
-    expect(summary.sidecar.exportedNetscape).toBe(true);
+    expect(summary.sidecar.exportedNetscape).toBe(false);
+    expect(summary.sidecar.legacyExportRejected).toBe(true);
     expect(summary.sidecar.replaced).toBe(true);
     expect(summary.sidecar.invalidImportPreservedRows).toBe(true);
     expect(summary.sidecar.oversizedImportPreservedRows).toBe(true);
@@ -369,12 +370,12 @@ describe("verify-m005-s01 source sidecar smoke", () => {
     expect(summary.sidecar.busyRejected).toBe(true);
     expect(summary.sidecar.diagnosticsRedacted).toBe(true);
     expect(summary.sidecar.cleanup).toEqual({ status: "removed", retained: false });
-    expect(summary.sidecar.counts).toMatchObject({ zeroJsonExported: 0, jsonExported: 2, netscapeExported: 2, imported: 2, replaced: 1, skipped: 1 });
+    expect(summary.sidecar.counts).toMatchObject({ zeroJsonExported: 0, jsonExported: 2, netscapeExported: 0, imported: 2, replaced: 1, skipped: 1 });
 
     const parsedEvents = lines.map((line) => JSON.parse(line));
     expect(parsedEvents.some((event) => event.phase === "sidecar.zero-cookie-export" && event.exportedCount === 0 && event.warningCount === 0)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.export-json" && event.exportedCount === 2)).toBe(true);
-    expect(parsedEvents.some((event) => event.phase === "sidecar.export-netscape" && event.warningCount === 1)).toBe(true);
+    expect(parsedEvents.some((event) => event.phase === "sidecar.legacy-export-rejected" && event.errorCode === "PORTABILITY_UNSUPPORTED_FORMAT")).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.replace-json" && event.importedCount === 2)).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.unsupported-format-rejected" && event.errorCode === "PORTABILITY_UNSUPPORTED_FORMAT")).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "sidecar.busy-profile-rejected" && event.errorCode === "PORTABILITY_PROFILE_BUSY")).toBe(true);

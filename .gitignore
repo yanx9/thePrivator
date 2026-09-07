@@ -137,3 +137,10 @@ vendor/
 coverage/
 .cache/
 tmp/
+
+src-tauri/binaries/_internal/
+
+# Local browser data and editor reports are never release source.
+/*/user-data/
+/.VSCodeCounter/
+/tests/doNotTrack.py

@@ -31,6 +31,22 @@ function renderShell(overrides: Partial<Parameters<typeof AppShell>[0]> = {}) {
 }
 
 describe("AppShell", () => {
+  it("uses the native macOS title bar without duplicate window controls", () => {
+    const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    try {
+      renderShell();
+
+      expect(screen.queryByLabelText("ThePrivator window chrome")).not.toBeInTheDocument();
+      for (const name of [/minimize window/i, /maximize or restore window/i, /close window/i]) {
+        expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+      }
+      expect(screen.getByRole("main", { name: /profiles workspace/i })).toBeInTheDocument();
+      expect(screen.getByRole("navigation", { name: /primary navigation/i })).toBeInTheDocument();
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
   it("names its landmarks so the workspace is reachable without a mouse", () => {
     renderShell();
 
@@ -74,10 +90,10 @@ describe("AppShell", () => {
   });
 
   it("marks the destination matching the route as current", () => {
-    renderShell({ route: { name: "proxies" } });
+    renderShell({ route: { name: "automation" } });
 
     const nav = screen.getByRole("navigation", { name: /primary navigation/i });
-    expect(within(nav).getByRole("link", { name: "Proxies" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Automation" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Profiles" })).not.toHaveAttribute("aria-current");
   });
 

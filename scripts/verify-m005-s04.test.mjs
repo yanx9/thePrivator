@@ -552,7 +552,7 @@ describe("verify-m005-s04 archive and diagnostics inspectors", () => {
     const cookies = [
       { domain: "m005-s04-export.invalid", name: "m005_s04_export", value: "m005-s04-export-value" },
     ];
-    writeJson(exportPath, { format: "theprivator.cookies", version: 1, cookies });
+    writeJson(exportPath, cookies);
     const context = createM005S04PublicScanContext({ appDataRoot: seeded.appDataRoot, selectedPaths: [exportPath], cookieDomains: cookies.map((cookie) => cookie.domain), cookieNames: cookies.map((cookie) => cookie.name), cookieValues: cookies.map((cookie) => cookie.value) });
     const inspected = inspectM005S04CookieExportFile({ exportPath, expectedRows: cookies }, context);
     expect(inspected.log).toMatchObject({ cookieExportFile: "valid", cookieRowCount: 1, expectedRowsPresent: true, selectionPrivate: true });

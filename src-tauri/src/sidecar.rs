@@ -64,7 +64,6 @@ const SYNC_RESOLVE_TIMEOUT: Duration = Duration::from_secs(300);
 const SYNC_PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_PROFILE_PACKAGE_ARGUMENT_CHARS: usize = 4096;
 
-const COOKIE_FORMAT_NETSCAPE: &str = "netscape";
 const COOKIE_FORMAT_THEPRIVATOR_JSON: &str = "theprivator-json";
 
 const SIDECAR_CONFIGURATION_ERROR: &str = "SIDECAR_CONFIGURATION_ERROR";
@@ -414,6 +413,20 @@ pub async fn profiles_create(
     let runner = TauriSidecarRunner::new(app.clone());
     let result = profiles_create_with_runner(&runner, store_root, name).await;
     events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.create");
+    result
+}
+
+#[tauri::command]
+pub async fn profiles_duplicate(
+    app: tauri::AppHandle,
+    profile_id: String,
+) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    let store_root = resolve_profile_store_root(&app)?;
+    let runner = TauriSidecarRunner::new(app.clone());
+    let result = invoke_method_with_params_timeout(&runner, "profiles.duplicate", json!({
+        "storeRoot": store_root, "profileId": profile_id,
+    }), PROFILE_PACKAGE_TIMEOUT).await;
+    events::notify_on_success(&app, &result, events::PROFILES_CHANGED, "profiles.duplicate");
     result
 }
 
@@ -1330,7 +1343,7 @@ fn validate_bounded_non_empty_arg(
 fn validate_cookie_export_format(format: &str) -> Result<(), SidecarCommandError> {
     validate_non_empty_arg("cookie export format", format)?;
     match format {
-        COOKIE_FORMAT_NETSCAPE | COOKIE_FORMAT_THEPRIVATOR_JSON => Ok(()),
+        COOKIE_FORMAT_THEPRIVATOR_JSON => Ok(()),
         _ => Err(bridge_error(
             SIDECAR_PROTOCOL_ERROR,
             "The cookie export format is unsupported.",
@@ -3215,7 +3228,7 @@ mod tests {
 
     #[test]
     fn profile_cookies_export_injects_store_root_profile_path_and_format_only() {
-        for format in [COOKIE_FORMAT_NETSCAPE, COOKIE_FORMAT_THEPRIVATOR_JSON] {
+        for format in [COOKIE_FORMAT_THEPRIVATOR_JSON] {
             let runner = FakeRunner::new(FakeMode::HealthSuccess);
 
             run_profile_cookies_export(
@@ -3284,7 +3297,7 @@ mod tests {
             "/app/data/root",
             "profile-id",
             "/selected/private/export.cookies",
-            COOKIE_FORMAT_NETSCAPE,
+            COOKIE_FORMAT_THEPRIVATOR_JSON,
         )
         .expect_err("cookie busy error surfaces");
 
@@ -3308,14 +3321,14 @@ mod tests {
                 "empty profile id",
                 " ",
                 "/selected/private/export.cookies",
-                COOKIE_FORMAT_NETSCAPE,
+                COOKIE_FORMAT_THEPRIVATOR_JSON,
                 "profile id",
             ),
             (
                 "empty destination path",
                 "profile-id",
                 "  ",
-                COOKIE_FORMAT_NETSCAPE,
+                COOKIE_FORMAT_THEPRIVATOR_JSON,
                 "destination path",
             ),
             (
@@ -3330,6 +3343,13 @@ mod tests {
                 "profile-id",
                 "/selected/private/export.cookies",
                 "chromium-sqlite",
+                "unsupported",
+            ),
+            (
+                "removed Netscape export",
+                "profile-id",
+                "/selected/private/export.cookies",
+                "netscape",
                 "unsupported",
             ),
         ];

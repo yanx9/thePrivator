@@ -13,7 +13,7 @@ import {
   replaceProfileCookies,
 } from "../../sidecar/client";
 import type {
-  CookieExportFormat,
+
   IdentityAuditCollectResult,
   IdentityAuditPlanResult,
   ProfileIdentity,
@@ -170,20 +170,16 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
       });
     });
 
-  const exportCookies = (format: CookieExportFormat) =>
+  const exportCookies = () =>
     run("cookies", async () => {
       const destination = await pickSaveTarget(
-        format === "netscape" ? "Export cookies as cookies.txt" : "Export cookies as JSON",
-        [
-          format === "netscape"
-            ? { name: "Netscape cookies", extensions: ["txt"] }
-            : { name: "ThePrivator cookies", extensions: ["json"] },
-        ],
+        "Export cookies as JSON",
+        [{ name: "Browser cookies JSON", extensions: ["json"] }],
       );
       if (destination === null) {
         return;
       }
-      const result = await exportProfileCookies(profileId, destination, format);
+      const result = await exportProfileCookies(profileId, destination, "theprivator-json");
       setNote({
         tone: result.skippedCount > 0 ? "warn" : "ok",
         text:
@@ -250,15 +246,17 @@ export function ProfileTools({ profileId, running, identity }: ProfileToolsProps
           proxy password. The browser must be stopped for all of these: copying a profile mid-write produces
           one that will not open.
         </p>
+        <p className={styles.hint}>
+          JSON import and export use the same cookie array: expirationDate is Unix seconds,
+          session cookies use 0, and exports use storeId "Default". Older ThePrivator JSON
+          and cookies.txt can still be imported.
+        </p>
         <div className={styles.toolActions}>
           <button type="button" disabled={busy !== null || running} onClick={exportPackage}>
             {busy === "package" ? "Exporting…" : "Export as package"}
           </button>
-          <button type="button" disabled={busy !== null || running} onClick={() => exportCookies("theprivator-json")}>
+          <button type="button" disabled={busy !== null || running} onClick={exportCookies}>
             Export cookies (JSON)
-          </button>
-          <button type="button" disabled={busy !== null || running} onClick={() => exportCookies("netscape")}>
-            Export cookies (cookies.txt)
           </button>
           <button type="button" disabled={busy !== null || running} onClick={replaceCookies}>
             Import cookies…

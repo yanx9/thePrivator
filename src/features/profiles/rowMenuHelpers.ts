@@ -14,7 +14,6 @@ export type RowAction =
   | "check-proxy"
   | "cookies"
   | "cookies-export-json"
-  | "cookies-export-netscape"
   | "cookies-import"
   | "cookie-bot"
   | "launch"
@@ -136,7 +135,6 @@ export function buildRowMenu(context: RowMenuContext): MenuItem[] {
     { action: "export", label: "Export…", separatorBefore: true },
     { action: "cookies", label: "Cookies", children: [
       { action: "cookies-export-json", label: "Export (JSON)…", disabledReason: running ? "Stop the profile first" : undefined },
-      { action: "cookies-export-netscape", label: "Export (cookies.txt)…", disabledReason: running ? "Stop the profile first" : undefined },
       { action: "cookies-import", label: "Import…", disabledReason: running ? "Stop the profile first" : undefined },
     ] },
     { action: "cookie-bot", label: "Run Cookie Bot…" },

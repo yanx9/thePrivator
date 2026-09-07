@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ThePrivator",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "identifier": "com.theprivator.desktop",
   "build": {
     "beforeDevCommand": "npm run sidecar:build && npm run dev",

@@ -14,6 +14,7 @@ import sqlite3
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
@@ -37,7 +38,7 @@ THEPRIVATOR_COOKIE_FORMAT = "theprivator.cookies"
 THEPRIVATOR_COOKIE_SCHEMA_VERSION = 1
 FORMAT_NETSCAPE = "netscape"
 FORMAT_THEPRIVATOR_JSON = "theprivator-json"
-SUPPORTED_EXPORT_FORMATS = frozenset({FORMAT_NETSCAPE, FORMAT_THEPRIVATOR_JSON})
+SUPPORTED_EXPORT_FORMATS = frozenset({FORMAT_THEPRIVATOR_JSON})
 MAX_IMPORT_BYTES = 1_048_576
 MAX_WARNING_OBJECTS = 20
 CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600
@@ -47,7 +48,7 @@ _WARNING_MESSAGES = {
     "COOKIE_VALUE_UNAVAILABLE": "Some stored cookies could not be exported because their values were unavailable to the sidecar.",
     "COOKIE_ROW_UNSUPPORTED": "Some stored cookies had unsupported shapes and were skipped.",
     "COOKIE_SCHEMA_UNSUPPORTED": "The cookie database schema was not supported by the portability reader.",
-    "NETSCAPE_METADATA_OMITTED": "Some cookie metadata is not represented by Netscape cookies.txt and was omitted from that export.",
+
     "IMPORT_DUPLICATE_REPLACED": "Duplicate imported cookies were resolved deterministically by domain, path, and name.",
 }
 
@@ -118,7 +119,7 @@ class CookieDTO:
     value: str
     secure: bool
     http_only: bool
-    expires_unix: Optional[int]
+    expires_unix: Optional[Union[int, float]]
     same_site: Optional[str] = None
     priority: Optional[str] = None
 
@@ -195,7 +196,13 @@ def export_cookies(
     canonical_format = normalize_export_format(export_format)
     profile = _load_stopped_profile(store_root, profile_id)
     cookies, skipped_count, warnings = _read_profile_cookies(store_root, profile)
-    serialized, serialization_warnings = _serialize_cookies(cookies, canonical_format)
+    # Public JSON files use the browser-array contract. Package-internal JSON
+    # remains versioned so older .tpkg readers keep their established schema.
+    if canonical_format == FORMAT_THEPRIVATOR_JSON:
+        serialized = json.dumps([_cookie_to_browser_json(cookie) for cookie in cookies], ensure_ascii=False, indent=2) + "\n"
+        serialization_warnings = WarningAccumulator()
+    else:
+        serialized, serialization_warnings = _serialize_cookies(cookies, canonical_format)
     warnings.extend(serialization_warnings)
     _write_export_file(destination_path, serialized)
     public_warnings = warnings.to_public()
@@ -300,8 +307,7 @@ def normalize_export_format(value: Any) -> str:
             message="Cookie export format is not supported.",
         )
     normalized = value.strip().casefold().replace("_", "-")
-    if normalized in {"netscape", "cookies-txt", "cookies.txt", "txt"}:
-        return FORMAT_NETSCAPE
+
     if normalized in {"theprivator-json", "theprivator", "json", "theprivator.cookies"}:
         return FORMAT_THEPRIVATOR_JSON
     raise SidecarError(
@@ -424,7 +430,7 @@ def _has_encrypted_value(value: Any) -> bool:
     return bool(value)
 
 
-def _db_expiry_to_unix(data: Mapping[str, Any]) -> Optional[int]:
+def _db_expiry_to_unix(data: Mapping[str, Any]) -> Optional[Union[int, float]]:
     if _coerce_int(data.get("has_expires"), 1) == 0 or _coerce_int(data.get("is_persistent"), 1) == 0:
         return None
     return chrome_time_to_unix(_coerce_int(data.get("expires_utc"), 0))
@@ -493,14 +499,26 @@ def _parse_theprivator_json(
     text: str, *, allow_browser_array: bool = False
 ) -> tuple[list[CookieDTO], int, WarningAccumulator]:
     try:
-        payload = json.loads(text)
+        # A BOM is an encoding marker, not part of the JSON document. Keep
+        # package-embedded parsing strict; tolerate it for user-selected files.
+        payload = json.loads(text.removeprefix("\ufeff") if allow_browser_array else text)
     except json.JSONDecodeError as exc:
         raise SidecarError(
             code=PORTABILITY_COOKIE_FILE_INVALID,
-            message="Cookie import file is invalid.",
+            message=f"Cookie import file is invalid. JSON syntax error at line {exc.lineno}, column {exc.colno}.",
         ) from exc
     if allow_browser_array and isinstance(payload, list):
-        return [_normalize_browser_cookie(raw) for raw in payload], 0, WarningAccumulator()
+        browser_cookies = []
+        for index, raw in enumerate(payload, start=1):
+            try:
+                browser_cookies.append(_normalize_browser_cookie(raw))
+            except SidecarError as exc:
+                # No cookie names, domains, values or raw parser exceptions.
+                raise SidecarError(
+                    code=PORTABILITY_COOKIE_FILE_INVALID,
+                    message=f"Cookie import file is invalid. Cookie #{index} failed validation.",
+                ) from exc
+        return browser_cookies, 0, WarningAccumulator()
     if not isinstance(payload, Mapping):
         _raise_invalid_cookie_file()
     if payload.get("format") != THEPRIVATOR_COOKIE_FORMAT or payload.get("version") != THEPRIVATOR_COOKIE_SCHEMA_VERSION:
@@ -548,10 +566,15 @@ def _normalize_browser_cookie(raw: Any) -> CookieDTO:
     if not session and expiry is None:
         _raise_invalid_cookie_file()
     # Browser extension expiry is Unix seconds, never Chromium epoch seconds.
-    # Our portable DTO stores whole seconds, so discard the fractional part.
+    # Preserve fractions through the DTO and SQLite's microsecond timestamp.
     # storeId identifies the source browser store, not the destination profile;
     # it (and other extension-only metadata) is intentionally not persisted.
-    normalized["expiresUnix"] = None if session or expiry is None else int(expiry)
+    normalized["expiresUnix"] = None if session or expiry is None else expiry
+    # Browser exports call SameSite=None what the portable DTO calls
+    # no_restriction. It must not become unspecified (different semantics).
+    same_site = raw.get("sameSite")
+    if isinstance(same_site, str) and same_site.strip().casefold() == "none":
+        normalized["sameSite"] = "no_restriction"
     return normalize_cookie(normalized)
 
 
@@ -663,12 +686,12 @@ def _required_bool(value: Any) -> bool:
     return value
 
 
-def _optional_expiry(value: Any) -> Optional[int]:
+def _optional_expiry(value: Any) -> Optional[Union[int, float]]:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         _raise_invalid_cookie_file()
-    if value < 0 or value > 253_402_300_799:
+    if not 0 <= value <= 253_402_300_799:
         _raise_invalid_cookie_file()
     return value
 
@@ -704,12 +727,29 @@ def _serialize_cookies(cookies: Sequence[CookieDTO], export_format: str) -> tupl
             "cookies": [_cookie_to_json(cookie) for cookie in cookies],
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", WarningAccumulator()
-    if export_format == FORMAT_NETSCAPE:
-        return _serialize_netscape(cookies)
+
     raise SidecarError(
         code=PORTABILITY_UNSUPPORTED_FORMAT,
         message="Cookie export format is not supported.",
     )
+
+
+def _cookie_to_browser_json(cookie: CookieDTO) -> JsonObject:
+    return {
+        "name": cookie.name,
+        "path": cookie.path,
+        "value": cookie.value,
+        "domain": cookie.domain,
+        "secure": cookie.secure,
+        "session": cookie.expires_unix is None,
+        "storeId": "Default",
+        "hostOnly": cookie.host_only,
+        "httpOnly": cookie.http_only,
+        "sameSite": {
+            "lax": "Lax", "strict": "Strict", "no_restriction": "None",
+        }.get(cookie.same_site or "unspecified", "Unspecified"),
+        "expirationDate": cookie.expires_unix if cookie.expires_unix is not None else 0,
+    }
 
 
 def _cookie_to_json(cookie: CookieDTO) -> JsonObject:
@@ -721,32 +761,11 @@ def _cookie_to_json(cookie: CookieDTO) -> JsonObject:
         "value": cookie.value,
         "secure": cookie.secure,
         "httpOnly": cookie.http_only,
-        "expiresUnix": cookie.expires_unix,
+        # Version 1 package readers require integer seconds.
+        "expiresUnix": int(cookie.expires_unix) if cookie.expires_unix is not None else None,
         "sameSite": cookie.same_site,
         "priority": cookie.priority,
     }
-
-
-def _serialize_netscape(cookies: Sequence[CookieDTO]) -> tuple[str, WarningAccumulator]:
-    warnings = WarningAccumulator()
-    lines = [
-        "# Netscape HTTP Cookie File",
-        "# Generated by ThePrivator cookie portability.",
-    ]
-    omitted_metadata_count = 0
-    for cookie in cookies:
-        if cookie.same_site not in {None, "unspecified"} or cookie.priority not in {None, "medium"}:
-            omitted_metadata_count += 1
-        domain = cookie.domain
-        if cookie.http_only:
-            domain = f"#HttpOnly_{domain}"
-        include_subdomains = "FALSE" if cookie.host_only else "TRUE"
-        secure = "TRUE" if cookie.secure else "FALSE"
-        expires = str(cookie.expires_unix if cookie.expires_unix is not None else 0)
-        lines.append("\t".join([domain, include_subdomains, cookie.path, secure, expires, cookie.name, cookie.value]))
-    if omitted_metadata_count:
-        warnings.add("NETSCAPE_METADATA_OMITTED", omitted_metadata_count)
-    return "\n".join(lines) + "\n", warnings
 
 
 def _replace_profile_cookies(
@@ -988,17 +1007,21 @@ def _coerce_int(value: Any, default: int) -> int:
     return default
 
 
-def chrome_time_to_unix(value: int) -> Optional[int]:
+def chrome_time_to_unix(value: int) -> Optional[Union[int, float]]:
     if value <= 0:
         return None
-    unix = int(value // 1_000_000 - CHROME_EPOCH_OFFSET_SECONDS)
-    return unix if unix > 0 else None
+    microseconds = value - CHROME_EPOCH_OFFSET_SECONDS * 1_000_000
+    if microseconds <= 0:
+        return None
+    seconds, fraction = divmod(microseconds, 1_000_000)
+    return seconds if fraction == 0 else float(Decimal(microseconds) / 1_000_000)
 
 
-def unix_time_to_chrome(value: Optional[int]) -> int:
+def unix_time_to_chrome(value: Optional[Union[int, float]]) -> int:
     if value is None or value <= 0:
         return 0
-    return int((value + CHROME_EPOCH_OFFSET_SECONDS) * 1_000_000)
+    # Add the epoch as integers, avoiding float cancellation at Chrome's epoch.
+    return int(Decimal(str(value)) * 1_000_000) + CHROME_EPOCH_OFFSET_SECONDS * 1_000_000
 
 
 __all__ = [

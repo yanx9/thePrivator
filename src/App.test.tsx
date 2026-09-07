@@ -74,10 +74,10 @@ describe("App", () => {
   it("follows the hash to another destination without a reload", () => {
     render(<App />);
 
-    navigate("#/proxies");
+    navigate("#/settings/diagnostics");
 
     expect(screen.queryByTestId("profiles-table")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Proxies" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Diagnostics" })).toBeInTheDocument();
   });
 
   it("keeps the folder rail on a profile detail route and drops it elsewhere", () => {
@@ -111,7 +111,7 @@ describe("App", () => {
     render(<App />);
 
     const nav = screen.getByRole("navigation", { name: /primary navigation/i });
-    for (const name of ["Profiles", "Proxies", "Templates", "Automation"]) {
+    for (const name of ["Profiles", "Automation"]) {
       expect(nav).toContainElement(screen.getByRole("link", { name }));
     }
     // Settings is a gear beside the search box, not a fifth nav slot.
@@ -129,6 +129,17 @@ describe("App", () => {
 });
 
 describe("App sidebar counts", () => {
+  beforeEach(() => { window.location.hash = "#/profiles"; });
+  it("removes standalone proxy and template navigation and falls back for old links", async () => {
+    render(<App />);
+    await screen.findByLabelText("Profiles: 2");
+    expect(screen.queryByRole("link", { name: "Proxies" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Templates" })).not.toBeInTheDocument();
+    for (const hash of ["#/proxies", "#/templates"]) {
+      navigate(hash);
+      expect(screen.getByTestId("profiles-table")).toBeInTheDocument();
+    }
+  });
   function identity() {
     return {
       identityVersion: 2,
@@ -183,7 +194,7 @@ describe("App sidebar counts", () => {
             storeVersion: 4,
             profiles: [
               record(ALPHA, "Alpha", { organization: { folderId: null, tags: [], notes: "", favorite: true, color: null } }),
-              record(BETA, "Beta"),
+              record(BETA, "Beta", { organization: { folderId: BETA, tags: [], notes: "", favorite: false, color: null } }),
             ],
             count: 2,
           }),
@@ -226,6 +237,12 @@ describe("App sidebar counts", () => {
 
     const rail = await screen.findByRole("navigation", { name: /profile folders and views/i });
     expect(await within(rail).findByRole("link", { name: "All profiles, 2 profiles" })).toBeInTheDocument();
+  });
+
+  it("shows saved profile folders as navigable counted sidebar entries", async () => {
+    render(<App />);
+    const folder = await screen.findByRole("treeitem", { name: `${BETA}, 1 profile` });
+    expect(folder).toHaveAttribute("href", `#/profiles?folder=${BETA}`);
   });
 
   it("counts favorites, running browsers and the trash separately", async () => {

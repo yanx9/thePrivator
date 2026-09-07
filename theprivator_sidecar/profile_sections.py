@@ -90,8 +90,8 @@ def normalize_organization(value: Any) -> JsonObject:
     record = _require_object(value, default_organization(), _ORGANIZATION_FIELDS)
 
     folder_id = record.get("folderId")
-    if folder_id is not None and not _is_uuid(folder_id):
-        raise _organization_error("Profile folder id must be a uuid or null.")
+    if folder_id is not None and (not isinstance(folder_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", folder_id) is None):
+        raise _organization_error("Profile folder id must be a route-safe name of 1–64 characters or null.")
 
     tags = record.get("tags", [])
     if not isinstance(tags, list) or len(tags) > MAX_TAGS_PER_PROFILE:
@@ -119,7 +119,7 @@ def normalize_organization(value: Any) -> JsonObject:
         raise _organization_error(f"Profile notes must be {MAX_NOTES_LENGTH} characters or fewer.")
     # Notes are free text a user typed: slashes and colons are ordinary content,
     # so the guard is control characters and length, never a path-shaped rejection.
-    if _contains_control_characters(notes):
+    if _contains_control_characters(notes.replace("\n", "").replace("\r", "").replace("\t", "")):
         raise _organization_error("Profile notes cannot contain control characters.")
 
     favorite = record.get("favorite", False)

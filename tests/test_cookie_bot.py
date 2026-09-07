@@ -5,6 +5,10 @@ from theprivator_sidecar.protocol import SidecarError
 
 
 class PolicyTests(unittest.TestCase):
+    def test_job_timestamps_use_the_shared_utc_wire_format(self):
+        job = cookie_bot.new_job('profile', {})
+        self.assertRegex(job['createdAt'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+
     def test_defaults_are_explicit_and_bounded(self):
         config = cookie_bot.validate_config({})
         self.assertEqual(config['urls'], list(cookie_bot.DEFAULT_URLS))
@@ -23,6 +27,54 @@ class PolicyTests(unittest.TestCase):
     def test_crawl_stays_on_exact_host_and_skips_actions(self):
         links = ['/article#section', 'https://other.test/article', '/logout', '/checkout', 'javascript:void(0)', '/article', '/search?q=x', '/account/delete', '/download.zip']
         self.assertEqual(cookie_bot.safe_links('https://example.test/', links), ['https://example.test/article'])
+
+
+class InspectionTests(unittest.TestCase):
+    def inspect(self, snapshots, *, deadline=20.0, cancel_at=None):
+        from unittest.mock import patch
+        clock = [0.0]
+        index = [0]
+        def evaluate(*args, **kwargs):
+            snapshot = snapshots[min(index[0], len(snapshots) - 1)]
+            index[0] += 1
+            if isinstance(snapshot, Exception):
+                raise snapshot
+            return snapshot
+        def wait(seconds, cancelled):
+            clock[0] += seconds
+            return cancelled()
+        with patch.object(cookie_bot.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(cookie_bot, '_wait', side_effect=wait), \
+             patch.object(cookie_bot.cdp, 'runtime_evaluate', side_effect=evaluate):
+            result = cookie_bot._inspect_page(object(), 1, deadline,
+                lambda: cancel_at is not None and clock[0] >= cancel_at, True)
+        return result, clock[0]
+
+    def test_does_not_follow_stale_dom_during_later_navigation(self):
+        snapshots = [
+            {'url': 'http://example.test/', 'readyState': 'complete', 'links': ['/old']},
+            {'url': 'http://example.test/new', 'readyState': 'loading', 'links': []},
+        ]
+        with self.assertRaises(SidecarError):
+            self.inspect(snapshots)
+
+    def test_retries_transient_context_loss_and_waits_for_hydrated_links(self):
+        snapshots = [SidecarError(code='CDP_ERROR', message='context gone')]
+        snapshots += [{'url': 'http://example.test/', 'readyState': 'complete', 'links': []}] * 15
+        snapshots += [{'url': 'http://example.test/', 'readyState': 'complete', 'links': ['/article']}]
+        result, elapsed = self.inspect(snapshots)
+        self.assertEqual(result['links'], ['/article'])
+        self.assertLess(elapsed, 3)
+
+    def test_linkless_page_grace_and_cancellation_are_bounded(self):
+        page = {'url': 'http://example.test/', 'readyState': 'complete', 'links': []}
+        result, elapsed = self.inspect([page])
+        self.assertEqual(result, page)
+        self.assertLess(elapsed, 3.2)
+        _, elapsed = self.inspect([page], cancel_at=.2)
+        self.assertLessEqual(elapsed, .3)
+        _, elapsed = self.inspect([page], deadline=.3)
+        self.assertLessEqual(elapsed, .3)
 
 
 class WorkerTests(unittest.TestCase):
@@ -58,7 +110,7 @@ class WorkerTests(unittest.TestCase):
             with patch.object(cookie_bot, '_connect_profile', return_value=(SimpleNamespace(), 'original')) as connect, \
                  patch.object(cookie_bot.cdp, 'create_page_target_endpoint', return_value=SimpleNamespace(web_socket_debugger_url='ws://127.0.0.1:1/devtools/page/a', target_id='a')), \
                  patch.object(cookie_bot.cdp, 'CdpClient', return_value=Browser()), \
-                 patch.object(cookie_bot.cdp, 'runtime_evaluate', return_value={'url': 'http://example.test/', 'links': ['/article', '/logout', 'http://other.test/']}), \
+                 patch.object(cookie_bot, '_inspect_page', return_value={'url': 'http://example.test/', 'links': ['/article', '/logout', 'http://other.test/']}), \
                  patch.object(cookie_bot.cdp, 'close_page_target') as close_tab, \
                  patch.object(cookie_bot, '_close_profile_if_same') as close_profile, \
                  patch.object(cookie_bot, '_wait', return_value=False):

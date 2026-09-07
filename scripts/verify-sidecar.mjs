@@ -769,7 +769,10 @@ try {
     return { targetTriple: value };
   }).targetTriple;
 
-  const binaryPath = join(
+  // Accept the executable inside a finished .app to verify shipped libraries too.
+  const binaryPath = process.env.THEPRIVATOR_VERIFY_SIDECAR_BINARY
+    ? resolve(process.env.THEPRIVATOR_VERIFY_SIDECAR_BINARY)
+    : join(
     ROOT_DIR,
     "src-tauri",
     "binaries",

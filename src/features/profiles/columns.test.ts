@@ -66,6 +66,7 @@ describe("defaultLayout", () => {
       "tags",
       "proxy",
       "fingerprint",
+      "notes",
       "lastLaunchedAt",
       "actions",
     ]);

@@ -1026,12 +1026,12 @@ export function inspectM005S04Diagnostics({ appDataRoot, requiredMethods = FIXED
 export function inspectM005S04CookieExportFile({ exportPath, expectedRows = [] } = {}, context = createM005S04PublicScanContext({ selectedPaths: [exportPath].filter(Boolean), cookieDomains: expectedRows.map((row) => row.domain).filter(Boolean), cookieNames: expectedRows.map((row) => row.name).filter(Boolean), cookieValues: expectedRows.map((row) => row.value).filter(Boolean) })) {
   assert(typeof exportPath === "string" && exportPath.length > 0, "M005/S04 cookie export inspection requires a private selected path.", { phase: "cookie-export-file", markerClass: "missing_selected_path" });
   const payload = readJsonFile(exportPath, "exported cookie file");
-  assert(payload?.format === "theprivator.cookies" && payload.version === 1 && Array.isArray(payload.cookies), "M005/S04 exported ThePrivator cookie file was malformed.", { phase: "cookie-export-file", markerClass: "cookie_export_malformed" });
-  const missingExpectedCount = expectedRows.filter((expected) => !payload.cookies.some((cookie) => cookie?.domain === expected.domain && cookie?.name === expected.name && cookie?.value === expected.value)).length;
+  assert(Array.isArray(payload), "M005/S04 exported browser cookie array was malformed.", { phase: "cookie-export-file", markerClass: "cookie_export_malformed" });
+  const missingExpectedCount = expectedRows.filter((expected) => !payload.some((cookie) => cookie?.domain === expected.domain && cookie?.name === expected.name && cookie?.value === expected.value)).length;
   assert(missingExpectedCount === 0, "M005/S04 exported cookie file missed expected portable cookies.", { phase: "cookie-export-file", markerClass: "cookie_export_mismatch", missingExpectedCount, expectedCookieCount: expectedRows.length });
-  const summary = { cookieExportFile: "valid", format: "theprivator-json", cookieRowCount: payload.cookies.length, expectedRowsPresent: true, selectionPrivate: true };
+  const summary = { cookieExportFile: "valid", format: "theprivator-json", cookieRowCount: payload.length, expectedRowsPresent: true, selectionPrivate: true };
   assertM005S04PublicEvidenceRedacted(summary, context);
-  return { value: { cookieCount: payload.cookies.length }, log: summary };
+  return { value: { cookieCount: payload.length }, log: summary };
 }
 
 export function assertM005S04RuntimeBookkeeping({ appDataRoot, profile, expectedRunning, expectedRunningCount } = {}, context = createM005S04PublicScanContext({ appDataRoot })) {

@@ -36,6 +36,7 @@ interface ProfileTableProps {
   onStop: (id: string) => void;
   onRowMenu: (id: string, position: { x: number; y: number }) => void;
   emptyMessage: string;
+  onSaveNotes?: (id: string, notes: string) => Promise<boolean>;
   proxyChecks?: ReadonlyMap<string, ProxyCheckState>;
   onCheckProxy?: (id: string) => void;
 }
@@ -71,6 +72,7 @@ function tagHue(tag: string): number {
 }
 
 interface CellProps {
+  onSaveNotes?: (id: string, notes: string) => Promise<boolean>;
   proxyCheck?: ProxyCheckState;
   onCheckProxy?: (id: string) => void;
   row: ProfileRow;
@@ -84,7 +86,24 @@ interface CellProps {
   onStop: (id: string) => void;
 }
 
-function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLaunch, onStop, proxyCheck, onCheckProxy }: CellProps) {
+function NotesCell({ profile, busy, onSaveNotes }: { profile: ProfileRecord; busy: boolean; onSaveNotes: NonNullable<CellProps["onSaveNotes"]> }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? profile.organization.notes;
+  const dirty = draft !== null && draft !== profile.organization.notes;
+  return <div className={styles.notesEditor} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+    <textarea aria-label={`Notes for ${profile.name}`} value={value} maxLength={1500} rows={1} disabled={busy}
+      placeholder="Add notes…" onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setDraft(null); } }} />
+    {dirty ? <span>
+      <button type="button" disabled={busy} aria-label={`Save notes for ${profile.name}`} onClick={() => {
+        void onSaveNotes(profile.id, value).then((saved) => { if (saved) setDraft(null); });
+      }}>Save</button>
+      <button type="button" disabled={busy} aria-label={`Cancel notes for ${profile.name}`} onClick={() => setDraft(null)}>Cancel</button>
+    </span> : null}
+  </div>;
+}
+
+function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLaunch, onStop, proxyCheck, onCheckProxy, onSaveNotes }: CellProps) {
   const { profile, running } = row;
 
   switch (column.key) {
@@ -171,9 +190,9 @@ function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLa
     case "notes":
       return (
         <div className={styles.cell} role="gridcell">
-          {/* A note is user text: it renders as a text node and never as an
-              attribute, so a tooltip cannot become an injection surface. */}
-          <span className={styles.truncate}>{profile.organization.notes || "—"}</span>
+          {onSaveNotes && profile.lifecycle.deletedAt === null
+            ? <NotesCell profile={profile} busy={busy} onSaveNotes={onSaveNotes} />
+            : <span className={styles.truncate}>{profile.organization.notes || "—"}</span>}
         </div>
       );
     case "lastLaunchedAt":
@@ -399,6 +418,7 @@ export function ProfileTable({
   onStop,
   onRowMenu,
   emptyMessage,
+  onSaveNotes,
   proxyChecks,
   onCheckProxy,
 }: ProfileTableProps) {
@@ -466,6 +486,7 @@ export function ProfileTable({
             onLaunch={onLaunch}
             onStop={onStop}
             onRowMenu={onRowMenu}
+            onSaveNotes={onSaveNotes}
           />
         ))
       )}

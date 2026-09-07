@@ -28,6 +28,14 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run verify:release
+
+      # Verification-script tests exercise the source Python sidecar too.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -r requirements.txt
 
       # Type errors alone do not fail the render tree, so both gates matter:
       # tsc caught nothing when the redesign broke, vitest caught everything.
@@ -68,9 +76,21 @@ jobs:
 
   tauri:
     name: Rust bridge
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -80,9 +100,16 @@ jobs:
 
       # Tauri's Linux build needs the WebKitGTK stack even to compile the crate.
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build the sidecar required by the Rust tests
+        run: |
+          npm ci
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          npm run sidecar:build
 
       - name: Cargo test
         working-directory: src-tauri

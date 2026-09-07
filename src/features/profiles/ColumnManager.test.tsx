@@ -46,7 +46,7 @@ describe("ColumnManager", () => {
     expect(props.onApply).toHaveBeenCalledTimes(1);
     const applied = props.onApply.mock.calls[0][0];
     expect(applied.find((entry) => entry.key === "tags")?.visible).toBe(false);
-    expect(applied.find((entry) => entry.key === "notes")?.visible).toBe(true);
+    expect(applied.find((entry) => entry.key === "notes")?.visible).toBe(false);
   });
 
   it("closes after applying, so the panel does not sit over the change it made", () => {

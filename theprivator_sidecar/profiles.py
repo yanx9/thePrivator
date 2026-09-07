@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -459,6 +460,55 @@ class ProfileStore:
     def create(self, name: str) -> JsonObject:
         """Create a profile, persist it, and return the refreshed list."""
         return self._create_profile(name, metadata=None)
+
+    def duplicate(self, profile_id: str) -> JsonObject:
+        """Copy a stopped local profile; publish the record only after data copy."""
+        from . import chromium
+
+        profiles = self._read_profiles()
+        source = self._find_profile(profiles, profile_id)
+        if source.lifecycle.get("deletedAt") is not None:
+            raise SidecarError(code=PROFILE_NOT_FOUND, message="Restore the profile before duplicating it.")
+        chromium.ensure_profile_stopped_for_portability(self.store_root, source)
+        source_dir = chromium.resolve_user_data_path(self.store_root, source)
+        names = {item.name.casefold() for item in profiles}
+        index = 1
+        while True:
+            suffix = " copy" if index == 1 else f" copy {index}"
+            name = source.name[:MAX_PROFILE_NAME_LENGTH - len(suffix)] + suffix
+            if name.casefold() not in names:
+                break
+            index += 1
+        fresh = ProfileRecord.create(name, device_id=self.device_id)
+        clone = replace(fresh, defaults=source.defaults, identity=source.identity,
+                        proxy=source.proxy, organization=source.organization,
+                        launch=source.launch)
+        destination = self.store_root / clone.storage.userDataDir
+        ignored = {"SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"}
+
+        def ignore_runtime(directory: str, entries: list[str]) -> list[str]:
+            # Never follow links into other profiles or unrelated local files.
+            for entry in entries:
+                if entry not in ignored and (Path(directory) / entry).is_symlink():
+                    raise OSError("Unsafe browser data link")
+            return [entry for entry in entries if entry in ignored]
+
+        try:
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=False)
+            if source_dir.exists():
+                shutil.copytree(source_dir, destination, ignore=ignore_runtime)
+            else:
+                destination.mkdir(mode=0o700)
+            chromium.ensure_profile_stopped_for_portability(self.store_root, source)
+            updated = sort_profiles([*profiles, clone])
+            self._write_profiles(updated)
+        except (OSError, SidecarError) as exc:
+            shutil.rmtree(destination.parent, ignore_errors=True)
+            if isinstance(exc, SidecarError):
+                raise
+            raise SidecarError(code=PROFILE_STORE_WRITE_FAILED,
+                               message="Could not safely duplicate the profile. Source unchanged.") from exc
+        return self._collection_response(updated, profile=clone)
 
     def create_imported(self, name: str, metadata: Mapping[str, Any]) -> JsonObject:
         """Create an imported profile through the canonical profile-store path."""

@@ -69,6 +69,7 @@ pub fn run() {
             sidecar::profile_package_import,
             sidecar::profiles_list,
             sidecar::profiles_create,
+            sidecar::profiles_duplicate,
             sidecar::profiles_update,
             sidecar::profiles_delete,
             sidecar::chromium_status,

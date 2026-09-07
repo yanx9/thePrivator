@@ -27,7 +27,18 @@ class BrowserSmoke(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 visits.append(self.path)
-                body = b'<a href="/article">Article</a><a href="/second">Second</a><a href="/logout">Logout</a><a href="http://localhost:1/outside">Outside</a><a href="javascript:alert(1)">Unsafe</a><form><button>Buy</button></form>'
+                if self.path == '/start':
+                    self.send_response(302)
+                    self.send_header('Location', '/')
+                    self.end_headers()
+                    return
+                pages = {
+                    '/': '<script>setTimeout(() => { document.body.innerHTML = `<a role="link" href="/article">Article</a><a href="/second">Second</a><a href="/article#again">Duplicate</a><a href="/logout">Logout</a><a href="http://localhost:1/outside">Outside</a><a download href="/file">Download</a><form><a href="/submit">Submit</a><button>Buy</button></form>`; }, 1500)</script>',
+                    '/article': '<a href="/deep">Deep article</a><a href="/">Root loop</a>',
+                    '/second': '<a href="/deep">Duplicate deep article</a>',
+                    '/deep': '<a href="/too-deep">Beyond depth limit</a>',
+                }
+                body = pages.get(self.path, '<p>Fixture</p>').encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
                 self.send_header('Content-Length', str(len(body)))
@@ -54,7 +65,7 @@ class BrowserSmoke(unittest.TestCase):
                 params = {'storeRoot': root, 'profileId': profile_id}
                 try:
                     started = time.monotonic()
-                    result = call('cookieBot.start', {**params, 'config': {'urls': [f'http://127.0.0.1:{server.server_port}/'], 'maxPages': 2, 'maxDepth': 1, 'dwellSeconds': 1, 'maxDurationSeconds': 30, 'closeAfterCompletion': True}})
+                    result = call('cookieBot.start', {**params, 'config': {'urls': [f'http://127.0.0.1:{server.server_port}/start'], 'maxPages': 5, 'maxDepth': 2, 'dwellSeconds': 1, 'maxDurationSeconds': 30, 'closeAfterCompletion': True}})
                     self.assertLess(time.monotonic() - started, 10)
                     job = result['job']
                     deadline = time.monotonic() + 60
@@ -64,12 +75,12 @@ class BrowserSmoke(unittest.TestCase):
                             break
                         time.sleep(.2)
                     self.assertEqual(job['status'], 'completed', job)
-                    self.assertEqual(job['visitedPages'], 2, job)
+                    self.assertEqual(job['visitedPages'], 4, job)
                     self.assertEqual(job['failedPages'], 0, job)
-                    self.assertEqual(job['stopReason'], 'page-limit')
+                    self.assertEqual(job['stopReason'], 'queue-exhausted')
                     self.assertEqual(chromium.status(root)['runningCount'], 0)
                     document_visits = [p for p in visits if p != '/favicon.ico']
-                    self.assertEqual(document_visits, ['/', '/article'])
+                    self.assertEqual(document_visits, ['/start', '/', '/article', '/second', '/deep'])
                     user_data = chromium.resolve_user_data_path(root, store.get(profile_id))
                     db = next(p for p in [user_data/'Default'/'Cookies', user_data/'Default'/'Network'/'Cookies'] if p.exists())
                     with closing(sqlite3.connect(db)) as connection:

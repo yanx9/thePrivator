@@ -6,6 +6,7 @@ import {
   bulkLaunchChromiumProfiles,
   bulkStopChromiumProfiles,
   deleteProfile,
+  duplicateProfile,
   exportProfileCookies,
   replaceProfileCookies,
   launchChromiumProfile,
@@ -13,6 +14,7 @@ import {
   purgeProfile,
   restoreProfile,
   stopChromiumProfile,
+  updateProfileOrganization,
 } from "../../sidecar/client";
 import type { SidecarClientError } from "../../sidecar/types";
 import { CookieBotDialog } from "./CookieBotDialog";
@@ -28,7 +30,7 @@ import {
   nextSort,
   setColumnWidth,
 } from "./columns";
-import { type RowAction, buildRowMenu, requiresConfirmation } from "./rowMenu";
+import { type RowAction, buildRowMenu, requiresConfirmation } from "./rowMenuHelpers";
 import {
   EMPTY_SELECTION,
   type ProfileRow,
@@ -119,6 +121,7 @@ export function ProfilesPage({
   const [selection, setSelection] = useState<SelectionState>(EMPTY_SELECTION);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [organizationEdit, setOrganizationEdit] = useState<{ kind: "tags" | "folder"; ids: string[]; value: string; newFolder?: string } | null>(null);
   const [cookieBot, setCookieBot] = useState<{ id: string; name: string } | null>(null);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [busyIds, dispatchBusy] = useReducer(busyReducer, new Set<string>() as ReadonlySet<string>);
@@ -156,8 +159,10 @@ export function ProfilesPage({
       setActionError(null);
       try {
         await work();
+        return true;
       } catch (caught) {
         setActionError(normalizeSidecarError(caught));
+        return false;
       } finally {
         ids.forEach((id) => activeIds.current.delete(id));
         dispatchBusy({ type: "finish", ids });
@@ -166,6 +171,14 @@ export function ProfilesPage({
     },
     [refresh],
   );
+
+  const onSaveNotes = useCallback(async (id: string, notes: string) => {
+    return (await runFor([id], async () => {
+      const profile = rows.find((row) => row.profile.id === id)?.profile;
+      if (!profile) throw new Error("That profile no longer exists.");
+      await updateProfileOrganization(id, { ...profile.organization, notes });
+    })) === true;
+  }, [rows, runFor]);
 
   const onLaunch = useCallback(
     (id: string) => void runFor([id], () => launchChromiumProfile(id)),
@@ -197,17 +210,24 @@ export function ProfilesPage({
   const performAction = useCallback(
     (action: RowAction, ids: string[]) => {
       switch (action) {
+        case "favorite":
+        case "unfavorite":
+          return runFor(ids, async () => {
+            for (const id of ids) {
+              const profile = rows.find((row) => row.profile.id === id)?.profile;
+              if (!profile) throw new Error("That profile no longer exists.");
+              await updateProfileOrganization(id, { ...profile.organization, favorite: action === "favorite" });
+            }
+          });
         case "check-proxy":
           return onCheckProxy(ids[0]);
         case "cookies-export-json":
-        case "cookies-export-netscape":
           return runFor(ids, async () => {
-            const netscape = action === "cookies-export-netscape";
-            const destination = await pickSaveTarget(netscape ? "Export cookies as cookies.txt" : "Export cookies as JSON", [
-              { name: netscape ? "Netscape cookies" : "ThePrivator cookies", extensions: [netscape ? "txt" : "json"] },
+            const destination = await pickSaveTarget("Export cookies as JSON", [
+              { name: "Browser cookies JSON", extensions: ["json"] },
             ]);
             if (destination === null) return;
-            const result = await exportProfileCookies(ids[0], destination, netscape ? "netscape" : "theprivator-json");
+            const result = await exportProfileCookies(ids[0], destination, "theprivator-json");
             setActionNote(`Exported ${result.exportedCount} cookies. ${result.skippedCount} skipped.`);
           });
         case "cookies-import":
@@ -219,6 +239,8 @@ export function ProfilesPage({
           });
         case "launch":
           return runFor(ids, () => launchChromiumProfile(ids[0]));
+        case "duplicate":
+          return runFor(ids, () => duplicateProfile(ids[0]));
         case "stop":
           return runFor(ids, () => stopChromiumProfile(ids[0]));
         case "delete":
@@ -259,7 +281,7 @@ export function ProfilesPage({
           return Promise.resolve();
       }
     },
-    [onCheckProxy, onOpenProfile, runFor],
+    [onCheckProxy, onOpenProfile, runFor, rows],
   );
 
   const describeConfirmation = useCallback((action: RowAction, ids: string[], name: string): ConfirmState => {
@@ -288,6 +310,13 @@ export function ProfilesPage({
     (action: RowAction, ids: string[], name: string) => {
       setMenu(null);
       if (ids.some((id) => activeIds.current.has(id))) return;
+      if (action === "tag" || action === "bulk-tag" || action === "move" || action === "bulk-move") {
+        const profile = rows.find((row) => row.profile.id === ids[0])?.profile;
+        const kind = action === "move" || action === "bulk-move" ? "folder" : "tags";
+        setActionError(null);
+        setOrganizationEdit({ kind, ids, value: ids.length === 1 ? (kind === "tags" ? profile?.organization.tags.join(", ") : profile?.organization.folderId) ?? "" : "" });
+        return;
+      }
       if (action === "cookie-bot") { setCookieBot({ id: ids[0], name }); return; }
       if (requiresConfirmation(action)) {
         // The confirmation is rendered by this component rather than by the menu,
@@ -298,7 +327,7 @@ export function ProfilesPage({
       }
       void performAction(action, ids);
     },
-    [describeConfirmation, performAction],
+    [describeConfirmation, performAction, rows],
   );
 
   const onBotBusyChange = useCallback((busy: boolean) => {
@@ -375,6 +404,7 @@ export function ProfilesPage({
         onLaunch={onLaunch}
         onStop={onStop}
         onRowMenu={onRowMenu}
+        onSaveNotes={onSaveNotes}
         emptyMessage={loading ? "Loading profiles…" : EMPTY_MESSAGES[view]}
       />
 
@@ -422,6 +452,52 @@ export function ProfilesPage({
           onChoose={(action) => chooseAction(action, menuIds, menuRow.profile.name)}
           onClose={() => setMenu(null)}
         />
+      ) : null}
+
+      {organizationEdit !== null ? (
+        <div className={styles.overlay} role="presentation">
+          <form className={styles.dialog} role="dialog" aria-modal="true" aria-label={organizationEdit.kind === "tags" ? "Edit tags" : "Move to folder"}
+            onKeyDown={(event) => { if (event.key === "Escape" && !organizationEdit.ids.some((id) => busyIds.has(id))) setOrganizationEdit(null); }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const edit = organizationEdit;
+              const folderId = edit.newFolder?.trim() || edit.value || null;
+              const tags = edit.value.split(",").map((tag) => tag.trim()).filter(Boolean)
+                .filter((tag, index, all) => all.findIndex((other) => other.toLocaleLowerCase() === tag.toLocaleLowerCase()) === index);
+              void runFor(edit.ids, async () => {
+                if (edit.kind === "tags" && tags.length > 10) throw new Error("Use at most 10 tags.");
+                if (edit.kind === "folder" && edit.newFolder?.trim() && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(edit.newFolder.trim())) throw new Error("Folder names must be 1–64 letters, numbers, underscores or hyphens, starting with a letter or number.");
+                for (const id of edit.ids) {
+                  const profile = rows.find((row) => row.profile.id === id)?.profile;
+                  if (!profile) throw new Error("That profile no longer exists.");
+                  await updateProfileOrganization(id, { ...profile.organization,
+                    ...(edit.kind === "tags" ? { tags } : { folderId }),
+                  });
+                }
+                setOrganizationEdit(null);
+              });
+            }}>
+            <h2>{organizationEdit.kind === "tags" ? "Edit tags" : "Move to folder"}</h2>
+            {actionError !== null ? <p role="alert" className={styles.error}>{actionError.message}</p> : null}
+            {organizationEdit.ids.length > 1 ? <p>Replaces {organizationEdit.kind} on all {organizationEdit.ids.length} selected profiles.</p> : null}
+            {organizationEdit.kind === "tags" ? <label>Tags (comma separated)
+              <input autoFocus value={organizationEdit.value} onChange={(event) => setOrganizationEdit({ ...organizationEdit, value: event.target.value })} />
+            </label> : <><label>Folder
+              <select autoFocus value={organizationEdit.value} onChange={(event) => setOrganizationEdit({ ...organizationEdit, value: event.target.value })}>
+                <option value="">No folder</option>
+                {[...folderNames].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              </select>
+            </label>
+              <label>New folder
+                <input value={organizationEdit.newFolder ?? ""} maxLength={64} placeholder="e.g. Work_2026" onChange={(event) => setOrganizationEdit({ ...organizationEdit, newFolder: event.target.value })} />
+              </label>
+            </>}
+            <div className={styles.dialogActions}>
+              <button type="button" className={styles.secondary} disabled={organizationEdit.ids.some((id) => busyIds.has(id))} onClick={() => setOrganizationEdit(null)}>Cancel</button>
+              <button type="submit" className={styles.primary} disabled={organizationEdit.ids.some((id) => busyIds.has(id))}>Save</button>
+            </div>
+          </form>
+        </div>
       ) : null}
 
       {cookieBot !== null ? <CookieBotDialog profileId={cookieBot.id} profileName={cookieBot.name}

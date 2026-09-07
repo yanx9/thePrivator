@@ -817,6 +817,7 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
       emptyExported: Boolean(sidecar?.emptyExported),
       exportedJson: Boolean(sidecar?.exportedJson),
       exportedNetscape: Boolean(sidecar?.exportedNetscape),
+      legacyExportRejected: Boolean(sidecar?.legacyExportRejected),
       replaced: Boolean(sidecar?.replaced),
       invalidImportPreservedRows: Boolean(sidecar?.invalidImportPreservedRows),
       oversizedImportPreservedRows: Boolean(sidecar?.oversizedImportPreservedRows),
@@ -953,8 +954,7 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
       assert(payload.exportedCount === 0 && payload.skippedCount === 0 && payload.warningCount === 0, "Zero-cookie export did not report clean zero counts.", { phase: "zero-cookie" });
       const exported = JSON.parse(readFileSync(zeroExportJsonPath, "utf8"));
-      assert(exported.format === "theprivator.cookies" && exported.version === 1, "Zero-cookie JSON export used the wrong schema.", { phase: "zero-cookie" });
-      assert(Array.isArray(exported.cookies) && exported.cookies.length === 0, "Zero-cookie JSON export did not write an empty cookie list.", { phase: "zero-cookie" });
+      assert(Array.isArray(exported) && exported.length === 0, "Zero-cookie JSON export did not write an empty cookie array.", { phase: "zero-cookie" });
       sidecar.emptyExported = true;
       sidecar.counts.zeroJsonExported = payload.exportedCount;
       return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
@@ -979,30 +979,25 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
       assert(payload.exportedCount === 2, "JSON export did not report two exported cookies.", { phase: "export" });
       const exported = JSON.parse(readFileSync(exportJsonPath, "utf8"));
-      assert(exported.format === "theprivator.cookies" && exported.version === 1, "JSON export used the wrong schema.", { phase: "export" });
-      assert(Array.isArray(exported.cookies) && exported.cookies.length === 2, "JSON export did not write the expected cookie count.", { phase: "export" });
+      assert(Array.isArray(exported) && exported.length === 2, "JSON export did not write the expected cookie array.", { phase: "export" });
+      assert(exported.every((cookie) => cookie.storeId === "Default" && typeof cookie.session === "boolean" && typeof cookie.expirationDate === "number" && ["Lax", "Strict", "None", "Unspecified"].includes(cookie.sameSite)), "JSON export used the wrong cookie fields.", { phase: "export" });
       sidecar.exportedJson = true;
       sidecar.counts.jsonExported = payload.exportedCount;
       return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
     }, context.redactionContext);
 
-    const netscapeExport = runStep("sidecar.export-netscape", () => {
-      const result = remember(
-        runSourceSidecarRequest({
-          id: "m005-export-netscape",
-          method: PORTABILITY_EXPORT,
-          params: { storeRoot, profileId, destinationPath: exportTxtPath, format: FORMAT_NETSCAPE },
-        }, { context: context.redactionContext }),
-        { requestId: "m005-export-netscape", method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null },
-      );
-      const payload = assertPortabilitySuccess(result.response, { requestId: "m005-export-netscape", operation: "export", format: FORMAT_NETSCAPE });
-      assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
-      const text = readFileSync(exportTxtPath, "utf8");
-      assert(text.includes("#HttpOnly_"), "Netscape export did not preserve HttpOnly marker.", { phase: "export" });
-      assert(text.includes("\t0\t"), "Netscape export did not represent session cookies with expiry 0.", { phase: "export" });
-      sidecar.exportedNetscape = true;
-      sidecar.counts.netscapeExported = payload.exportedCount;
-      return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
+    runStep("sidecar.legacy-export-rejected", () => {
+      const result = runSourceSidecarRequest({
+        id: "m005-export-netscape",
+        method: PORTABILITY_EXPORT,
+        params: { storeRoot, profileId, destinationPath: exportTxtPath, format: FORMAT_NETSCAPE },
+      }, { context: context.redactionContext });
+      const error = assertPortabilityError(result.response, { requestId: "m005-export-netscape", code: "PORTABILITY_UNSUPPORTED_FORMAT" });
+      assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "error", errorCode: "PORTABILITY_UNSUPPORTED_FORMAT", detailRef: error.detailRef });
+      remember(result, { requestId: "m005-export-netscape", method: PORTABILITY_EXPORT, status: "error", errorCode: "PORTABILITY_UNSUPPORTED_FORMAT", detailRef: error.detailRef });
+      assert(!existsSync(exportTxtPath), "Removed text export unexpectedly wrote a file.", { phase: "export" });
+      sidecar.legacyExportRejected = true;
+      return { errorCode: error.errorCode };
     }, context.redactionContext);
 
     runStep("sidecar.replace-json", () => {

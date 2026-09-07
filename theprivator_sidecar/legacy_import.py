@@ -10,6 +10,10 @@ mutating either the legacy root or app-data profile store during scan. Import is
 non-destructive: legacy files are read only, destination user-data is copied into
 a sidecar-owned relative storage target, and per-profile copy failures become
 partial outcomes rather than top-level tracebacks.
+
+The importer also accepts 2.0's profiles/<id> Chromium directories and sibling
+profiles.json name registry. Both layouts become ordinary current-format
+profiles through the same store API; legacy runtime settings are not loaded.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ _COPY_STATUS_COPIED = "copied"
 _COPY_STATUS_MISSING = "missing"
 _COPY_STATUS_FAILED = "failed"
 _COPY_STATUS_SKIPPED = "skipped"
+_RUNTIME_FILES = frozenset({"SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"})
 
 
 def scan_legacy_profiles(legacy_root: Union[str, Path], store_root: Union[str, Path]) -> JsonObject:
@@ -63,6 +68,7 @@ def scan_legacy_profiles(legacy_root: Union[str, Path], store_root: Union[str, P
     """
     root = _validated_legacy_root(legacy_root)
     existing_names = _existing_profile_names(store_root)
+    registry, registry_issue = _read_registry(root)
 
     candidates = []
     try:
@@ -74,15 +80,15 @@ def scan_legacy_profiles(legacy_root: Union[str, Path], store_root: Union[str, P
         ) from exc
 
     for child in children:
-        if not _is_directory(child):
+        if child.is_symlink() or not _is_directory(child):
             continue
-        candidates.append(_scan_candidate(root, child, existing_names))
+        candidates.append(_scan_candidate(root, child, existing_names, registry.get(child.name)))
 
     return {
         "scanVersion": SCAN_VERSION,
         "count": len(candidates),
         "candidates": candidates,
-        "issues": [],
+        "issues": [registry_issue] if registry_issue is not None else [],
     }
 
 
@@ -148,8 +154,8 @@ def import_legacy_profiles(
 
         profile = create_result["profile"]
         profile_id = str(profile["id"])
-        source_user_data = root / str(candidate["folderName"]) / "user-data"
-        if not _candidate_has_user_data(candidate) or not _is_directory(source_user_data):
+        source_user_data = _user_data_source(root / str(candidate["folderName"]))
+        if not _candidate_has_user_data(candidate) or source_user_data is None:
             outcomes.append(
                 _success_outcome(
                     legacy_id=legacy_id,
@@ -251,7 +257,11 @@ def _validated_legacy_root(value: Union[str, Path]) -> Path:
                 code=LEGACY_ROOT_INVALID,
                 message="Legacy root must be an existing directory.",
             )
-        return candidate.resolve()
+        candidate = candidate.resolve()
+        # Accept either the 2.0 app root or its profiles directory.
+        if (candidate / "profiles.json").is_file() and (candidate / "profiles").is_dir():
+            return (candidate / "profiles").resolve()
+        return candidate
     except SidecarError:
         raise
     except OSError as exc:
@@ -270,12 +280,24 @@ def _existing_profile_names(store_root: Union[str, Path]) -> set[str]:
     }
 
 
-def _scan_candidate(root: Path, profile_dir: Path, existing_names: set[str]) -> JsonObject:
+def _scan_candidate(
+    root: Path,
+    profile_dir: Path,
+    existing_names: set[str],
+    registry_config: Optional[Mapping[str, Any]] = None,
+) -> JsonObject:
     config, config_issue = _read_config(profile_dir / "config.json")
+    source = _user_data_source(profile_dir)
+    if config_issue is not None and config_issue["code"] == LEGACY_CONFIG_MISSING:
+        if registry_config is not None:
+            config, config_issue = registry_config, None
+        elif source == profile_dir:
+            # A standalone browser directory is usable without a name registry.
+            config_issue = None
     folder_name = profile_dir.name
     legacy_name = _optional_nonblank_string(config.get("name")) if config is not None else None
     target_name = legacy_name if legacy_name is not None else folder_name
-    has_user_data = _has_user_data(profile_dir)
+    has_user_data = source is not None
     issues = []
     if config_issue is not None:
         issues.append(config_issue)
@@ -290,6 +312,31 @@ def _scan_candidate(root: Path, profile_dir: Path, existing_names: set[str]) -> 
         "metadata": _safe_metadata(folder_name, legacy_name, config, has_user_data),
         "issues": issues,
     }
+
+
+def _read_registry(root: Path) -> tuple[dict[str, Mapping[str, Any]], Optional[JsonObject]]:
+    """Read 2.0 names by folder ID, ignoring runtime fields and stored paths."""
+    registry_path = root.parent / "profiles.json"
+    try:
+        if not registry_path.exists():
+            return {}, None
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("version") != "2.0"
+            or not isinstance(payload.get("profiles"), list)
+        ):
+            raise ValueError("Invalid registry")
+        records = {}
+        for record in payload["profiles"]:
+            if not isinstance(record, Mapping) or not isinstance(record.get("id"), str):
+                raise ValueError("Invalid record")
+            if record["id"] in records:
+                raise ValueError("Duplicate id")
+            records[record["id"]] = {"name": record.get("name"), "version": "2.0"}
+        return records, None
+    except (ValueError, UnicodeDecodeError, OSError):
+        return {}, _issue(LEGACY_CONFIG_MALFORMED, "Legacy profiles.json could not be parsed.")
 
 
 def _read_config(config_path: Path) -> tuple[Optional[Mapping[str, Any]], Optional[JsonObject]]:
@@ -375,11 +422,16 @@ def _is_directory(path: Path) -> bool:
         return False
 
 
-def _has_user_data(profile_dir: Path) -> bool:
+def _user_data_source(profile_dir: Path) -> Optional[Path]:
     try:
-        return (profile_dir / "user-data").is_dir()
+        nested = profile_dir / "user-data"
+        if nested.is_dir():
+            return nested
+        if (profile_dir / "Local State").is_file() or (profile_dir / "Default").is_dir():
+            return profile_dir
     except OSError:
-        return False
+        pass
+    return None
 
 
 def _candidate_metadata(candidate: Mapping[str, Any]) -> JsonObject:
@@ -489,8 +541,10 @@ def _import_response(outcomes: list[JsonObject]) -> JsonObject:
 
 def _copy_user_data(source: Path, destination: Path) -> None:
     try:
+        if source.is_symlink():
+            raise _copy_error()
         source_root = source.resolve(strict=True)
-        if not source_root.is_dir():
+        if not source_root.is_dir() or destination.resolve().is_relative_to(source_root):
             raise _copy_error()
         destination_parent = destination.parent
         temp_destination = destination_parent / f".{destination.name}.legacy-import-{uuid.uuid4().hex}.tmp"
@@ -498,7 +552,7 @@ def _copy_user_data(source: Path, destination: Path) -> None:
         temp_destination.mkdir(mode=0o700)
         copy_committed = False
         try:
-            _copy_directory_contents(source_root, temp_destination)
+            _copy_directory_contents(source_root, temp_destination, skip_runtime=True)
             if destination.exists():
                 if not destination.is_dir() or any(destination.iterdir()):
                     raise _copy_error()
@@ -520,9 +574,13 @@ def _copy_user_data(source: Path, destination: Path) -> None:
         raise _copy_error() from exc
 
 
-def _copy_directory_contents(source: Path, destination: Path) -> None:
+def _copy_directory_contents(source: Path, destination: Path, *, skip_runtime: bool = False) -> None:
     with os.scandir(source) as entries:
         for entry in entries:
+            # Chromium process locks can be stale symlinks in a 2.0 backup.
+            # Skip only known root artifacts; all other links remain errors.
+            if skip_runtime and entry.name in _RUNTIME_FILES:
+                continue
             if entry.is_symlink():
                 raise _copy_error()
 

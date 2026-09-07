@@ -34,6 +34,9 @@ const INVOKE_BOUNDARY_MODULE = "../sidecar/client.ts";
  * authority to everything on the list.
  */
 const NEGATIVE_RULE_EXEMPTIONS: Record<string, readonly string[]> = {
+  // Fixed, public UA endpoint only; request privacy and validation are covered
+  // by userAgentApi.test.ts. DOM/file bypasses remain forbidden in this module.
+  "../userAgentApi.ts": ["direct network request"],
   // The single module allowed to touch the Tauri window API. Every call is a
   // dynamic import inside try/catch so the app still runs outside Tauri.
   "../windowControls.ts": ["direct window API"],
@@ -96,7 +99,8 @@ describe("UI source guard", () => {
       ["direct event API", /@tauri-apps\/api\/event/],
       ["raw invoke outside the client", /\binvoke\s*\(/],
       ["browser storage or file bypass", /showOpenFilePicker|webkitdirectory|readTextFile|writeTextFile|localStorage|sessionStorage/],
-      ["DOM or network escape hatch", /type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML|\bfetch\s*\(/],
+      ["DOM escape hatch", /type=\"file\"|type='file'|<iframe|window\.open|document\.querySelector|\.innerHTML/],
+      ["direct network request", /\bfetch\s*\(/],
       ["internal artifact vocabulary", /manifest\.json|package member|raw manifest|debug endpoint|launch args|raw diagnostics|stack trace/i],
       ["credential or guarantee copy", /Authorization|Bearer|guaranteed undetectability|universal green|universal pass/i],
     ];
@@ -121,7 +125,8 @@ describe("UI source guard", () => {
       "direct window API",
       "raw invoke outside the client",
       "browser storage or file bypass",
-      "DOM or network escape hatch",
+      "DOM escape hatch",
+      "direct network request",
       "internal artifact vocabulary",
       "credential or guarantee copy",
       "direct event API",

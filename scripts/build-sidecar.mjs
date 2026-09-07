@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   rmSync,
@@ -105,7 +106,7 @@ run(PYTHON, [
   "PyInstaller",
   "--noconfirm",
   "--clean",
-  "--onefile",
+  process.platform === "darwin" ? "--onedir" : "--onefile",
   "--name",
   SIDECAR_NAME,
   // Lazily-imported modules PyInstaller's static analysis can miss. cdp and
@@ -133,7 +134,16 @@ run(PYTHON, [
   ENTRYPOINT,
 ]);
 
-const builtBinary = join(DIST_DIR, `${SIDECAR_NAME}${EXTENSION}`);
+const builtBinary = process.platform === "darwin"
+  ? join(DIST_DIR, SIDECAR_NAME, SIDECAR_NAME)
+  : join(DIST_DIR, `${SIDECAR_NAME}${EXTENSION}`);
+
+// Keep macOS libraries at stable paths; onefile extracts them for every worker.
+if (process.platform === "darwin") {
+  const runtime = join(BINARIES_DIR, "_internal");
+  rmSync(runtime, { recursive: true, force: true });
+  cpSync(join(DIST_DIR, SIDECAR_NAME, "_internal"), runtime, { recursive: true, verbatimSymlinks: true });
+}
 if (!existsSync(builtBinary)) {
   fail(`PyInstaller did not produce ${relative(ROOT_DIR, builtBinary)}.`);
 }

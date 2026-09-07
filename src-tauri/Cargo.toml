@@ -1,6 +1,6 @@
 [package]
 name = "theprivator"
-version = "2.1.0"
+version = "3.0.0"
 description = "ThePrivator Tauri 2 desktop rewrite spine"
 authors = ["yanx9"]
 license = "MIT"

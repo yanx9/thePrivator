@@ -12,10 +12,9 @@ import time
 import uuid
 from pathlib import Path
 from collections import deque
-from datetime import datetime, timezone
 
 from . import chromium, cdp
-from .profiles import ProfileStore
+from .profiles import utc_now_iso
 from urllib.parse import urljoin, urlsplit, urlunsplit, unquote
 
 from .protocol import SidecarError
@@ -79,7 +78,7 @@ def safe_links(base, links):
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 def new_job(profile_id, config):
@@ -148,7 +147,48 @@ def _close_profile_if_same(root, profile_id, started_at):
             chromium.stop(root, profile_id)
 
 
-_CAPTURE_LINKS = """(() => ({url: location.href, links: Array.from(document.querySelectorAll('a[href]')).slice(0, 500).filter(a => !a.hasAttribute('download') && !a.closest('form') && !a.getAttribute('role')).map(a => a.href)}))()"""
+_CAPTURE_LINKS = """(() => ({url: location.href, readyState: document.readyState, links: Array.from(document.querySelectorAll('a[href]')).filter(a => !a.hasAttribute('download') && !a.closest('form') && (!a.getAttribute('role') || a.getAttribute('role') === 'link')).slice(0, 500).map(a => a.href)}))()"""
+
+
+def _inspect_page(client, dwell, deadline, cancelled, follow_links):
+    """Wait for a usable DOM, then dwell; bounded grace for hydrated links.
+
+    Navigation commits before asynchronous rendering necessarily completes.
+    Never click controls, wait for network-idle, or retry navigation itself.
+    """
+    load_deadline = min(deadline, time.monotonic() + 10)
+    ready_at = None
+    capture = None
+    while not cancelled() and time.monotonic() < deadline:
+        now = time.monotonic()
+        try:
+            candidate = cdp.runtime_evaluate(client, _CAPTURE_LINKS,
+                timeout_seconds=min(1, max(.001, deadline - now)))
+            if (isinstance(candidate, dict) and isinstance(candidate.get('links'), list)
+                    and candidate.get('readyState') in ('interactive', 'complete')):
+                validate_url(candidate.get('url'))  # Excludes about:blank/error pages.
+                if capture is None or capture['url'] != candidate['url']:
+                    ready_at = time.monotonic()
+                capture = candidate
+            else:
+                capture = None
+                ready_at = None
+        except SidecarError:
+            # Execution contexts can disappear during a redirect. Never reuse
+            # a snapshot from the previous document after that transition.
+            capture = None
+            ready_at = None
+        now = time.monotonic()
+        if capture is not None and ready_at is not None:
+            elapsed = now - ready_at
+            if elapsed >= dwell and (not follow_links or safe_links(capture['url'], capture['links']) or elapsed >= dwell + 2):
+                return capture
+        if now >= load_deadline and capture is None:
+            raise _error('Page did not become ready within the load limit.', 'COOKIE_BOT_NAVIGATION_FAILED')
+        if _wait(min(.1, max(0, deadline - now)), cancelled):
+            break
+    return capture
+
 
 
 def run_job(root, job, path):
@@ -187,10 +227,14 @@ def run_job(root, job, path):
                     result = client.command('Page.navigate', {'url': validate_url(url)})
                     if result.get('errorText') or result.get('isDownload'):
                         raise _error('Page navigation failed.', 'COOKIE_BOT_NAVIGATION_FAILED')
-                    _wait(min(config['dwellSeconds'], max(0, deadline - time.monotonic())), cancelled)
+                    capture = _inspect_page(client, config['dwellSeconds'], deadline, cancelled, depth < config['maxDepth'])
+                    if capture is None:
+                        continue
                     job['visitedPages'] += 1
+                    # A redirect destination is already visited; don't queue it
+                    # again when a child links back to the landing page.
+                    seen.add(validate_url(capture['url']))
                     if not cancelled() and depth < config['maxDepth'] and time.monotonic() < deadline:
-                        capture = cdp.runtime_evaluate(client, _CAPTURE_LINKS, timeout_seconds=min(3, max(.001, deadline - time.monotonic())))
                         # Redirects must never widen the crawl boundary.
                         if isinstance(capture, dict) and isinstance(capture.get('links'), list):
                             final = urlsplit(validate_url(capture.get('url')))

@@ -12,8 +12,8 @@ describe("route parsing", () => {
     ["#/profiles/running", { name: "profiles", view: "running", folderId: null }],
     ["#/profiles/trash", { name: "profiles", view: "trash", folderId: null }],
     ["#/profiles/new", { name: "profile-new" }],
-    ["#/proxies", { name: "proxies" }],
-    ["#/templates", { name: "templates" }],
+    ["#/proxies", DEFAULT_ROUTE],
+    ["#/templates", DEFAULT_ROUTE],
     ["#/automation", { name: "automation" }],
     ["#/settings", { name: "settings", section: "appearance" }],
     ["#/settings/sync", { name: "settings", section: "sync" }],
@@ -60,8 +60,7 @@ describe("route parsing", () => {
     { name: "profiles", view: "all", folderId: "work" },
     { name: "profile", id: "abc" },
     { name: "profile-new" },
-    { name: "proxies" },
-    { name: "templates" },
+
     { name: "automation" },
     { name: "settings", section: "sync" },
   ] as Route[])("round-trips %o through its hash", (route) => {
@@ -72,6 +71,6 @@ describe("route parsing", () => {
     expect(primaryNavKeyForRoute({ name: "profiles", view: "trash", folderId: null })).toBe("profiles");
     expect(primaryNavKeyForRoute({ name: "profile", id: "abc" })).toBe("profiles");
     expect(primaryNavKeyForRoute({ name: "profile-new" })).toBe("profiles");
-    expect(primaryNavKeyForRoute({ name: "proxies" })).toBe("proxies");
+    expect(primaryNavKeyForRoute({ name: "automation" })).toBe("automation");
   });
 });

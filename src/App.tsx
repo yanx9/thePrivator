@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { Placeholder } from "./app/Placeholder";
+
 import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
@@ -25,20 +25,7 @@ import type { ProfileData } from "./features/profiles/useProfileData";
  */
 function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
   switch (routeName) {
-    case "proxies":
-      return (
-        <Placeholder
-          title="Proxies"
-          description="Saved proxy templates live here, so a proxy can be attached to a profile without retyping its credentials."
-        />
-      );
-    case "templates":
-      return (
-        <Placeholder
-          title="Templates"
-          description="Profile templates capture a fingerprint and launch setup once, then stamp out profiles that share it."
-        />
-      );
+
     case "automation":
       return <AutomationPage />;
     default:
@@ -98,10 +85,20 @@ export function App() {
   // table lists, and a second loader would poll twice and could disagree.
   const data = useProfileData(true);
 
-  // Folders need the organization store, which has no command yet. An empty
-  // list renders as "No folders yet", which is true.
-  const folders = useMemo<SidebarFolder[]>(() => [], []);
-  const folderNames = useMemo<ReadonlyMap<string, string>>(() => new Map(), []);
+  // Folder membership is persisted in profile organization, not a separate
+  // registry. Derive the rail from that same data so moving a profile is visible.
+  const folders = useMemo<SidebarFolder[]>(() => {
+    const counts = new Map<string, number>();
+    for (const { profile } of data.rows) {
+      const id = profile.organization.folderId;
+      if (id !== null) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return [...counts].sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, profileCount]) => ({ id, name: id, profileCount }));
+  }, [data.rows]);
+  const folderNames = useMemo<ReadonlyMap<string, string>>(
+    () => new Map(folders.map((folder) => [folder.id, folder.name])), [folders],
+  );
 
   const counts = useMemo<SidebarCounts>(
     () => ({

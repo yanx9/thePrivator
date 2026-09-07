@@ -39,6 +39,10 @@ beforeEach(() => {
 });
 
 describe("ProfileTools", () => {
+  it("describes the shared browser JSON import and export format", () => {
+    render(<ProfileTools profileId={PROFILE} running={false} />);
+    expect(screen.getByText(/JSON import and export use the same cookie array/i)).toHaveTextContent(/expirationDate.*storeId/i);
+  });
   it("says the tools need a saved profile before offering them", () => {
     // A create form has no profile directory to export or check yet.
     render(<ProfileTools profileId={null} running={false} />);
@@ -108,11 +112,11 @@ describe("ProfileTools", () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
-  it("names the two cookie formats separately", () => {
+  it("offers only the browser JSON export format", () => {
     render(<ProfileTools profileId={PROFILE} running={false} />);
 
     expect(screen.getByRole("button", { name: /export cookies \(json\)/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /export cookies \(cookies\.txt\)/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /export cookies \(cookies\.txt\)/i })).not.toBeInTheDocument();
   });
 
   it("calls them cookies, which is what the user is looking for", () => {
@@ -131,23 +135,22 @@ describe("ProfileTools", () => {
   });
 
   it("warns when a cookie export could not represent everything", async () => {
-    // Netscape cookies.txt cannot carry every attribute, and silently dropping
-    // some would produce a file that looks complete and logs the user out.
-    dialogs.pickSaveTarget.mockResolvedValue("/home/someone/cookies.txt");
+    // Encrypted values may be unavailable even for JSON exports.
+    dialogs.pickSaveTarget.mockResolvedValue("/home/someone/cookies.json");
     respond({
       profile_cookies_export: () =>
         envelope({
           portabilityVersion: 1,
           profileId: PROFILE,
           operation: "export",
-          format: "netscape",
+          format: "theprivator-json",
           exportedCount: 8,
           skippedCount: 2,
           warningCount: 1,
           warnings: [
             {
-              code: "NETSCAPE_METADATA_OMITTED",
-              message: "Some cookie metadata is not represented by Netscape cookies.txt and was omitted from that export.",
+              code: "COOKIE_VALUE_UNAVAILABLE",
+              message: "Some stored cookies could not be exported because their values were unavailable to the sidecar.",
               count: 2,
             },
           ],
@@ -155,7 +158,7 @@ describe("ProfileTools", () => {
     });
 
     render(<ProfileTools profileId={PROFILE} running={false} />);
-    fireEvent.click(screen.getByRole("button", { name: /export cookies \(cookies\.txt\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /export cookies \(json\)/i }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(/2 could not be represented/i);
   });

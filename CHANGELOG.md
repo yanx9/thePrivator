@@ -5,6 +5,25 @@ All notable changes to thePrivator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-09-07
+
+### Changed
+- Rebuilt the desktop application with Tauri 2, React, TypeScript, and a typed Rust/Python bridge, replacing the previous Python GUI.
+- Added native macOS window controls and bundled the macOS Python runtime at stable application paths.
+- Added profile folders, tags, trash, fingerprint controls, cookie workflows, folder synchronization, and local automation to the new desktop shell.
+- Removed unused status-summary, placeholder, state-store, and legacy validator code.
+
+### Fixed
+- Resolved case-insensitive module imports that prevented macOS frontend builds.
+- Fixed macOS sidecar startup failures caused by temporary runtime extraction.
+- Terminate the worker process group when a stalled worker cannot exit gracefully.
+- Verify the shipped macOS sidecar in release CI and use supported macOS runners.
+- Aligned desktop and Python distribution versions and Python 3.11+ requirements.
+
+### Migration
+- This is a new desktop architecture and profile store. Use the legacy import workflow to bring existing profiles into the new application; keep a backup of the old data.
+- The sidecar protocol remains version 1.0.0; its independent implementation version remains 0.1.0.
+
 ## [2.1.0] - 2025-08-27
 
 ### Multi-select functionality and UI improvements
