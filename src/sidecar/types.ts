@@ -1186,5 +1186,44 @@ export interface ChromiumStopSnapshot extends ChromiumStopResult {
   receivedAt: string;
 }
 
+export interface CookieBotConfig {
+  urls: string[];
+  maxPages: number;
+  maxDepth: number;
+  dwellSeconds: number;
+  maxDurationSeconds: number;
+  closeAfterCompletion: boolean;
+}
+
+export type CookieBotStatus = "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+
+export interface CookieBotJob {
+  jobId: string;
+  profileId: string;
+  status: CookieBotStatus;
+  /** Returned URLs omit query strings and fragments for privacy. */
+  config: CookieBotConfig;
+  createdAt: string;
+  finishedAt: string | null;
+  currentUrl: string | null;
+  visitedPages: number;
+  failedPages: number;
+  errors: string[];
+  stopReason: string | null;
+}
+
+export interface CookieBotSnapshot {
+  job: CookieBotJob | null;
+  requestId: string;
+  rawRequestId: JsonScalar;
+  protocolVersion: string;
+  bridgeDurationMs: number;
+  receivedAt: string;
+}
+
+export interface CookieBotDefaultsSnapshot extends Omit<CookieBotSnapshot, "job"> {
+  config: CookieBotConfig;
+}
+
 export const SIDECAR_PROTOCOL_ERROR = "SIDECAR_PROTOCOL_ERROR";
 export const SIDECAR_BRIDGE_ERROR = "SIDECAR_BRIDGE_ERROR";

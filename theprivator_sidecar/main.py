@@ -68,6 +68,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return run_from_env(os.environ)
 
+    if args[:1] == ["cookie-bot-worker"] and len(args) == 2:
+        from .cookie_bot import worker_main
+        return worker_main(args[1])
+
     if args[:1] == ["proxy-bridge"]:
         from .proxy_bridge import run_bridge_from_stdin
 
@@ -191,6 +195,15 @@ def dispatch(request: SidecarRequest) -> JsonObject:
             request_id=request.id,
             method=request.method,
         )
+
+    if request.method.startswith("cookieBot."):
+        from .cookie_bot import command
+        try:
+            return command(request.method.removeprefix("cookieBot."), request.params)
+        except SidecarError as error:
+            raise SidecarError(code=error.code, message=error.message,
+                               recoverable=error.recoverable, detail_ref=error.detail_ref,
+                               request_id=request.id, method=request.method) from error
 
     if request.method.startswith("identity."):
         return dispatch_identity_request(request)

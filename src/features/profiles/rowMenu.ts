@@ -11,6 +11,11 @@ import type { ProfileRecord } from "../../sidecar/types";
  */
 
 export type RowAction =
+  | "cookies"
+  | "cookies-export-json"
+  | "cookies-export-netscape"
+  | "cookies-import"
+  | "cookie-bot"
   | "launch"
   | "stop"
   | "open"
@@ -34,6 +39,7 @@ export type RowAction =
 export interface MenuItem {
   action: RowAction;
   label: string;
+  children?: MenuItem[];
   /** Renders the entry as the destructive one, and puts it behind a confirmation. */
   danger?: boolean;
   /** Present but unavailable, with the reason spoken -- a missing entry teaches nothing. */
@@ -125,6 +131,12 @@ export function buildRowMenu(context: RowMenuContext): MenuItem[] {
     { action: "move", label: "Move to folder…" },
     { action: "tag", label: "Edit tags…" },
     { action: "export", label: "Export…", separatorBefore: true },
+    { action: "cookies", label: "Cookies", children: [
+      { action: "cookies-export-json", label: "Export (JSON)…", disabledReason: running ? "Stop the profile first" : undefined },
+      { action: "cookies-export-netscape", label: "Export (cookies.txt)…", disabledReason: running ? "Stop the profile first" : undefined },
+      { action: "cookies-import", label: "Import…", disabledReason: running ? "Stop the profile first" : undefined },
+    ] },
+    { action: "cookie-bot", label: "Run Cookie Bot…" },
     {
       action: "delete",
       label: "Move to trash",
@@ -139,5 +151,5 @@ export function buildRowMenu(context: RowMenuContext): MenuItem[] {
 
 /** Actions that need a confirmation step before they run. */
 export function requiresConfirmation(action: RowAction): boolean {
-  return action === "delete" || action === "purge" || action === "bulk-delete" || action === "bulk-purge";
+  return action === "cookies-import" || action === "delete" || action === "purge" || action === "bulk-delete" || action === "bulk-purge";
 }

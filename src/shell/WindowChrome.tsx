@@ -28,9 +28,7 @@ export function WindowChrome() {
         onMouseDown={handleDragStart}
         onDoubleClick={() => void toggleMaximizeWindow()}
       >
-        <span className={styles.mark} aria-hidden="true">
-          TP
-        </span>
+        <img className={styles.mark} src="/favicon.svg" alt="" draggable={false} />
         <span className={styles.title}>ThePrivator</span>
       </div>
       <div className={styles.controls}>

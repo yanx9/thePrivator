@@ -25,14 +25,35 @@ a folder your own sync client already keeps up to date.
   SOCKS authentication itself, so the sidecar runs a local relay for it. A proxy
   check reports what it actually proved, and says "not established" when it
   proved nothing.
-- **Cookie import and export** in ThePrivator JSON or Netscape `cookies.txt`,
+- **Cookie import and export** directly from a profile's **Cookies** context
+  submenu. Import accepts browser-export JSON arrays as well as ThePrivator
+  JSON and Netscape `cookies.txt`. Export supports ThePrivator JSON and Netscape,
   and whole-profile `.tpkg` packages that carry the fingerprint, the proxy and
   the browsing data — but never the proxy password.
+- **Cookie bot** visits your URLs in the selected profile with its proxy and
+  fingerprint, with bounded same-origin link crawling. Cookies come from the
+  websites themselves; the bot does not fabricate sessions or guarantee that
+  a site will set cookies. You can cancel a run or close the profile when it ends.
 - **Profile synchronisation through a folder** you already sync with Google
   Drive, Syncthing or rclone. No OAuth, no token, nothing sent to us.
 - **A local automation endpoint** for Selenium, Playwright or Puppeteer. It
   listens on loopback and needs an access token, which is never displayed —
   copying puts it on the clipboard and nowhere else.
+
+## Cookies from the profile menu
+
+Right-click a profile and open **Cookies** to import or export without leaving
+the profile list. Stop the profile before importing or exporting. Import
+replaces its existing cookie set, so export a backup first if you need one.
+Cookie exports can contain active login sessions: keep them private and only
+import sessions you are authorized to use.
+
+**Run Cookie Bot** accepts URLs separated by spaces, commas or newlines. Bare
+hostnames use HTTPS. Leaving the list empty uses the default websites shown in
+the dialog. The bot follows a limited set of same-origin links; it does not
+submit forms, log in, accept consent banners, or click purchase buttons. Sites
+may therefore set few or no cookies. Page, depth and time limits keep each run
+bounded, and cancellation stops the run without deleting existing cookies.
 
 ## Install
 

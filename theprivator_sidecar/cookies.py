@@ -435,7 +435,7 @@ def _read_import_payload(source_path: Union[str, Path]) -> ImportPayload:
     import_format = _format_from_source_path(path)
     text = _read_bounded_import_text(path)
     if import_format == FORMAT_THEPRIVATOR_JSON:
-        return ImportPayload(import_format, *_parse_theprivator_json(text))
+        return ImportPayload(import_format, *_parse_theprivator_json(text, allow_browser_array=True))
     if import_format == FORMAT_NETSCAPE:
         return ImportPayload(import_format, *_parse_netscape_cookie_text(text))
     raise SidecarError(
@@ -489,7 +489,9 @@ def _format_from_source_path(path: Path) -> str:
     )
 
 
-def _parse_theprivator_json(text: str) -> tuple[list[CookieDTO], int, WarningAccumulator]:
+def _parse_theprivator_json(
+    text: str, *, allow_browser_array: bool = False
+) -> tuple[list[CookieDTO], int, WarningAccumulator]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -497,6 +499,8 @@ def _parse_theprivator_json(text: str) -> tuple[list[CookieDTO], int, WarningAcc
             code=PORTABILITY_COOKIE_FILE_INVALID,
             message="Cookie import file is invalid.",
         ) from exc
+    if allow_browser_array and isinstance(payload, list):
+        return [_normalize_browser_cookie(raw) for raw in payload], 0, WarningAccumulator()
     if not isinstance(payload, Mapping):
         _raise_invalid_cookie_file()
     if payload.get("format") != THEPRIVATOR_COOKIE_FORMAT or payload.get("version") != THEPRIVATOR_COOKIE_SCHEMA_VERSION:
@@ -510,6 +514,45 @@ def _parse_theprivator_json(text: str) -> tuple[list[CookieDTO], int, WarningAcc
             _raise_invalid_cookie_file()
         cookies.append(normalize_cookie(raw_cookie, strict_keys=True))
     return cookies, 0, WarningAccumulator()
+
+
+def _normalize_browser_cookie(raw: Any) -> CookieDTO:
+    if not isinstance(raw, Mapping):
+        _raise_invalid_cookie_file()
+    # The DTO cannot represent partition scope. Reject it before the full
+    # payload reaches replacement, rather than writing an unpartitioned cookie.
+    # Null/absent keys and explicit false flags represent unpartitioned exports;
+    # empty or malformed keys/flags are not proof that scope can be discarded.
+    if raw.get("partitionKey") is not None:
+        _raise_invalid_cookie_file()
+    for flag in ("partitioned", "partitionKeyOpaque"):
+        if _required_bool(raw.get(flag, False)):
+            _raise_invalid_cookie_file()
+    normalized = dict(raw)
+    # Chromium encodes host-only scope in host_key's leading dot. Honor the
+    # explicit browser flag before DTO identity/dedup and SQLite persistence.
+    domain = _required_clean_string(raw.get("domain"), max_length=253).lstrip(".")
+    if not domain:
+        _raise_invalid_cookie_file()
+    host_only = _required_bool(raw.get("hostOnly"))
+    normalized["domain"] = domain if host_only else f".{domain}"
+    expiry = raw.get("expirationDate")
+    if expiry is not None:
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+            _raise_invalid_cookie_file()
+        # This comparison also rejects NaN/infinity before integer conversion.
+        # Keep the same supported Unix-second range as the portable format.
+        if not 0 <= expiry <= 253_402_300_799:
+            _raise_invalid_cookie_file()
+    session = _required_bool(raw.get("session", expiry is None))
+    if not session and expiry is None:
+        _raise_invalid_cookie_file()
+    # Browser extension expiry is Unix seconds, never Chromium epoch seconds.
+    # Our portable DTO stores whole seconds, so discard the fractional part.
+    # storeId identifies the source browser store, not the destination profile;
+    # it (and other extension-only metadata) is intentionally not persisted.
+    normalized["expiresUnix"] = None if session or expiry is None else int(expiry)
+    return normalize_cookie(normalized)
 
 
 def _parse_netscape_cookie_text(text: str) -> tuple[list[CookieDTO], int, WarningAccumulator]:

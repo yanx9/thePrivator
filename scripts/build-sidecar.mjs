@@ -117,6 +117,8 @@ run(PYTHON, [
   "--hidden-import",
   "theprivator_sidecar.proxy_bridge",
   "--hidden-import",
+  "theprivator_sidecar.cookie_bot",
+  "--hidden-import",
   "psutil",
   "--hidden-import",
   "requests",

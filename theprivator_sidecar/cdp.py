@@ -253,14 +253,23 @@ def create_page_target_endpoint(
     if not isinstance(target_id, str):
         raise _cdp_error()
     _validate_target_id(target_id)
-    return select_page_target_endpoint(
-        endpoint,
-        target_id,
-        timeout_seconds=timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-        http_timeout_seconds=http_timeout_seconds,
-        http_get=http_get,
-    )
+    try:
+        return select_page_target_endpoint(
+            endpoint,
+            target_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            http_timeout_seconds=http_timeout_seconds,
+            http_get=http_get,
+        )
+    except Exception:
+        # Ownership cannot pass to the caller until discovery succeeds.
+        # Preserve the discovery error even if best-effort cleanup also fails.
+        try:
+            close_page_target(endpoint, target_id, client_factory=factory, timeout_seconds=timeout_seconds)
+        except Exception:
+            pass
+        raise
 
 
 def close_page_target(

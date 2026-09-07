@@ -20,16 +20,13 @@
   }
 
   .mark {
-    display: grid;
-    place-items: center;
+    display: block;
     width: 20px;
     height: 20px;
-    border-radius: var(--radius-sm);
-    background: var(--color-accent);
-    color: var(--color-accent-fg);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
+    flex-shrink: 0;
+    /* Keep native title-bar dragging on the enclosing region. */
+    pointer-events: none;
+    user-select: none;
   }
 
   .title {

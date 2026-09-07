@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="ThePrivator mark">
-  <rect width="128" height="128" rx="28" fill="#11120d" />
-  <circle cx="64" cy="64" r="39" fill="none" stroke="#d4874b" stroke-width="10" />
-  <path d="M64 24v80M24 64h80" stroke="#f2eadb" stroke-width="12" stroke-linecap="round" />
-  <circle cx="64" cy="64" r="16" fill="#11120d" stroke="#9ab26f" stroke-width="8" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">ThePrivator</title>
+  <desc id="desc">A white P within an indigo shield, protected by a teal lower facet.</desc>
+  <path fill="#4C5CE0" d="m64 6 40 15a6 6 0 0 1 4 6v34c0 27-17 47-44 61C37 108 20 88 20 61V27a6 6 0 0 1 4-6L64 6Z"/>
+  <path fill="#29C4B1" d="M108 61c0 27-17 47-44 61V99c19-11 29-23 29-38h15Z"/>
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M43 34h26c15 0 24 9 24 23S84 80 69 80H57v19l-14-9V34Zm14 14v18h12c6 0 10-3 10-9s-4-9-10-9H57Z" clip-rule="evenodd"/>
 </svg>

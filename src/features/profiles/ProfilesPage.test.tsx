@@ -28,6 +28,8 @@ function PageHost(props: Omit<Parameters<typeof ProfilesPage>[0], "data"> & { in
   return <ProfilesPage {...rest} data={data} />;
 }
 
+const dialogs = vi.hoisted(() => ({ pickFile: vi.fn(), pickSaveTarget: vi.fn() }));
+vi.mock("../../dialogs", () => dialogs);
 const mockInvoke = vi.mocked(invoke);
 
 const ALPHA = "11111111-1111-1111-1111-111111111111";
@@ -136,8 +138,66 @@ function renderPage(overrides: Partial<Parameters<typeof ProfilesPage>[0]> = {})
   };
 }
 
+it("exports cookies to the chosen file and reports skipped cookies", async () => {
+  dialogs.pickSaveTarget.mockResolvedValue("/tmp/cookies.txt");
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]),
+    profile_cookies_export: () => envelope({ portabilityVersion: 1, profileId: ALPHA, operation: "export", format: "netscape", exportedCount: 3, skippedCount: 1, warningCount: 0, warnings: [] }) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Export (cookies.txt)…" }));
+  expect(await screen.findByText("Exported 3 cookies. 1 skipped.")).toBeInTheDocument();
+  expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_export", { profileId: ALPHA, destinationPath: "/tmp/cookies.txt", format: "netscape" });
+});
+it("disables cookie portability for running profiles", async () => {
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([ALPHA]) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
+  for (const name of ["Export (JSON)…", "Export (cookies.txt)…", "Import…"]) {
+    expect(screen.getByRole("menuitem", { name })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name })).toHaveAttribute("title", "Stop the profile first");
+  }
+});
+it("cancelling the cookie save picker makes no export call", async () => {
+  dialogs.pickSaveTarget.mockResolvedValue(null);
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Export (JSON)…" }));
+  await waitFor(() => expect(dialogs.pickSaveTarget).toHaveBeenCalled());
+  expect(mockInvoke.mock.calls.some(([command]) => command === "profile_cookies_export")).toBe(false);
+});
+
+it("opens the cookie bot dialog for the context profile", async () => {
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Run Cookie Bot…" }));
+  expect(await screen.findByRole("dialog", { name: "Run Cookie Bot — Alpha" })).toBeInTheDocument();
+});
+
+it("requires confirmation before picking an import file and reports the import", async () => {
+  dialogs.pickFile.mockResolvedValue("/tmp/cookies.json");
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]),
+    profile_cookies_replace: () => envelope({ portabilityVersion: 1, profileId: ALPHA, operation: "replace", format: "theprivator-json", importedCount: 2, replacedCount: 1, skippedCount: 0, warningCount: 0, warnings: [] }) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Import…" }));
+  expect(dialogs.pickFile).not.toHaveBeenCalled();
+  const confirmation = screen.getByRole("alertdialog", { name: "Import cookies" });
+  expect(confirmation).toHaveTextContent(/replaces/i);
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Replace cookies" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_replace", { profileId: ALPHA, sourcePath: "/tmp/cookies.json" }));
+  expect(await screen.findByText(/Imported 2 cookies/)).toBeInTheDocument();
+});
+
 beforeEach(() => {
   mockInvoke.mockReset();
+  dialogs.pickFile.mockReset();
+  dialogs.pickSaveTarget.mockReset();
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
