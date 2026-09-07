@@ -10,6 +10,13 @@ beforeEach(() => {
   api.getCookieBotStatus.mockResolvedValue({ job: null });
   api.startCookieBot.mockResolvedValue({ job: { jobId: "job", status: "completed", config, visitedPages: 2, failedPages: 0, errors: [], stopReason: "page-limit" } });
 });
+it("shows the current navigation and explains bounded DOM waits", async () => {
+  api.getCookieBotStatus.mockResolvedValue({ job: { jobId: "job", status: "running", config, currentUrl: "https://example.com/article", visitedPages: 1, failedPages: 0, errors: [], stopReason: null } });
+  render(<CookieBotDialog profileId="alpha" profileName="Alpha" onClose={vi.fn()} onRefresh={vi.fn()} onBusyChange={vi.fn()} />);
+  await screen.findByRole("button", { name: "Cancel run" });
+  expect(screen.getByRole("status")).toHaveTextContent("Current page: https://example.com/article");
+  expect(screen.getByText(/Only same-origin/)).toHaveTextContent("up to 10 seconds for the DOM and 2 extra seconds for delayed links");
+});
 it("restores the actual configuration of an existing running job", async () => {
   api.getCookieBotStatus.mockResolvedValue({ job: { jobId: "job", status: "running", config: { ...config, urls: ["https://example.com/"], closeAfterCompletion: true }, visitedPages: 1, failedPages: 0, errors: [], stopReason: null } });
   render(<CookieBotDialog profileId="alpha" profileName="Alpha" onClose={vi.fn()} onRefresh={vi.fn()} onBusyChange={vi.fn()} />);

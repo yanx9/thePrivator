@@ -129,6 +129,15 @@ describe("App", () => {
 });
 
 describe("App sidebar counts", () => {
+  beforeEach(() => { window.location.hash = "#/profiles"; });
+  it("renders usable proxy and template destinations instead of placeholders", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("link", { name: "Proxies" }));
+    expect(await screen.findByRole("button", { name: "Save proxy" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "Templates" }));
+    expect(await screen.findByRole("combobox", { name: "Source profile" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create from configuration" })).toBeInTheDocument();
+  });
   function identity() {
     return {
       identityVersion: 2,
@@ -183,7 +192,7 @@ describe("App sidebar counts", () => {
             storeVersion: 4,
             profiles: [
               record(ALPHA, "Alpha", { organization: { folderId: null, tags: [], notes: "", favorite: true, color: null } }),
-              record(BETA, "Beta"),
+              record(BETA, "Beta", { organization: { folderId: BETA, tags: [], notes: "", favorite: false, color: null } }),
             ],
             count: 2,
           }),
@@ -226,6 +235,12 @@ describe("App sidebar counts", () => {
 
     const rail = await screen.findByRole("navigation", { name: /profile folders and views/i });
     expect(await within(rail).findByRole("link", { name: "All profiles, 2 profiles" })).toBeInTheDocument();
+  });
+
+  it("shows saved profile folders as navigable counted sidebar entries", async () => {
+    render(<App />);
+    const folder = await screen.findByRole("treeitem", { name: `${BETA}, 1 profile` });
+    expect(folder).toHaveAttribute("href", `#/profiles?folder=${BETA}`);
   });
 
   it("counts favorites, running browsers and the trash separately", async () => {

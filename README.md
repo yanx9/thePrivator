@@ -17,7 +17,7 @@ a folder your own sync client already keeps up to date.
 - **Fingerprint control across 11 surfaces** — browser, navigator, screen,
   locale, canvas, audio, WebGL, WebRTC, geolocation, media devices and local
   port access. Each is `real`, `masked`, `custom` or noise-seeded, with curated
-  presets as a starting point.
+  API-generated presets as a starting point, plus **Real** to disable all masking.
 - **A consistency check, not just a mask.** Masking is not monotonic: a
   geolocation that contradicts your proxy's exit country makes a profile *more*
   identifiable, not less. The app warns when surfaces disagree.
@@ -30,7 +30,7 @@ a folder your own sync client already keeps up to date.
 - **Cookie import and export** directly from a profile's **Cookies** context
   submenu. Import accepts browser-export JSON arrays as well as ThePrivator
   JSON and Netscape `cookies.txt`. JSON export uses the same browser-array format
-  as import; Netscape export remains available for compatibility,
+  as import; export is JSON-only (legacy TXT import remains available),
   and whole-profile `.tpkg` packages that carry the fingerprint, the proxy and
   the browsing data — but never the proxy password.
 - **Cookie bot** visits your URLs in the selected profile with its proxy and

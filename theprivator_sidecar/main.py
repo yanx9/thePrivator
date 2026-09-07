@@ -387,6 +387,8 @@ def dispatch_profile_request(request: SidecarRequest) -> JsonObject:
 
         if request.method == "profiles.list":
             return store.list()
+        if request.method == "profiles.duplicate":
+            return store.duplicate(require_string_param(request.params, "profileId", "Profile id is required."))
         if request.method == "profiles.create":
             name = require_string_param(
                 request.params,

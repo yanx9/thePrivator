@@ -386,7 +386,7 @@ const MAX_IDENTITY_SURFACE_FIELD_OPTIONS = 12;
 
 const PROFILE_TAG_PATTERN = /^[\p{L}\p{N}_ -]+$/u;
 const PROFILE_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
-const PROFILE_FOLDER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PROFILE_FOLDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 const FORBIDDEN_AUTOMATION_API_FIELD_TOKENS = new Set([
   "appdata",
@@ -707,6 +707,17 @@ export async function listProfiles(): Promise<ProfileListSnapshot> {
   }
 }
 
+export async function duplicateProfile(profileId: string): Promise<ProfileMutationSnapshot> {
+  try {
+    const envelope = await invoke<unknown>("profiles_duplicate", { profileId });
+    return parseProfileMutationEnvelope(envelope, new Date().toISOString(), {
+      requireProfile: true, requireProfileInList: true, requireWarnings: false,
+    });
+  } catch (error) {
+    throw normalizeSidecarError(error);
+  }
+}
+
 export async function createProfile(name: string): Promise<ProfileMutationSnapshot> {
   try {
     const envelope = await invoke<unknown>("profiles_create", { name });
@@ -827,7 +838,10 @@ export async function exportProfileCookies(
   try {
     const safeProfileId = requireProfileClientId(profileId, "profileId");
     const safeDestinationPath = requireDialogPathString(destinationPath, "destinationPath");
-    const safeFormat = requireCookieExportFormat(format, "format");
+    if (format !== "theprivator-json") {
+      throw makeProtocolError("Cookie export supports only ThePrivator JSON format.");
+    }
+    const safeFormat = format;
     const envelope = await invoke<unknown>("profile_cookies_export", {
       profileId: safeProfileId,
       destinationPath: safeDestinationPath,
@@ -3800,7 +3814,7 @@ function parseProfileOrganization(value: unknown, field: string): ProfileOrganiz
     tags: parseProfileTagArray(organization.tags, `${field}.tags`),
     // Notes are text the user typed: slashes and colons are ordinary content, so
     // the guard is control characters and length, never a path-shaped rejection.
-    notes: requireProfileFreeText(organization.notes, `${field}.notes`, MAX_PROFILE_NOTES_LENGTH),
+    notes: requireProfileFreeText(organization.notes, `${field}.notes`, MAX_PROFILE_NOTES_LENGTH, true),
     favorite: requireBoolean(organization.favorite, `${field}.favorite`),
     color: organization.color === null ? null : requireProfileColor(organization.color, `${field}.color`),
   };
@@ -3870,9 +3884,9 @@ function requireProfileTag(value: unknown, field: string): string {
   return tag;
 }
 
-function requireProfileFreeText(value: unknown, field: string, maxLength: number): string {
+function requireProfileFreeText(value: unknown, field: string, maxLength: number, multiline = false): string {
   const text = requireString(value, field);
-  if (codePointLength(text) > maxLength || containsControlCharactersOrDelete(text)) {
+  if (codePointLength(text) > maxLength || containsControlCharactersOrDelete(multiline ? text.replace(/[\n\r\t]/g, "") : text)) {
     throw makeProtocolError(`The sidecar profile result field ${field} is outside supported bounds.`);
   }
 
@@ -3882,7 +3896,7 @@ function requireProfileFreeText(value: unknown, field: string, maxLength: number
 function requireProfileFolderId(value: unknown, field: string): string {
   const folderId = requireNonBlankString(value, field);
   if (!PROFILE_FOLDER_ID_PATTERN.test(folderId)) {
-    throw makeProtocolError(`The sidecar profile result field ${field} must be a uuid or null.`);
+    throw makeProtocolError(`The sidecar profile result field ${field} must be a route-safe name of 1–64 characters or null.`);
   }
 
   return folderId;
@@ -5174,11 +5188,17 @@ function requireNonBlankString(value: unknown, field: string): string {
 
 function requireIsoTimestamp(value: unknown, field: string): string {
   const text = requireString(value, field);
-  if (!text.endsWith("Z") || Number.isNaN(Date.parse(text))) {
+  // Python's older job files use +00:00 and microseconds. Accept that UTC
+  // spelling without accepting offsets, locale dates or Date.parse rollover.
+  const normalized = text.replace(/\+00:00$/, "Z");
+  const epoch = Date.parse(normalized);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(normalized)
+      || Number.isNaN(epoch)
+      || new Date(epoch).toISOString().slice(0, 19) !== normalized.slice(0, 19)) {
     throw makeProtocolError(`The sidecar response field ${field} must be a UTC ISO timestamp string.`);
   }
 
-  return text;
+  return normalized;
 }
 
 function requireNonNegativeInteger(value: unknown, field: string): number {

@@ -108,11 +108,11 @@ export function CookieBotDialog({ profileId, profileName, onClose, onRefresh, on
       </label>
       {displayedConfig ? <>
         <p className={fields.hint}>Default sites: {defaultUrls.join(", ")}</p>
-        <p className={fields.hint}>Only same-origin links are followed, up to depth {displayedConfig.maxDepth}. Browsing is limited to {displayedConfig.maxPages} pages and {displayedConfig.maxDurationSeconds} seconds, with {displayedConfig.dwellSeconds} seconds per page. Browser startup and cleanup take additional time.</p>
+        <p className={fields.hint}>Only same-origin links are followed, up to depth {displayedConfig.maxDepth}. Browsing is limited to {displayedConfig.maxPages} pages and {displayedConfig.maxDurationSeconds} seconds, with {displayedConfig.dwellSeconds} seconds per page after the DOM is ready. Within the overall time limit, pages get up to 10 seconds for the DOM and 2 extra seconds for delayed links. Cross-origin redirect destinations are not crawled further. Browser startup and cleanup take additional time.</p>
         <label className={fields.toggle}><input type="checkbox" checked={displayedConfig.closeAfterCompletion} disabled={pending || active}
           onChange={(event) => setConfig((current) => current ? { ...current, closeAfterCompletion: event.target.checked } : current)} />Close profile after all URLs are crawled</label>
       </> : <p>Loading cookie bot settings…</p>}
-      {job ? <p role="status">{job.status}: {job.visitedPages} pages visited; {job.failedPages} failed.{job.stopReason ? ` ${job.stopReason}.` : ""}</p> : null}
+      {job ? <p role="status">{job.status}: {job.visitedPages} pages visited; {job.failedPages} failed.{job.stopReason ? ` ${job.stopReason}.` : ""}{job.currentUrl ? ` Current page: ${job.currentUrl}` : ""}</p> : null}
       {job && job.errors.length > 0 ? <p role="alert" className={styles.error}>{job.errors.join(" · ")}</p> : null}
       <div className={styles.dialogActions}>
         <button type="button" className={styles.secondary} disabled={pending || active} onClick={onClose}>{job ? "Close" : "Cancel"}</button>

@@ -6,6 +6,8 @@ import {
   IDENTITY_SURFACE_ORDER,
   createIdentityDraftState,
   parseIdentityDraftState,
+  updateIdentityDraftSurfaceMode,
+  updateIdentityDraftField,
 } from "../../identityControls";
 import type { ProfileIdentity } from "../../sidecar/types";
 import { FingerprintForm } from "./FingerprintForm";
@@ -64,6 +66,41 @@ function pendingUserAgent() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("FingerprintForm", () => {
+  it.each([undefined, []])("offers Real without API templates and resets every surface in the draft", (presets) => {
+    let draft = createIdentityDraftState(realIdentity());
+    for (const surface of IDENTITY_SURFACE_ORDER) {
+      const mode = surface === "canvas" || surface === "audio" ? "noise" : surface === "geolocation" ? "custom" : "masked";
+      draft = updateIdentityDraftSurfaceMode(draft, surface, mode);
+      expect(draft.identity[surface].mode).not.toBe("real");
+    }
+    draft = updateIdentityDraftField(draft, "webrtc.policy", "block");
+    draft = updateIdentityDraftField(draft, "geolocation.permission", "block");
+    draft = updateIdentityDraftField(draft, "screen.width", "invalid");
+    const before = structuredClone(draft);
+    const onChange = vi.fn();
+    const onApplyPreset = vi.fn();
+    const view = render(<FingerprintForm draft={draft} warnings={[]} presets={presets} onChange={onChange} onApplyPreset={onApplyPreset} />);
+    const picker = screen.getByLabelText("Start from a preset");
+    expect(within(picker).getByRole("option", { name: "Real" })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: "real" } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onApplyPreset).not.toHaveBeenCalled();
+    expect(draft).toEqual(before);
+    const next = onChange.mock.calls[0][0];
+    const expected = { ...realIdentity(), label: "Real" };
+    expect(next).toEqual(createIdentityDraftState(expected));
+    expect(parseIdentityDraftState(next)).toMatchObject({ ok: true, identity: expected });
+    view.rerender(<FingerprintForm draft={next} warnings={[]} presets={presets} onChange={onChange} />);
+    expect(screen.getByLabelText("Start from a preset")).toHaveValue("real");
+  });
+  it("does not expose old offline presets even when the draft uses one", () => {
+    const base = { ...realIdentity(), label: "Outdated Chrome 120", presetId: "old-template" };
+    render(<FingerprintForm draft={createIdentityDraftState(base)} warnings={[]} presets={[base]} onChange={vi.fn()} onApplyPreset={vi.fn()} />);
+    const picker = screen.getByLabelText("Start from a preset");
+    expect(within(picker).queryByRole("option", { name: base.label })).not.toBeInTheDocument();
+    expect(within(picker).queryByRole("group", { name: /offline/i })).not.toBeInTheDocument();
+    expect(picker).toHaveValue("");
+  });
   it("retains generated presets and manual edits after refresh failure and supports retry", async () => {
     const request = pendingUserAgent();
     const base: ProfileIdentity = { ...realIdentity(), label: "Ubuntu Linux Chrome 120", presetId: "ubuntu-linux-chrome-120", browser: { mode: "masked", userAgent: generatedUa } };
@@ -71,7 +108,7 @@ describe("FingerprintForm", () => {
     const onApplyPreset = vi.fn();
     const draft = createIdentityDraftState(realIdentity());
     const view = render(<FingerprintForm draft={draft} warnings={[]} presets={[base]} onChange={onChange} onApplyPreset={onApplyPreset} />);
-    const button = screen.getByRole("button", { name: "Odśwież presety" });
+    const button = screen.getByRole("button", { name: "Refresh presets" });
     fireEvent.click(button);
     await act(async () => request.resolve());
     fireEvent.click(button);
@@ -94,7 +131,7 @@ describe("FingerprintForm", () => {
     const base: ProfileIdentity = { ...realIdentity(), label: "Linux Chrome 120", presetId: "linux", browser: { mode: "masked", userAgent: generatedUa } };
     const onChange = vi.fn();
     const view = render(<FingerprintForm draft={createIdentityDraftState(realIdentity())} warnings={[]} presets={[base]} onChange={onChange} onApplyPreset={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Odśwież presety" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh presets" }));
     const signal = request.fetch.mock.calls[0][1].signal;
     view.unmount();
     expect(signal.aborted).toBe(true);
@@ -108,7 +145,7 @@ describe("FingerprintForm", () => {
     const onChange = vi.fn();
     const onApplyPreset = vi.fn();
     render(<FingerprintForm draft={createIdentityDraftState(realIdentity())} warnings={[]} presets={[base]} onChange={onChange} onApplyPreset={onApplyPreset} />);
-    const button = screen.getByRole("button", { name: "Odśwież presety" });
+    const button = screen.getByRole("button", { name: "Refresh presets" });
     fireEvent.click(button);
     expect(button).toBeDisabled();
     await act(async () => request.resolve());
@@ -129,7 +166,7 @@ describe("FingerprintForm", () => {
     const identity = realIdentity();
     identity.browser = mode === "real" ? { mode } : { mode, userAgent: "Existing UA" };
     renderForm(identity);
-    expect(screen.queryByRole("button", { name: "Odśwież" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
   });
 
   it("preserves the draft on failure, hides provider error details and allows retry", async () => {
@@ -137,7 +174,7 @@ describe("FingerprintForm", () => {
     const identity = realIdentity();
     identity.browser = { mode: "custom", userAgent: "Keep this UA" };
     const { onChange } = renderForm(identity);
-    const button = screen.getByRole("button", { name: "Odśwież" });
+    const button = screen.getByRole("button", { name: "Refresh" });
     fireEvent.click(button);
     await act(async () => request.reject(new Error("<script>untrusted provider detail</script>")));
     expect(onChange).not.toHaveBeenCalled();
@@ -156,7 +193,7 @@ describe("FingerprintForm", () => {
     const identity = realIdentity();
     identity.browser = { mode: "custom", userAgent: "Original UA" };
     const { apply, onChange } = renderForm(identity);
-    fireEvent.click(screen.getByRole("button", { name: "Odśwież" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     const signal = request.fetch.mock.calls[0][1].signal;
     fireEvent.change(screen.getByLabelText(label), { target: { value: "Manual edit" } });
     apply();
@@ -164,7 +201,7 @@ describe("FingerprintForm", () => {
     await act(async () => request.resolve());
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText(label)).toHaveValue("Manual edit");
-    expect(screen.getByRole("button", { name: "Odśwież" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh" })).not.toBeDisabled();
   });
 
   it.each(["mode", "profile", "unmount"])("aborts requests on %s changes without writing to a stale draft", async (change) => {
@@ -172,7 +209,7 @@ describe("FingerprintForm", () => {
     const identity = realIdentity();
     identity.browser = { mode: "custom", userAgent: "Original UA" };
     const { apply, onChange, rerender, unmount } = renderForm(identity);
-    fireEvent.click(screen.getByRole("button", { name: "Odśwież" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     const signal = request.fetch.mock.calls[0][1].signal;
     if (change === "mode") {
       fireEvent.change(screen.getByRole("combobox", { name: /browser mode/i }), { target: { value: "real" } });
@@ -187,13 +224,13 @@ describe("FingerprintForm", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("refreshes only the UA draft field with an adjacent Polish button and explains the connection", async () => {
+  it("refreshes only the UA draft field with an adjacent English button and explains the connection", async () => {
     const request = pendingUserAgent();
     const identity = realIdentity();
     identity.browser = { mode: "custom", userAgent: "Old UA", clientHints: { platform: "Linux", platformVersion: "12.0.0" } };
     const { current, onChange, apply } = renderForm(identity);
     const before = current();
-    const button = screen.getByRole("button", { name: "Odśwież" });
+    const button = screen.getByRole("button", { name: "Refresh" });
     expect(button.parentElement).toContainElement(screen.getByLabelText("User agent"));
     expect(button).toHaveAttribute("type", "button");
     expect(button).toHaveAccessibleDescription(/randomapi.dev.*direct.*not.*profile proxy/i);

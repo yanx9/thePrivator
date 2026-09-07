@@ -1,0 +1,52 @@
+import { invoke } from "@tauri-apps/api/core";
+import { beforeEach, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { makeProfile } from "../../testing/profileFactory";
+import { TemplatesPage } from "./TemplatesPage";
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const source = makeProfile({ id: "11111111-1111-1111-1111-111111111111", name: "Source", tags: ["research"], notes: "private password", proxyHost: "proxy.test" });
+const created = makeProfile({ id: "22222222-2222-2222-2222-222222222222", name: "New research" });
+created.storage = { profileDir: `profile-store/profiles/${created.id}`, userDataDir: `profile-store/profiles/${created.id}/user-data` };
+source.launch = { startupBehavior: "customUrls", startUrls: ["https://example.test"], args: ["--secret=value"] };
+const data = { rows: [{ profile: source, running: false }], trashed: [], runningCount: 0, loading: false, error: null, refresh: vi.fn() };
+const mutation = () => ({ requestId: "1", protocolVersion: "1.0.0", durationMs: 1, result: { storeVersion: 4, profiles: [created], count: 1, profile: created, warnings: [] } });
+it("keeps the created profile visible on partial failure and retries without creating another", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "profiles_launch_update") throw { code: "LAUNCH_FAILED", message: "Launch rejected", recoverable: true, detailRef: "diag-1" };
+    return mutation();
+  });
+  const open = vi.fn(); render(<TemplatesPage data={data} onOpenProfile={open} />);
+  fireEvent.change(screen.getByLabelText("New profile name"), { target: { value: "New research" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create from configuration" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/Profile created.*incomplete/);
+  fireEvent.click(screen.getByRole("button", { name: "Open created profile" }));
+  expect(open).toHaveBeenCalledWith(created.id);
+  vi.mocked(invoke).mockResolvedValue(mutation());
+  fireEvent.click(screen.getByRole("button", { name: "Retry configuration" }));
+  await screen.findByText(/Configuration copied/);
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "profiles_create")).toHaveLength(1);
+});
+it("does not copy authentication URLs or startup URL tokens", async () => {
+  const unsafe = { ...source, launch: { ...source.launch, startUrls: ["https://user:password@example.test", "https://example.test/?token=secret#secret", "https://example.test/safe"] } };
+  render(<TemplatesPage data={{ ...data, rows: [{ profile: unsafe, running: false }] }} onOpenProfile={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText("New profile name"), { target: { value: "Safe" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create from configuration" }));
+  await screen.findByText(/Configuration copied/);
+  expect(invoke).toHaveBeenCalledWith("profiles_launch_update", { profileId: created.id, launch: { startupBehavior: "customUrls", startUrls: ["https://example.test/safe"], args: [] } });
+});
+beforeEach(() => { vi.mocked(invoke).mockReset().mockResolvedValue(mutation()); data.refresh.mockClear(); });
+it("creates from configuration only, without cookies, proxy secrets, notes or raw arguments", async () => {
+  const open = vi.fn(); render(<TemplatesPage data={data} onOpenProfile={open} />);
+  expect(screen.getByText(/source profile configuration/i)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("New profile name"), { target: { value: "New research" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create from configuration" }));
+  await screen.findByText(/Configuration copied/);
+  expect(invoke).toHaveBeenCalledWith("profiles_create", { name: "New research" });
+  expect(invoke).toHaveBeenCalledWith("profiles_identity_update", { profileId: created.id, identity: source.identity });
+  expect(invoke).toHaveBeenCalledWith("profiles_launch_update", { profileId: created.id, launch: { startupBehavior: "customUrls", startUrls: ["https://example.test"], args: [] } });
+  expect(invoke).toHaveBeenCalledWith("profiles_organization_update", { profileId: created.id, organization: { folderId: null, tags: ["research"], notes: "", favorite: false, color: null } });
+  expect(JSON.stringify(vi.mocked(invoke).mock.calls)).not.toMatch(/private password|--secret|cookies|proxy_update|duplicate/);
+  fireEvent.click(screen.getByRole("button", { name: "Open created profile" }));
+  expect(open).toHaveBeenCalledWith(created.id);
+  expect(data.refresh).toHaveBeenCalled();
+});

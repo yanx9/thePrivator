@@ -443,7 +443,7 @@ describe("ProfileEditor, curated presets", () => {
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
   });
 
-  it("offers the presets the sidecar returned", async () => {
+  it("keeps sidecar templates out of the picker and offers only Custom and Real before refresh", async () => {
     allSaveCommandsSucceed();
 
     render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -451,41 +451,37 @@ describe("ProfileEditor, curated presets", () => {
     fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
 
     const select = await screen.findByLabelText(/start from a preset/i);
-    expect(within(select).getByRole("option", { name: "Balanced desktop" })).toBeInTheDocument();
-    expect(within(select).getByRole("option", { name: "Hardened" })).toBeInTheDocument();
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Custom", "Real"]);
+    expect(screen.getByRole("button", { name: "Refresh presets" })).toBeEnabled();
   });
 
-  it("applies the chosen preset through the sidecar rather than locally", async () => {
-    // A preset applied only in the form would show surfaces the sidecar never
-    // validated, and its warnings would never appear.
-    const applied = record({ identity: identity({ presetId: "hardened", label: "Hardened" }) });
+  it("keeps Real in the draft until Save, then writes the complete identity rather than applying an offline preset", async () => {
     allSaveCommandsSucceed();
-    mockInvoke.mockImplementation((command: string) => {
-      if (command === "profiles_identity_apply_preset") {
-        return Promise.resolve(mutation(applied, { warnings: [] })) as ReturnType<typeof invoke>;
-      }
-      if (command === "identity_presets_list") {
-        return Promise.resolve(presetList()) as ReturnType<typeof invoke>;
-      }
-      if (command === "profiles_list") {
-        return Promise.resolve(envelope({ storeVersion: 4, profiles: [record()], count: 1 })) as ReturnType<typeof invoke>;
-      }
-      return Promise.resolve(envelope({ runningCount: 0, profiles: [], reconciled: [] })) as ReturnType<typeof invoke>;
-    });
+    const onSaved = vi.fn();
 
-    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={onSaved} />);
     await screen.findByLabelText("Name");
     fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
     const select = await screen.findByLabelText(/start from a preset/i);
+    fireEvent.change(screen.getByLabelText("WebRTC mode"), { target: { value: "custom" } });
+    expect(screen.getByLabelText("WebRTC mode")).toHaveValue("custom");
 
-    fireEvent.change(select, { target: { value: "hardened" } });
+    fireEvent.change(select, { target: { value: "real" } });
 
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_apply_preset", {
-        profileId: PROFILE_ID,
-        presetId: "hardened",
-      }),
-    );
+    expect(select).toHaveValue("real");
+    expect(screen.getByLabelText("Identity label")).toHaveValue("Real");
+    expect(screen.getByLabelText("WebRTC mode")).toHaveValue("real");
+    expect(mockInvoke.mock.calls.map(([command]) => command).filter((command) => /update|create|apply_preset/.test(command))).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(PROFILE_ID));
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_update", {
+      profileId: PROFILE_ID,
+      identity: identity({ label: "Real" }),
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("profiles_identity_apply_preset", expect.anything());
   });
 
   it("says a hand-edited identity is custom rather than pretending a preset is active", async () => {
@@ -496,16 +492,39 @@ describe("ProfileEditor, curated presets", () => {
     fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
     const select = (await screen.findByLabelText(/start from a preset/i)) as HTMLSelectElement;
 
+    fireEvent.change(select, { target: { value: "real" } });
+    expect(select).toHaveValue("real");
+    fireEvent.change(screen.getByLabelText("Screen mode"), { target: { value: "custom" } });
+
     expect(select.value).toBe("");
     expect(within(select).getByRole("option", { name: "Custom" })).toBeInTheDocument();
   });
 
-  it("offers no presets in the create flow, where there is no profile to apply one to", () => {
+  it("offers Real in the create flow and saves it only after creating the profile", async () => {
     allSaveCommandsSucceed();
 
     render(<ProfileEditor profileId={null} onClose={vi.fn()} onSaved={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
 
-    expect(screen.queryByLabelText(/start from a preset/i)).not.toBeInTheDocument();
+    const select = screen.getByLabelText(/start from a preset/i);
+    expect(within(select).getByRole("option", { name: "Real" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("WebRTC mode"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("WebRTC policy"), { target: { value: "block" } });
+    fireEvent.change(select, { target: { value: "real" } });
+    expect(screen.getByLabelText("WebRTC mode")).toHaveValue("real");
+    expect(mockInvoke).not.toHaveBeenCalledWith("profiles_identity_update", expect.anything());
+    expect(mockInvoke).not.toHaveBeenCalledWith("profiles_create", expect.anything());
+
+    fireEvent.click(screen.getByRole("tab", { name: /general/i }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Real profile" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_identity_update", {
+      profileId: PROFILE_ID,
+      identity: identity({ label: "Real" }),
+    }));
+    const commands = mockInvoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf("profiles_create")).toBeLessThan(commands.indexOf("profiles_identity_update"));
+    expect(commands).not.toContain("profiles_identity_apply_preset");
   });
 });

@@ -138,23 +138,187 @@ function renderPage(overrides: Partial<Parameters<typeof ProfilesPage>[0]> = {})
   };
 }
 
-it("exports cookies to the chosen file and reports skipped cookies", async () => {
-  dialogs.pickSaveTarget.mockResolvedValue("/tmp/cookies.txt");
+it("duplicates a stopped profile through the sidecar and shows the new row", async () => {
+  const source = record(ALPHA, "Alpha");
+  const clone = record(BETA, "Alpha copy");
+  let profiles = [source];
+  respond({ profiles_list: () => listResult(profiles), chromium_status: () => statusResult([]),
+    profiles_duplicate: () => {
+      profiles = [source, clone];
+      return envelope({ storeVersion: 4, profile: clone, profiles, count: 2 });
+    } });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_duplicate", { profileId: ALPHA }));
+  expect(await screen.findByText("Alpha copy")).toBeInTheDocument();
+});
+
+it.each([false, true])("toggles favorites from the menu (currently %s)", async (favorite) => {
+  let profile = record(ALPHA, "Alpha");
+  profile.organization.favorite = favorite;
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "profiles_list") return listResult([profile]);
+    if (command === "chromium_status") return statusResult([]);
+    if (command === "profiles_organization_update") {
+      profile = { ...profile, organization: (args as { organization: typeof profile.organization }).organization };
+      return envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 });
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: favorite ? "Remove from favorites" : "Add to favorites" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+    profileId: ALPHA, organization: { folderId: null, tags: [], notes: "", favorite: !favorite, color: null },
+  }));
+  await waitFor(() => expect(screen.queryByRole("img", { name: "Favorite" }) !== null).toBe(!favorite));
+});
+
+it("edits tags without replacing unrelated organization fields", async () => {
+  const profile = record(ALPHA, "Alpha");
+  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]),
+    profiles_organization_update: () => envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 }) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Edit tags…" }));
+  const dialog = screen.getByRole("dialog", { name: "Edit tags" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Tags (comma separated)" }), { target: { value: " work, EU, work " } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+    profileId: ALPHA, organization: { ...profile.organization, tags: ["work", "EU"] },
+  }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+});
+
+it.each([BETA, ""])("moves a profile to folder %s, including no folder", async (folderId) => {
+  const profile = record(ALPHA, "Alpha");
+  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]),
+    profiles_organization_update: () => envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 }) });
+  renderPage({ folderNames: new Map([[BETA, "Work"]]) });
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move to folder…" }));
+  const dialog = screen.getByRole("dialog", { name: "Move to folder" });
+  fireEvent.change(within(dialog).getByRole("combobox", { name: "Folder" }), { target: { value: folderId } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+    profileId: ALPHA, organization: { ...profile.organization, folderId: folderId || null },
+  }));
+});
+
+it("moves into a new route-safe folder when the library has no folders", async () => {
+  const profile = record(ALPHA, "Alpha");
+  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]),
+    profiles_organization_update: () => envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 }) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move to folder…" }));
+  const dialog = screen.getByRole("dialog", { name: "Move to folder" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "New folder" }), { target: { value: "Work_2026" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+    profileId: ALPHA, organization: { ...profile.organization, folderId: "Work_2026" },
+  }));
+});
+
+it.each(["Edit tags…", "Move to folder…"])("applies bulk %s to every selected profile", async (action) => {
+  const profiles = [record(ALPHA, "Alpha"), record(BETA, "Beta")];
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "profiles_list") return listResult(profiles);
+    if (command === "chromium_status") return statusResult([]);
+    if (command === "profiles_organization_update") {
+      const id = (args as { profileId: string }).profileId;
+      const profile = profiles.find((item) => item.id === id);
+      return envelope({ storeVersion: 4, profile, profiles, count: 2 });
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  renderPage();
+  await screen.findByText("Alpha");
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all profiles" }));
+  fireEvent.click(within(screen.getByRole("region", { name: "Bulk actions" })).getByRole("button", { name: action }));
+  const dialog = screen.getByRole("dialog");
+  fireEvent.change(within(dialog).getByRole("textbox", { name: action === "Edit tags…" ? "Tags (comma separated)" : "New folder" }), { target: { value: "Work" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  for (const profile of profiles) {
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+      profileId: profile.id, organization: { ...profile.organization, ...(action === "Edit tags…" ? { tags: ["Work"] } : { folderId: "Work" }) },
+    }));
+  }
+});
+
+it("retains failed notes for retry and cancels without saving", async () => {
+  const profile = record(ALPHA, "Alpha");
+  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]),
+    profiles_organization_update: () => Promise.reject(bridgeError("STORE_WRITE_FAILED", "Could not save notes.")) });
+  renderPage();
+  const notes = await screen.findByRole("textbox", { name: "Notes for Alpha" });
+  fireEvent.change(notes, { target: { value: "Unsaved draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save notes for Alpha" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save notes.");
+  expect(notes).toHaveValue("Unsaved draft");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel notes for Alpha" }));
+  expect(notes).toHaveValue("");
+  expect(mockInvoke.mock.calls.filter(([command]) => command === "profiles_organization_update")).toHaveLength(1);
+});
+
+it("keeps rejected tag edits visible for correction", async () => {
   respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]),
-    profile_cookies_export: () => envelope({ portabilityVersion: 1, profileId: ALPHA, operation: "export", format: "netscape", exportedCount: 3, skippedCount: 1, warningCount: 0, warnings: [] }) });
+    profiles_organization_update: () => Promise.reject(bridgeError("STORE_WRITE_FAILED", "Could not save tags.")) });
+  renderPage();
+  fireEvent.contextMenu(await screen.findByText("Alpha"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Edit tags…" }));
+  const dialog = screen.getByRole("dialog");
+  fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "work" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("Could not save tags.");
+  expect(within(dialog).getByRole("textbox")).toHaveValue("work");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("saves notes directly in the default main table without opening the editor", async () => {
+  let profile = record(ALPHA, "Alpha");
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "profiles_list") return listResult([profile]);
+    if (command === "chromium_status") return statusResult([]);
+    if (command === "profiles_organization_update") {
+      profile = { ...profile, organization: (args as { organization: typeof profile.organization }).organization };
+      return envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 });
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const { onOpenProfile } = renderPage();
+  const notes = await screen.findByRole("textbox", { name: "Notes for Alpha" });
+  fireEvent.doubleClick(notes);
+  fireEvent.change(notes, { target: { value: "Keep this\n<script>as text</script>" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save notes for Alpha" }));
+  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
+    profileId: ALPHA, organization: { ...profile.organization, notes: "Keep this\n<script>as text</script>" },
+  }));
+  expect(onOpenProfile).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Save notes for Alpha" })).not.toBeInTheDocument());
+  expect(notes).toHaveValue("Keep this\n<script>as text</script>");
+});
+
+it("exports cookies to the chosen file and reports skipped cookies", async () => {
+  dialogs.pickSaveTarget.mockResolvedValue("/tmp/cookies.json");
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]),
+    profile_cookies_export: () => envelope({ portabilityVersion: 1, profileId: ALPHA, operation: "export", format: "theprivator-json", exportedCount: 3, skippedCount: 1, warningCount: 0, warnings: [] }) });
   renderPage();
   fireEvent.contextMenu(await screen.findByText("Alpha"));
   fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
-  fireEvent.click(screen.getByRole("menuitem", { name: "Export (cookies.txt)…" }));
+  expect(screen.queryByRole("menuitem", { name: "Export (cookies.txt)…" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Export (JSON)…" }));
   expect(await screen.findByText("Exported 3 cookies. 1 skipped.")).toBeInTheDocument();
-  expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_export", { profileId: ALPHA, destinationPath: "/tmp/cookies.txt", format: "netscape" });
+  expect(mockInvoke).toHaveBeenCalledWith("profile_cookies_export", { profileId: ALPHA, destinationPath: "/tmp/cookies.json", format: "theprivator-json" });
 });
 it("disables cookie portability for running profiles", async () => {
   respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([ALPHA]) });
   renderPage();
   fireEvent.contextMenu(await screen.findByText("Alpha"));
   fireEvent.click(screen.getByRole("menuitem", { name: "Cookies" }));
-  for (const name of ["Export (JSON)…", "Export (cookies.txt)…", "Import…"]) {
+  for (const name of ["Export (JSON)…", "Import…"]) {
     expect(screen.getByRole("menuitem", { name })).toBeDisabled();
     expect(screen.getByRole("menuitem", { name })).toHaveAttribute("title", "Stop the profile first");
   }

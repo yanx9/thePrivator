@@ -34,6 +34,16 @@ def import_json(tmp_path, payload):
     return cookies._read_import_payload(source)
 
 
+@pytest.mark.parametrize("format_name", ["netscape", "cookies-txt", "cookies.txt", "txt"])
+def test_legacy_text_export_is_rejected_before_writing(tmp_path, format_name):
+    destination = tmp_path / "output.txt"
+    destination.write_text("keep existing file")
+    with pytest.raises(SidecarError) as error:
+        cookies.export_cookies(tmp_path / "store", "unused", destination, format_name)
+    assert error.value.code == "PORTABILITY_UNSUPPORTED_FORMAT"
+    assert destination.read_text() == "keep existing file"
+
+
 @pytest.mark.parametrize("same_site", ["Lax", "Strict", "Unspecified", "None"])
 @pytest.mark.parametrize("session", [True, False])
 def test_public_json_export_uses_browser_array_contract(tmp_path, same_site, session):

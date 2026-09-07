@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  getCookieBotStatus,
   applyProfileIdentityPreset,
   configureSync,
   forceReleaseSyncLock,
@@ -74,7 +75,7 @@ function cookieExportResult(overrides: Record<string, unknown> = {}) {
     portabilityVersion: 1,
     profileId: COOKIE_PROFILE_ID,
     operation: "export",
-    format: "netscape",
+    format: "theprivator-json",
     exportedCount: 3,
     skippedCount: 1,
     warningCount: 1,
@@ -645,6 +646,27 @@ function proxyCheckEnvelope(result: unknown, overrides: Record<string, unknown> 
     ...overrides,
   };
 }
+
+describe("cookie bot UTC timestamps", () => {
+  function envelope(createdAt: string) {
+    return proxyCheckEnvelope({ job: {
+      jobId: "job", profileId: COOKIE_PROFILE_ID, status: "completed",
+      config: { urls: ["https://example.test/"], maxPages: 10, maxDepth: 1, dwellSeconds: 5, maxDurationSeconds: 120, closeAfterCompletion: false },
+      createdAt, finishedAt: createdAt, currentUrl: null,
+      visitedPages: 1, failedPages: 0, errors: [], stopReason: "queue-exhausted",
+    } });
+  }
+  it.each(["2026-09-07T12:34:56.123Z", "2026-09-07T12:34:56.123456+00:00", "2026-09-07T12:34:56+00:00"])("accepts canonical and legacy UTC timestamps %s", async (timestamp) => {
+    mockInvoke.mockResolvedValue(envelope(timestamp));
+    const result = await getCookieBotStatus(COOKIE_PROFILE_ID);
+    expect(result.job?.createdAt).toBe(timestamp.replace(/\+00:00$/, "Z"));
+    expect(result.job?.finishedAt).toBe(timestamp.replace(/\+00:00$/, "Z"));
+  });
+  it.each(["2026-09-07T12:34:56+02:00", "2026-09-07", "September 7, 2026 Z", "2026-02-30T12:34:56Z", "2026-09-07T24:00:00Z"])("rejects malformed or non-UTC timestamps %s", async (timestamp) => {
+    mockInvoke.mockResolvedValue(envelope(timestamp));
+    await expect(getCookieBotStatus(COOKIE_PROFILE_ID)).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+  });
+});
 
 describe("proxy exit country code compatibility", () => {
   it.each([{}, { countryCode: null }, { countryCode: "DE" }])("accepts old and current location fields: %j", async (extra) => {
@@ -1598,6 +1620,13 @@ describe("sidecar client", () => {
     });
   });
 
+  it("rejects legacy Netscape exports before invoking while preserving imports", async () => {
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.txt", "netscape")).rejects.toMatchObject({ code: SIDECAR_PROTOCOL_ERROR });
+    expect(mockInvoke).not.toHaveBeenCalled();
+    mockInvoke.mockResolvedValueOnce(cookieEnvelope(cookieReplaceResult({ format: "netscape" })));
+    await expect(replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.txt")).resolves.toMatchObject({ format: "netscape" });
+  });
+
   it("exports and replaces profile cookies through fixed commands with safe DTO snapshots", async () => {
     const exportDestination = "/selected/private/export.cookies";
     const replaceSource = "/selected/private/import.cookies.json";
@@ -1605,13 +1634,13 @@ describe("sidecar client", () => {
       .mockResolvedValueOnce(cookieEnvelope(cookieExportResult()))
       .mockResolvedValueOnce(cookieEnvelope(cookieReplaceResult({ warningCount: 0, warnings: [], skippedCount: 0 })));
 
-    const exported = await exportProfileCookies(COOKIE_PROFILE_ID, exportDestination, "netscape");
+    const exported = await exportProfileCookies(COOKIE_PROFILE_ID, exportDestination, "theprivator-json");
     const replaced = await replaceProfileCookies(COOKIE_PROFILE_ID, replaceSource);
 
     expect(mockInvoke).toHaveBeenNthCalledWith(1, "profile_cookies_export", {
       profileId: COOKIE_PROFILE_ID,
       destinationPath: exportDestination,
-      format: "netscape",
+      format: "theprivator-json",
     });
     expect(mockInvoke).toHaveBeenNthCalledWith(2, "profile_cookies_replace", {
       profileId: COOKIE_PROFILE_ID,
@@ -1625,7 +1654,7 @@ describe("sidecar client", () => {
       portabilityVersion: 1,
       profileId: COOKIE_PROFILE_ID,
       operation: "export",
-      format: "netscape",
+      format: "theprivator-json",
       exportedCount: 3,
       skippedCount: 1,
       warningCount: 1,
@@ -1650,7 +1679,7 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["zero-cookie export", () => cookieEnvelope(cookieExportResult({ exportedCount: 0, skippedCount: 0, warningCount: 0, warnings: [] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/empty.cookies", "netscape")],
+    ["zero-cookie export", () => cookieEnvelope(cookieExportResult({ exportedCount: 0, skippedCount: 0, warningCount: 0, warnings: [] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/empty.cookies", "theprivator-json")],
     ["zero-cookie replace", () => cookieEnvelope(cookieReplaceResult({ importedCount: 0, replacedCount: 0, skippedCount: 0, warningCount: 0, warnings: [] })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/empty.cookies.json")],
     ["bounded warning count", () => cookieEnvelope(cookieReplaceResult({ warningCount: 1, warnings: [cookieWarning({ code: "IMPORT_DUPLICATE_REPLACED", count: 4 })], skippedCount: 4 })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/duplicates.cookies.json")],
   ] as Array<[string, () => unknown, () => Promise<unknown>]>)("accepts cookie portability boundary conditions: %s", async (_caseName, envelopeFactory, callClient) => {
@@ -1663,9 +1692,9 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["blank export profile id", () => exportProfileCookies(" ", "/tmp/export.cookies", "netscape")],
-    ["path-like export profile id", () => exportProfileCookies("profile/../secret", "/tmp/export.cookies", "netscape")],
-    ["blank export destination", () => exportProfileCookies(COOKIE_PROFILE_ID, " ", "netscape")],
+    ["blank export profile id", () => exportProfileCookies(" ", "/tmp/export.cookies", "theprivator-json")],
+    ["path-like export profile id", () => exportProfileCookies("profile/../secret", "/tmp/export.cookies", "theprivator-json")],
+    ["blank export destination", () => exportProfileCookies(COOKIE_PROFILE_ID, " ", "theprivator-json")],
     ["unsupported export format", () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "json" as CookieExportFormat)],
     ["blank replace profile id", () => replaceProfileCookies("", "/tmp/import.cookies")],
     ["blank replace source", () => replaceProfileCookies(COOKIE_PROFILE_ID, "")],
@@ -1681,18 +1710,18 @@ describe("sidecar client", () => {
   });
 
   it.each([
-    ["wrong portability version", () => cookieEnvelope(cookieExportResult({ portabilityVersion: 2 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["missing exported count", () => cookieEnvelope(cookieExportResult({ exportedCount: undefined })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["negative skipped count", () => cookieEnvelope(cookieExportResult({ skippedCount: -1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["non-integer warning count", () => cookieEnvelope(cookieExportResult({ warningCount: 1.5 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["unsafe integer count", () => cookieEnvelope(cookieExportResult({ exportedCount: Number.MAX_SAFE_INTEGER + 1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["mismatched profile id", () => cookieEnvelope(cookieExportResult({ profileId: PROXY_CHECK_PROFILE_ID })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["wrong export operation", () => cookieEnvelope(cookieExportResult({ operation: "replace" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["wrong export format", () => cookieEnvelope(cookieExportResult({ format: "theprivator-json" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["warning count mismatch", () => cookieEnvelope(cookieExportResult({ warningCount: 0 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["too many warnings", () => cookieEnvelope(cookieExportResult({ warningCount: 21, warnings: tooManyCookieWarnings() })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["duplicate warning codes", () => cookieEnvelope(cookieExportResult({ warningCount: 2, warnings: [cookieWarning(), cookieWarning()] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
-    ["zero warning item count", () => cookieEnvelope(cookieExportResult({ warnings: [cookieWarning({ count: 0 })] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")],
+    ["wrong portability version", () => cookieEnvelope(cookieExportResult({ portabilityVersion: 2 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["missing exported count", () => cookieEnvelope(cookieExportResult({ exportedCount: undefined })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["negative skipped count", () => cookieEnvelope(cookieExportResult({ skippedCount: -1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["non-integer warning count", () => cookieEnvelope(cookieExportResult({ warningCount: 1.5 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["unsafe integer count", () => cookieEnvelope(cookieExportResult({ exportedCount: Number.MAX_SAFE_INTEGER + 1 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["mismatched profile id", () => cookieEnvelope(cookieExportResult({ profileId: PROXY_CHECK_PROFILE_ID })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["wrong export operation", () => cookieEnvelope(cookieExportResult({ operation: "replace" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["wrong export format", () => cookieEnvelope(cookieExportResult({ format: "netscape" })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["warning count mismatch", () => cookieEnvelope(cookieExportResult({ warningCount: 0 })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["too many warnings", () => cookieEnvelope(cookieExportResult({ warningCount: 21, warnings: tooManyCookieWarnings() })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["duplicate warning codes", () => cookieEnvelope(cookieExportResult({ warningCount: 2, warnings: [cookieWarning(), cookieWarning()] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
+    ["zero warning item count", () => cookieEnvelope(cookieExportResult({ warnings: [cookieWarning({ count: 0 })] })), () => exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")],
     ["wrong replace operation", () => cookieEnvelope(cookieReplaceResult({ operation: "export" })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
     ["unsupported replace format", () => cookieEnvelope(cookieReplaceResult({ format: "json" })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
     ["replaced count exceeds imported count", () => cookieEnvelope(cookieReplaceResult({ importedCount: 1, replacedCount: 2 })), () => replaceProfileCookies(COOKIE_PROFILE_ID, "/tmp/import.cookies")],
@@ -1720,7 +1749,7 @@ describe("sidecar client", () => {
   ])("rejects unsafe cookie portability result field before UI state sees it: %s", async (_caseName, extraFields) => {
     mockInvoke.mockResolvedValueOnce(cookieEnvelope(cookieExportResult(extraFields)));
 
-    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")).rejects.toMatchObject({
       code: SIDECAR_PROTOCOL_ERROR,
       source: "protocol",
       phase: "bridge-error",
@@ -1734,7 +1763,7 @@ describe("sidecar client", () => {
   ])("rejects unsafe cookie portability warnings: %s", async (_caseName, warnings) => {
     mockInvoke.mockResolvedValueOnce(cookieEnvelope(cookieExportResult({ warnings, warningCount: warnings.length })));
 
-    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")).rejects.toMatchObject({
       code: SIDECAR_PROTOCOL_ERROR,
       source: "protocol",
       phase: "bridge-error",
@@ -1768,7 +1797,7 @@ describe("sidecar client", () => {
         detailRef: "bridge-cookie-protocol-detail",
       });
 
-    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "netscape")).rejects.toMatchObject({
+    await expect(exportProfileCookies(COOKIE_PROFILE_ID, "/tmp/export.cookies", "theprivator-json")).rejects.toMatchObject({
       code: "PORTABILITY_PROFILE_BUSY",
       message: "Stop this profile before importing or exporting cookies.",
       recoverable: true,
@@ -3223,6 +3252,22 @@ describe("trash commands", () => {
 });
 
 describe("section update commands", () => {
+  it("round-trips multiline notes without changing whitespace", async () => {
+    const organization = { folderId: null, tags: ["eu"], notes: "First line\n\tSecond line\r\nLast line\t", favorite: false, color: null };
+    const profile = profileRecord({ organization });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile] })));
+    const result = await updateProfileOrganization(profile.id, organization);
+    expect(result.profile?.organization).toEqual(organization);
+    expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", { profileId: profile.id, organization });
+  });
+  it("accepts legacy UTC timestamps returned by favorite and tag mutations", async () => {
+    const organization = { folderId: null, tags: ["eu"], notes: "", favorite: true, color: null };
+    const profile = profileRecord({ organization: profileOrganization(organization), createdAt: "2026-09-07T12:34:56.123456+00:00", updatedAt: "2026-09-07T12:35:56+00:00" });
+    mockInvoke.mockResolvedValueOnce(profileEnvelope(profileResult({ profile, profiles: [profile] })));
+    const result = await updateProfileOrganization(profile.id, organization);
+    expect(result.profile?.createdAt).toBe("2026-09-07T12:34:56.123456Z");
+    expect(result.profile?.updatedAt).toBe("2026-09-07T12:35:56Z");
+  });
   it("sends the whole organization section rather than a patch", async () => {
     const organization = { folderId: null, tags: ["eu"], notes: "note", favorite: true, color: null };
     const profile = profileRecord({ organization: profileOrganization(organization) });

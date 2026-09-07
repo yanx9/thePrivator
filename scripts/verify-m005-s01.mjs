@@ -817,6 +817,7 @@ export function buildM005FinalSummary({ status, checks, sidecar }) {
       emptyExported: Boolean(sidecar?.emptyExported),
       exportedJson: Boolean(sidecar?.exportedJson),
       exportedNetscape: Boolean(sidecar?.exportedNetscape),
+      legacyExportRejected: Boolean(sidecar?.legacyExportRejected),
       replaced: Boolean(sidecar?.replaced),
       invalidImportPreservedRows: Boolean(sidecar?.invalidImportPreservedRows),
       oversizedImportPreservedRows: Boolean(sidecar?.oversizedImportPreservedRows),
@@ -985,23 +986,18 @@ export function runSidecarOnlySmoke({ rootDir = ROOT_DIR, python = PYTHON, keepT
       return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
     }, context.redactionContext);
 
-    const netscapeExport = runStep("sidecar.export-netscape", () => {
-      const result = remember(
-        runSourceSidecarRequest({
-          id: "m005-export-netscape",
-          method: PORTABILITY_EXPORT,
-          params: { storeRoot, profileId, destinationPath: exportTxtPath, format: FORMAT_NETSCAPE },
-        }, { context: context.redactionContext }),
-        { requestId: "m005-export-netscape", method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null },
-      );
-      const payload = assertPortabilitySuccess(result.response, { requestId: "m005-export-netscape", operation: "export", format: FORMAT_NETSCAPE });
-      assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "ok", errorCode: null, detailRef: null });
-      const text = readFileSync(exportTxtPath, "utf8");
-      assert(text.includes("#HttpOnly_"), "Netscape export did not preserve HttpOnly marker.", { phase: "export" });
-      assert(text.includes("\t0\t"), "Netscape export did not represent session cookies with expiry 0.", { phase: "export" });
-      sidecar.exportedNetscape = true;
-      sidecar.counts.netscapeExported = payload.exportedCount;
-      return { exportedCount: payload.exportedCount, warningCount: payload.warningCount };
+    runStep("sidecar.legacy-export-rejected", () => {
+      const result = runSourceSidecarRequest({
+        id: "m005-export-netscape",
+        method: PORTABILITY_EXPORT,
+        params: { storeRoot, profileId, destinationPath: exportTxtPath, format: FORMAT_NETSCAPE },
+      }, { context: context.redactionContext });
+      const error = assertPortabilityError(result.response, { requestId: "m005-export-netscape", code: "PORTABILITY_UNSUPPORTED_FORMAT" });
+      assertDiagnosticEvent(result.diagnostic, { method: PORTABILITY_EXPORT, status: "error", errorCode: "PORTABILITY_UNSUPPORTED_FORMAT", detailRef: error.detailRef });
+      remember(result, { requestId: "m005-export-netscape", method: PORTABILITY_EXPORT, status: "error", errorCode: "PORTABILITY_UNSUPPORTED_FORMAT", detailRef: error.detailRef });
+      assert(!existsSync(exportTxtPath), "Removed text export unexpectedly wrote a file.", { phase: "export" });
+      sidecar.legacyExportRejected = true;
+      return { errorCode: error.errorCode };
     }, context.redactionContext);
 
     runStep("sidecar.replace-json", () => {

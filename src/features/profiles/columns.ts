@@ -49,7 +49,7 @@ export const COLUMNS: readonly ColumnDescriptor[] = [
   { key: "tags", label: "Tags", defaultWidth: 180, minWidth: 80, sortable: false },
   { key: "proxy", label: "Proxy", defaultWidth: 200, minWidth: 100, sortable: true },
   { key: "fingerprint", label: "Fingerprint", defaultWidth: 140, minWidth: 90, sortable: true },
-  { key: "notes", label: "Notes", defaultWidth: 220, minWidth: 100, sortable: false, hiddenByDefault: true },
+  { key: "notes", label: "Notes", defaultWidth: 220, minWidth: 100, sortable: false },
   { key: "lastLaunchedAt", label: "Last launched", defaultWidth: 150, minWidth: 110, sortable: true },
   {
     key: "launchCount",

@@ -16,7 +16,7 @@ import { IdentityPresetPicker } from "./IdentityPresetPicker";
 interface FingerprintFormProps {
   draft: IdentityDraftState;
   warnings: readonly IdentityWarning[];
-  /** Curated starting points, loaded lazily by the editor. */
+  /** Internal OS-matched templates for fresh API choices; never listed directly. */
   presets?: readonly ProfileIdentity[];
   onChange: (draft: IdentityDraftState) => void;
   onApplyPreset?: (presetId: string) => void;
@@ -35,7 +35,6 @@ export function FingerprintForm({
   warnings,
   presets,
   onChange,
-  onApplyPreset,
 }: FingerprintFormProps) {
   const controls = getIdentitySurfaceControls(draft.identity);
   const labelId = useId();
@@ -52,9 +51,7 @@ export function FingerprintForm({
 
   return (
     <div className={styles.form}>
-      {presets !== undefined && presets.length > 0 && onApplyPreset !== undefined ? (
-        <IdentityPresetPicker draft={draft} presets={presets} onChange={onChange} onApplyPreset={onApplyPreset} />
-      ) : null}
+      <IdentityPresetPicker draft={draft} presets={presets ?? []} onChange={onChange} />
 
       <div className={styles.labelRow}>
         <label htmlFor={labelId}>Identity label</label>
@@ -202,7 +199,7 @@ function UserAgentField({ field, draft, onChange }: Pick<FingerprintFormProps, "
     error={draft.errors["browser.userAgent"]}
     onChange={(value) => onChange(updateIdentityDraftField(draft, "browser.userAgent", value))}
     action={<button type="button" className={styles.refreshButton} disabled={busy} aria-describedby={hintId} onClick={() => void refresh()}>
-      <span aria-hidden="true">↻</span> Odśwież
+      <span aria-hidden="true">↻</span> Refresh
     </button>}
     footer={<>
       <p className={styles.hint} id={hintId}>randomapi.dev: direct app connection, not the profile proxy. Sends the OS filter ({os}), no profile cookies or configuration; the provider sees your connection IP. Chrome desktop only; explicit navigator.platform takes priority over the existing UA; unknown OS defaults to Linux.</p>

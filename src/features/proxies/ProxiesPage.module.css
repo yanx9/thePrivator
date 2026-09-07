@@ -1,0 +1,19 @@
+@layer components {
+  .page { padding: var(--space-6); overflow: auto; display: flex; flex-direction: column; gap: var(--space-4); min-height: 0; }
+  .page h1 { font-size: var(--text-xl); }
+  .page h2 { font-size: var(--text-lg); }
+  .page p { color: var(--color-text-muted); line-height: 1.6; max-width: 80ch; }
+  .page [role="alert"] { color: var(--color-danger); }
+  .page [role="status"] { color: var(--color-info); }
+  .page button { padding: 8px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); cursor: pointer; }
+  .page button:hover:not(:disabled) { background: var(--color-bg-hover); }
+  .page button:disabled { opacity: .5; cursor: not-allowed; }
+  .page button[aria-pressed="true"] { background: var(--color-bg-selected); color: var(--color-accent); }
+  .page ul { display: grid; gap: var(--space-2); max-height: 260px; overflow: auto; }
+  .page li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+  .page li span { flex: 1; overflow-wrap: anywhere; font-family: var(--font-mono); }
+  .editor { padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-bg-surface); display: grid; gap: var(--space-3); max-width: 900px; }
+  .editor > button { justify-self: start; }
+  .editor fieldset { border: 0; padding: 0; min-width: 0; }
+  .editor fieldset > button { margin: var(--space-3) var(--space-2) 0 0; }
+}

@@ -19,6 +19,10 @@ function find(items: MenuItem[], action: string): MenuItem | undefined {
 }
 
 describe("buildRowMenu, single row", () => {
+  it("offers JSON cookie export only and keeps cookie import", () => {
+    const cookies = find(buildRowMenu(context()), "cookies");
+    expect(cookies?.children?.map((item) => item.action)).toEqual(["cookies-export-json", "cookies-import"]);
+  });
   it("offers launch on a stopped profile and stop on a running one, never both", () => {
     const stopped = buildRowMenu(context());
     expect(find(stopped, "launch")).toBeDefined();

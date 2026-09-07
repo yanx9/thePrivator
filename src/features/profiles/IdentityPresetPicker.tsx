@@ -8,10 +8,27 @@ interface Props {
   draft: IdentityDraftState;
   presets: readonly ProfileIdentity[];
   onChange: (draft: IdentityDraftState) => void;
-  onApplyPreset: (id: string) => void;
 }
 
-export function IdentityPresetPicker({ draft, presets, onChange, onApplyPreset }: Props) {
+// A complete replacement, not a merge: no old mask values or policies survive.
+const REAL_PRESET: ProfileIdentity = {
+  identityVersion: 2,
+  label: "Real",
+  presetId: null,
+  browser: { mode: "real" },
+  navigator: { mode: "real" },
+  screen: { mode: "real" },
+  locale: { mode: "real" },
+  canvas: { mode: "real" },
+  audio: { mode: "real" },
+  webgl: { mode: "real" },
+  webrtc: { mode: "real", policy: "real" },
+  geolocation: { mode: "real", permission: "prompt" },
+  mediaDevices: { mode: "real" },
+  ports: { mode: "real" },
+};
+
+export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
   const id = useId();
   const request = useRef<AbortController | null>(null);
   const [generated, setGenerated] = useState<ProfileIdentity[]>([]);
@@ -49,30 +66,32 @@ export function IdentityPresetPicker({ draft, presets, onChange, onApplyPreset }
   }
 
   const selected = generated.findIndex((preset) => JSON.stringify(preset) === JSON.stringify(draft.identity));
+  const isRealPreset = JSON.stringify(draft.identity) === JSON.stringify(REAL_PRESET);
   return <div className={styles.labelRow}>
     <label htmlFor={id}>Start from a preset</label>
     <div className={styles.inputAction}>
-      <select id={id} value={selected >= 0 ? `api:${selected}` : draft.identity.presetId ?? ""}
+      <select id={id} value={isRealPreset ? "real" : selected >= 0 ? `api:${selected}` : ""}
         onChange={(event) => {
           const value = event.target.value;
-          if (value.startsWith("api:")) {
+          if (value === "real") {
+            onChange(createIdentityDraftState(structuredClone(REAL_PRESET)));
+          } else if (value.startsWith("api:")) {
             const preset = generated[Number(value.slice(4))];
             if (preset) onChange(createIdentityDraftState(preset));
-          } else if (value) onApplyPreset(value);
+          }
         }}>
         <option value="">Custom</option>
+        <option value="real">Real</option>
         {generated.length > 0 ? <optgroup label="Generated from API">
           {generated.map((preset, index) => <option key={index} value={`api:${index}`}>{preset.label}</option>)}
         </optgroup> : null}
-        <optgroup label="Built-in templates (offline)">
-          {presets.map((preset) => <option key={preset.presetId ?? preset.label} value={preset.presetId ?? ""}>{preset.label}</option>)}
-        </optgroup>
       </select>
-      <button type="button" className={styles.refreshButton} disabled={busy} aria-label="Odśwież presety" aria-describedby={`${id}-hint`} onClick={() => void refresh()}>
-        <span aria-hidden="true">↻</span> {busy ? "Odświeżanie…" : "Odśwież"}
+      <button type="button" className={styles.refreshButton} disabled={busy} aria-label="Refresh presets" aria-describedby={`${id}-hint`} onClick={() => void refresh()}>
+        <span aria-hidden="true">↻</span> {busy ? "Refreshing…" : "Refresh"}
       </button>
     </div>
     <p className={styles.hint}>A preset sets every surface at once. Editing any field afterwards makes the identity custom.</p>
+    <p className={styles.hint}>Real disables masking on every surface, restores real WebRTC and asks for geolocation permission. Changes stay in the draft until Save.</p>
     <p className={styles.hint} id={`${id}-hint`}>randomapi.dev: direct connection, not the profile proxy. Sends only OS/browser filters, no profile configuration or cookies; the provider sees your IP. Refresh does not change your draft.</p>
     <p className={styles.hint}>API supplies random Chrome desktop user agents, not necessarily the latest Chrome. Other settings come from OS-matched local templates. This does not update Chromium; review consistency warnings before saving.</p>
     {message ? <p className={failed ? styles.error : styles.hint} role={failed ? "alert" : "status"}>{message}</p> : null}
