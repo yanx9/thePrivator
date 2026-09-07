@@ -557,3 +557,165 @@ def test_import_partial_outcome_on_unsafe_user_data_symlink_keeps_profile_and_le
     assert snapshot_tree(destination) == []
     assert snapshot_tree(legacy_root) == before_legacy
     assert_scan_output_redacted(result, legacy_root, app_root, outside_secret)
+
+
+def write_v2_registry(root: Path, records: list[dict]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "profiles.json").write_text(
+        json.dumps({"version": "2.0", "profiles": records}), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("select_app_root", [False, True])
+def test_v2_import_uses_registry_names_and_flat_data_without_loading_legacy_settings(tmp_path, select_app_root):
+    legacy_app = tmp_path / "legacy"
+    profiles = legacy_app / "profiles"
+    profile_id = "2e4c48ce-b23e-462f-a310-042e0d8e8e70"
+    source = profiles / profile_id
+    (source / "Default").mkdir(parents=True)
+    (source / "Local State").write_text('{"os_crypt":{}}', encoding="utf-8")
+    (source / "Default" / "Preferences").write_text('{"session":"preserved"}', encoding="utf-8")
+    (source / "Default" / "Cookies").write_bytes(b"cookie database fixture")
+    write_v2_registry(legacy_app, [{
+        "id": profile_id, "name": "Research 2.0",
+        "user_data_dir": str(tmp_path / "obsolete-machine-path"),
+        "proxy": "http://secret-user:secret-password@proxy.invalid:8080",
+        "user_agent": "old-agent", "is_active": True,
+    }])
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        (source / name).symlink_to(tmp_path / "missing-runtime-target")
+    (source / "DevToolsActivePort").write_text("9222", encoding="utf-8")
+    (legacy_app / "logs").mkdir()
+    app_root = tmp_path / "app"
+    before = snapshot_tree(legacy_app)
+    selected_root = legacy_app if select_app_root else profiles
+
+    scan = scan_legacy_profiles(selected_root, app_root)
+
+    assert scan["count"] == 1
+    assert scan["issues"] == []
+    candidate = scan["candidates"][0]
+    assert candidate["targetName"] == "Research 2.0"
+    assert candidate["legacyName"] == "Research 2.0"
+    assert candidate["metadata"]["formatVersion"] == "2.0"
+    assert candidate["userData"] == {"status": "available"}
+    assert candidate["issues"] == []
+    assert candidate["legacyId"] == scan_legacy_profiles(profiles, app_root)["candidates"][0]["legacyId"]
+    assert not app_root.exists()
+    assert_scan_output_redacted(scan, legacy_app, "secret-user", "secret-password", "old-agent")
+
+    result = import_legacy_profiles(selected_root, app_root, [{
+        "legacyId": candidate["legacyId"], "targetName": candidate["targetName"],
+    }])
+
+    assert result["successCount"] == 1
+    assert result["outcomes"][0]["copyStatus"] == "copied"
+    profile = ProfileStore(app_root).list()["profiles"][0]
+    assert profile["name"] == "Research 2.0"
+    assert profile["identity"] == DEFAULT_REAL_IDENTITY
+    destination = app_root / profile["storage"]["userDataDir"]
+    assert (destination / "Local State").read_bytes() == (source / "Local State").read_bytes()
+    assert (destination / "Default" / "Preferences").read_bytes() == (source / "Default" / "Preferences").read_bytes()
+    assert (destination / "Default" / "Cookies").read_bytes() == b"cookie database fixture"
+    assert {p.name for p in destination.iterdir()} == {"Default", "Local State"}
+    assert snapshot_tree(legacy_app) == before
+    assert_scan_output_redacted(result, legacy_app, "secret-user", "secret-password", "old-agent")
+    stored = (app_root / "profile-store" / "profiles.json").read_text(encoding="utf-8")
+    assert "secret-password" not in stored
+    assert "obsolete-machine-path" not in stored
+
+
+@pytest.mark.parametrize("marker", ["Default", "Local State"])
+def test_flat_browser_data_without_registry_imports_using_folder_name(tmp_path, marker):
+    root = tmp_path / "profiles"
+    source = root / "standalone"
+    source.mkdir(parents=True)
+    if marker == "Default":
+        (source / marker).mkdir()
+        (source / marker / "Preferences").write_text("{}", encoding="utf-8")
+    else:
+        (source / marker).write_text("{}", encoding="utf-8")
+    app_root = tmp_path / "app"
+    candidate = scan_legacy_profiles(root, app_root)["candidates"][0]
+    assert candidate["targetName"] == "standalone"
+    assert candidate["legacyName"] is None
+    assert candidate["issues"] == []
+    result = import_legacy_profiles(root, app_root, [{"legacyId": candidate["legacyId"], "targetName": "Standalone"}])
+    assert result["outcomes"][0]["copyStatus"] == "copied"
+    profile = ProfileStore(app_root).list()["profiles"][0]
+    assert snapshot_tree(app_root / profile["storage"]["userDataDir"]) == snapshot_tree(source)
+
+
+def test_v2_empty_profile_has_registry_name_and_no_browser_data(tmp_path):
+    root = tmp_path / "legacy"
+    (root / "profiles" / "empty-id").mkdir(parents=True)
+    write_v2_registry(root, [{"id": "empty-id", "name": "Never launched"}])
+    app_root = tmp_path / "app"
+    candidate = scan_legacy_profiles(root, app_root)["candidates"][0]
+    assert candidate["targetName"] == "Never launched"
+    assert candidate["issues"] == []
+    assert candidate["userData"] == {"status": "missing"}
+    result = import_legacy_profiles(root, app_root, [{"legacyId": candidate["legacyId"], "targetName": "Never launched"}])
+    assert result["successCount"] == 1
+    assert result["outcomes"][0]["copyStatus"] == "missing"
+
+
+@pytest.mark.parametrize("registry", [
+    "{broken", "[]", '{"version":"2.0","profiles":{}}',
+    '{"version":"2.0","profiles":[null]}',
+    '{"version":"2.0","profiles":[{"id":"one"},{"id":"one"}]}',
+])
+def test_malformed_v2_registry_reports_issue_but_browser_data_remains_importable(tmp_path, registry):
+    root = tmp_path / "legacy"
+    (root / "profiles" / "one" / "Default").mkdir(parents=True)
+    (root / "profiles.json").write_text(registry, encoding="utf-8")
+    app_root = tmp_path / "app"
+    scan = scan_legacy_profiles(root, app_root)
+    assert_issue_shape(scan["issues"][0], LEGACY_CONFIG_MALFORMED)
+    candidate = scan["candidates"][0]
+    assert candidate["targetName"] == "one"
+    assert candidate["userData"]["status"] == "available"
+    result = import_legacy_profiles(root, app_root, [{"legacyId": candidate["legacyId"], "targetName": "Recovered"}])
+    assert result["outcomes"][0]["copyStatus"] == "copied"
+
+
+def test_mixed_layouts_prefer_local_config_and_nested_user_data(tmp_path):
+    root = tmp_path / "legacy"
+    profiles = root / "profiles"
+    source = profiles / "older"
+    write_config(source, {"name": "Local name"})
+    (source / "user-data" / "Default").mkdir(parents=True)
+    (source / "user-data" / "Default" / "Preferences").write_text("nested", encoding="utf-8")
+    (source / "Local State").write_text("outer", encoding="utf-8")
+    (profiles / "newer" / "Default").mkdir(parents=True)
+    write_v2_registry(root, [{"id": "older", "name": "Registry name"}, {"id": "newer", "name": "Newer"}])
+    app_root = tmp_path / "app"
+    candidates = scan_legacy_profiles(profiles, app_root)["candidates"]
+    assert {c["targetName"] for c in candidates} == {"Local name", "Newer"}
+    result = import_legacy_profiles(profiles, app_root, [
+        {"legacyId": c["legacyId"], "targetName": c["targetName"]} for c in candidates
+    ])
+    assert result["successCount"] == 2
+    profile = next(p for p in ProfileStore(app_root).list()["profiles"] if p["name"] == "Local name")
+    destination = app_root / profile["storage"]["userDataDir"]
+    assert (destination / "Default" / "Preferences").read_text(encoding="utf-8") == "nested"
+    assert not (destination / "Local State").exists()
+
+
+@pytest.mark.parametrize("link_path", ["unsafe-link", "Default/SingletonSocket"])
+def test_flat_import_still_rejects_non_runtime_symlinks(tmp_path, link_path):
+    root = tmp_path / "profiles"
+    source = root / "one"
+    (source / "Default").mkdir(parents=True)
+    outside = tmp_path / "secret"
+    outside.write_text("secret", encoding="utf-8")
+    (source / link_path).symlink_to(outside)
+    before = snapshot_tree(root)
+    app_root = tmp_path / "app"
+    candidate = scan_legacy_profiles(root, app_root)["candidates"][0]
+    result = import_legacy_profiles(root, app_root, [{"legacyId": candidate["legacyId"], "targetName": "Unsafe"}])
+    assert result["partialCount"] == 1
+    assert result["outcomes"][0]["error"]["code"] == LEGACY_USER_DATA_COPY_FAILED
+    profile = ProfileStore(app_root).list()["profiles"][0]
+    assert snapshot_tree(app_root / profile["storage"]["userDataDir"]) == []
+    assert snapshot_tree(root) == before
