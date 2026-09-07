@@ -76,18 +76,46 @@ try {
   await page.getByText("QA profile copy", { exact: true }).waitFor();
   assert.equal(request("profiles.list").result.count, 2);
   await page.screenshot({ path: path.join(evidence, "profiles.png") });
-  await page.getByRole("link", { name: "Proxies", exact: true }).click();
-  await page.getByRole("button", { name: "Save proxy", exact: true }).click();
-  await page.getByText("Proxy saved.", { exact: true }).waitFor();
-  await page.screenshot({ path: path.join(evidence, "proxies.png") });
-  await page.getByRole("link", { name: "Templates", exact: true }).click();
-  await page.getByRole("textbox", { name: "New profile name" }).fill("QA template result");
-  await page.getByRole("button", { name: "Create from configuration" }).click();
-  await page.getByText("Configuration copied. Browser data and credentials were not copied.", { exact: true }).waitFor();
-  assert.equal(request("profiles.list").result.count, 3);
-  await page.screenshot({ path: path.join(evidence, "templates.png") });
+  assert.equal(await page.getByRole("link", { name: "Proxies", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("link", { name: "Templates", exact: true }).count(), 0);
   await page.goto(server.resolvedUrls.local[0] + `#/profiles/${seed.id}`);
   await page.getByRole("tab", { name: /fingerprint/i }).click();
+  await page.setViewportSize({ width: 1180, height: 790 });
+  const presetBox = await page.getByLabel("Start from a preset").boundingBox();
+  const refreshBox = await page.getByRole("button", { name: "Refresh presets", exact: true }).boundingBox();
+  assert.equal(presetBox.height, refreshBox.height, "Preset and Refresh must have matching heights");
+  assert.equal(presetBox.y, refreshBox.y, "Preset and Refresh must align vertically");
+  assert.equal(await page.getByText(/A preset sets every surface/).isVisible(), false);
+  await page.getByRole("button", { name: "Preset information" }).click();
+  assert.equal(await page.getByText(/A preset sets every surface/).isVisible(), true);
+  await page.getByRole("button", { name: "Preset information" }).click();
+  await page.screenshot({ path: path.join(evidence, "fingerprint-controls.png") });
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
+    const heights = await page.locator('#workspace select').evaluateAll((selects) => selects.map((select) => select.getBoundingClientRect().height));
+    assert.ok(heights.every((height) => height === 36), "All fingerprint dropdowns share the control height");
+    await page.screenshot({ path: path.join(evidence, `fingerprint-controls-${theme}.png`), animations: "disabled" });
+  }
+  const layout = await page.evaluate(() => {
+    const root = document.scrollingElement;
+    const workspace = document.getElementById("workspace");
+    return { windowHeight: innerHeight, documentHeight: root.scrollHeight,
+      workspaceHeight: workspace.clientHeight, workspaceScrollHeight: workspace.scrollHeight };
+  });
+  console.log("Fingerprint layout:", JSON.stringify(layout));
+  assert.ok(layout.documentHeight <= layout.windowHeight, "Fingerprint must not create a full-window scrollbar");
+  assert.ok(layout.workspaceScrollHeight <= layout.workspaceHeight, "Only the fingerprint panel should scroll");
+  const footerBefore = await page.getByRole("contentinfo").boundingBox();
+  await page.locator('[aria-labelledby="surface-ports"] select').scrollIntoViewIfNeeded();
+  assert.equal(await page.evaluate(() => window.scrollY), 0, "Reaching the last surface must not scroll the window");
+  assert.deepEqual(await page.getByRole("contentinfo").boundingBox(), footerBefore, "Status bar must stay fixed");
+  assert.ok(await page.locator('[aria-labelledby="surface-ports"]').evaluate((el) => {
+    for (let parent = el.parentElement; parent && parent.id !== "workspace"; parent = parent.parentElement) {
+      if (parent.scrollTop > 0) return true;
+    }
+    return false;
+  }), "The fingerprint panel must still scroll to its final surface");
+  await page.screenshot({ path: path.join(evidence, "fingerprint-scroll.png") });
   await page.getByLabel("Start from a preset").selectOption("real");
   assert.deepEqual(await page.getByLabel("Start from a preset").locator("option").allTextContents(), ["Custom", "Real"]);
   await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -96,7 +124,7 @@ try {
   assert.equal(stored.identity.label, "Real");
   for (const surface of ["browser", "navigator", "screen", "locale", "canvas", "audio", "webgl", "webrtc", "geolocation", "mediaDevices", "ports"]) assert.equal(stored.identity[surface].mode, "real");
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: ["favorites", "tags", "named folders", "multiline notes", "duplicate", "proxy save", "template creation", "real preset persistence"], browserErrors: errors, screenshots: evidence }, null, 2));
+  console.log(JSON.stringify({ passed: ["favorites", "tags", "named folders", "multiline notes", "duplicate", "removed redundant navigation", "aligned preset controls", "collapsible information", "real preset persistence"], browserErrors: errors, screenshots: evidence }, null, 2));
 } finally {
   await browser?.close();
   await server.close();

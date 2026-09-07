@@ -38,6 +38,18 @@ function realIdentity(): ProfileIdentity {
  * would be applied to the original draft and the test would quietly check a
  * one-edit-deep version of the component.
  */
+it("keeps preset explanations collapsed until Info is requested", () => {
+  renderForm();
+  const info = screen.getByRole("button", { name: "Preset information" });
+  expect(info).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByText(/A preset sets every surface/)).not.toBeVisible();
+  fireEvent.click(info);
+  expect(info).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText(/A preset sets every surface/)).toBeVisible();
+  fireEvent.click(info);
+  expect(screen.getByText(/A preset sets every surface/)).not.toBeVisible();
+});
+
 function renderForm(identity: ProfileIdentity = realIdentity()) {
   const onChange = vi.fn();
   let draft = createIdentityDraftState(identity);

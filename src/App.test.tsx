@@ -74,10 +74,10 @@ describe("App", () => {
   it("follows the hash to another destination without a reload", () => {
     render(<App />);
 
-    navigate("#/proxies");
+    navigate("#/settings/diagnostics");
 
     expect(screen.queryByTestId("profiles-table")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Proxies" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Diagnostics" })).toBeInTheDocument();
   });
 
   it("keeps the folder rail on a profile detail route and drops it elsewhere", () => {
@@ -111,7 +111,7 @@ describe("App", () => {
     render(<App />);
 
     const nav = screen.getByRole("navigation", { name: /primary navigation/i });
-    for (const name of ["Profiles", "Proxies", "Templates", "Automation"]) {
+    for (const name of ["Profiles", "Automation"]) {
       expect(nav).toContainElement(screen.getByRole("link", { name }));
     }
     // Settings is a gear beside the search box, not a fifth nav slot.
@@ -130,13 +130,15 @@ describe("App", () => {
 
 describe("App sidebar counts", () => {
   beforeEach(() => { window.location.hash = "#/profiles"; });
-  it("renders usable proxy and template destinations instead of placeholders", async () => {
+  it("removes standalone proxy and template navigation and falls back for old links", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("link", { name: "Proxies" }));
-    expect(await screen.findByRole("button", { name: "Save proxy" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("link", { name: "Templates" }));
-    expect(await screen.findByRole("combobox", { name: "Source profile" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create from configuration" })).toBeInTheDocument();
+    await screen.findByLabelText("Profiles: 2");
+    expect(screen.queryByRole("link", { name: "Proxies" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Templates" })).not.toBeInTheDocument();
+    for (const hash of ["#/proxies", "#/templates"]) {
+      navigate(hash);
+      expect(screen.getByTestId("profiles-table")).toBeInTheDocument();
+    }
   });
   function identity() {
     return {

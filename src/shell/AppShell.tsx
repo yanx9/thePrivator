@@ -74,10 +74,7 @@ function mainLabelForRoute(route: Route): string {
       return "Profile settings";
     case "profile-new":
       return "New profile";
-    case "proxies":
-      return "Proxies";
-    case "templates":
-      return "Templates";
+
     case "automation":
       return "Automation";
     case "settings":

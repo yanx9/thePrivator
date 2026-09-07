@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 
-import { ProxiesPage } from "./features/proxies/ProxiesPage";
-import { TemplatesPage } from "./features/templates/TemplatesPage";
+
 import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
@@ -24,16 +23,9 @@ import type { ProfileData } from "./features/profiles/useProfileData";
  * other destinations say what they will hold instead of quietly rendering the
  * profiles page, which would read as a broken nav rather than an unbuilt one.
  */
-function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>, context: DestinationContext) {
+function destinationFor(routeName: ReturnType<typeof primaryNavKeyForRoute>) {
   switch (routeName) {
-    case "proxies":
-      return (
-        <ProxiesPage data={context.data} onOpenProfile={context.onOpenProfile} search={context.search} />
-      );
-    case "templates":
-      return (
-        <TemplatesPage data={context.data} onOpenProfile={context.onOpenProfile} search={context.search} />
-      );
+
     case "automation":
       return <AutomationPage />;
     default:
@@ -78,7 +70,7 @@ function renderDestination(route: Route, context: DestinationContext) {
       />
     );
   }
-  return destinationFor(context.destination, context);
+  return destinationFor(context.destination);
 }
 
 export function App() {

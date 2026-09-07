@@ -35,6 +35,7 @@ export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [failed, setFailed] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
   useLayoutEffect(() => () => {
     request.current?.abort();
     request.current = null;
@@ -89,11 +90,15 @@ export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
       <button type="button" className={styles.refreshButton} disabled={busy} aria-label="Refresh presets" aria-describedby={`${id}-hint`} onClick={() => void refresh()}>
         <span aria-hidden="true">↻</span> {busy ? "Refreshing…" : "Refresh"}
       </button>
+      <button type="button" className={styles.infoButton} aria-label="Preset information" aria-expanded={showInfo}
+        aria-controls={`${id}-info`} title="Preset information" onClick={() => setShowInfo(!showInfo)}>ⓘ</button>
     </div>
+    <div id={`${id}-info`} className={styles.presetInfo} hidden={!showInfo}>
     <p className={styles.hint}>A preset sets every surface at once. Editing any field afterwards makes the identity custom.</p>
     <p className={styles.hint}>Real disables masking on every surface, restores real WebRTC and asks for geolocation permission. Changes stay in the draft until Save.</p>
     <p className={styles.hint} id={`${id}-hint`}>randomapi.dev: direct connection, not the profile proxy. Sends only OS/browser filters, no profile configuration or cookies; the provider sees your IP. Refresh does not change your draft.</p>
     <p className={styles.hint}>API supplies random Chrome desktop user agents, not necessarily the latest Chrome. Other settings come from OS-matched local templates. This does not update Chromium; review consistency warnings before saving.</p>
+    </div>
     {message ? <p className={failed ? styles.error : styles.hint} role={failed ? "alert" : "status"}>{message}</p> : null}
   </div>;
 }

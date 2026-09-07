@@ -74,10 +74,10 @@ describe("AppShell", () => {
   });
 
   it("marks the destination matching the route as current", () => {
-    renderShell({ route: { name: "proxies" } });
+    renderShell({ route: { name: "automation" } });
 
     const nav = screen.getByRole("navigation", { name: /primary navigation/i });
-    expect(within(nav).getByRole("link", { name: "Proxies" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Automation" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Profiles" })).not.toHaveAttribute("aria-current");
   });
 

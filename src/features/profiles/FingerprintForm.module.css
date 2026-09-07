@@ -20,6 +20,7 @@
   .inputAction {
     display: flex;
     align-items: flex-start;
+    justify-content: flex-end;
     gap: var(--space-2);
   }
 
@@ -32,6 +33,7 @@
   .refreshButton {
     flex-shrink: 0;
     cursor: pointer;
+    min-width: 100px;
   }
 
   .refreshButton:disabled {
@@ -39,8 +41,6 @@
     cursor: wait;
   }
 
-  .inputAction select,
-  .refreshButton,
   .labelRow input {
     padding: var(--space-2);
     font: inherit;
@@ -70,7 +70,13 @@
     font-weight: 600;
   }
 
+  .modeSelect {
+    /* Keep the absolute screen-reader label inside the panel's scroll boundary. */
+    position: relative;
+  }
+
   .modeSelect select {
+    min-width: 120px;
     padding: var(--space-1) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
@@ -156,6 +162,62 @@
     background: var(--color-warning-bg);
     border-radius: var(--radius-sm);
   }
+
+  .form select,
+  .refreshButton,
+  .infoButton {
+    height: 36px;
+    min-height: 36px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: var(--text-sm);
+    line-height: normal;
+    color: var(--color-text);
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    transition: border-color 120ms, background-color 120ms;
+  }
+
+  .form select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 36px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%238794aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    cursor: pointer;
+  }
+
+  .form select:hover,
+  .refreshButton:hover:not(:disabled),
+  .infoButton:hover {
+    background-color: var(--color-bg-hover);
+    border-color: var(--color-accent);
+  }
+
+  .form select option,
+  .form select optgroup {
+    color: var(--color-text);
+    background-color: var(--color-bg-surface);
+  }
+
+  .infoButton {
+    width: 36px;
+    flex: 0 0 36px;
+    padding: 0;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+
+  .presetInfo {
+    padding: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-surface);
+  }
+
+  .presetInfo p + p { margin-top: var(--space-2); }
 
   .srOnly {
     position: absolute;

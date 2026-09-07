@@ -7,17 +7,10 @@ interface NavItem {
   route: Route;
 }
 
-/**
- * The four destinations, deliberately not five.
- *
- * Templates holds profile and proxy templates as two tabs rather than taking a
- * nav slot each, which is the shape the product this follows uses and keeps the
- * bar readable at the 960px minimum window width.
- */
+/** Profile-specific settings stay in the profile editor, not duplicate pages. */
 const NAV_ITEMS: NavItem[] = [
   { key: "profiles", label: "Profiles", route: { name: "profiles", view: "all", folderId: null } },
-  { key: "proxies", label: "Proxies", route: { name: "proxies" } },
-  { key: "templates", label: "Templates", route: { name: "templates" } },
+
   { key: "automation", label: "Automation", route: { name: "automation" } },
 ];
 

@@ -1,7 +1,7 @@
 /**
  * Hash routing, without a router dependency.
  *
- * Real `<a href="#/proxies">` elements mean back and forward work inside the
+ * Real `<a href="#/profiles">` elements mean back and forward work inside the
  * webview for free and a profile is deep-linkable, which a click-handler-driven
  * switch would not give. The whole thing is small enough that a dependency would
  * cost more than it saves.
@@ -17,8 +17,7 @@ export type Route =
   | { name: "profiles"; view: ProfileView; folderId: string | null }
   | { name: "profile"; id: string }
   | { name: "profile-new" }
-  | { name: "proxies" }
-  | { name: "templates" }
+
   | { name: "automation" }
   | { name: "settings"; section: SettingsSection };
 
@@ -63,10 +62,7 @@ export function parseRoute(hash: string): Route {
       }
       return ID_PATTERN.test(view) ? { name: "profile", id: view } : DEFAULT_ROUTE;
     }
-    case "proxies":
-      return { name: "proxies" };
-    case "templates":
-      return { name: "templates" };
+
     case "automation":
       return { name: "automation" };
     case "settings": {
@@ -94,10 +90,7 @@ export function routeToHash(route: Route): string {
       return `#/profiles/${encodeURIComponent(route.id)}`;
     case "profile-new":
       return "#/profiles/new";
-    case "proxies":
-      return "#/proxies";
-    case "templates":
-      return "#/templates";
+
     case "automation":
       return "#/automation";
     case "settings":
