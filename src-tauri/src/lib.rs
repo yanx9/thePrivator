@@ -1,6 +1,8 @@
 mod automation_api;
 mod diagnostics;
 mod events;
+#[cfg(target_os = "linux")]
+mod linux_webkit;
 mod sidecar;
 mod sidecar_pool;
 
@@ -27,6 +29,9 @@ mod commands {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    linux_webkit::configure();
+
     tauri::Builder::default()
         .manage(automation_api::AutomationApiSupervisor::new())
         // Sidecar workers are kept warm between commands, so the pool has to
