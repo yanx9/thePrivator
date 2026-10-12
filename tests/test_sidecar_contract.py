@@ -1825,7 +1825,8 @@ def test_chromium_masked_identity_cdp_failure_is_typed_redacted_and_cleans_runti
     assert diagnostic["detailRef"] == error["detailRef"]
 
     argv = json.loads(argv_capture.read_text(encoding="utf-8"))
-    assert "--remote-debugging-port=0" in argv
+    assert "--remote-debugging-port=0" not in argv
+    assert any(arg.startswith("--remote-debugging-port=") for arg in argv)
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
     assert any(arg.startswith("--load-extension=") for arg in argv)
     assert any(arg.startswith("--disable-extensions-except=") for arg in argv)

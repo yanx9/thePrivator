@@ -762,7 +762,7 @@ def test_chromium_launch_arg_validator_rejects_unsafe_proxy_debug_and_path_args(
         "--proxy-server=http://user:pass@proxy.example.invalid:8080",
         "--proxy-server=direct://",
         "--proxy-bypass-list=<-loopback>",
-        "--remote-debugging-port=9222",
+        "--remote-debugging-port=65536",
         f"--user-data-dir={tmp_path}",
     ]
 
@@ -915,7 +915,12 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
 
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         joined_argv = "\n".join(argv)
-        assert "--remote-debugging-port=0" in argv
+        debugging_args = [arg for arg in argv if arg.startswith("--remote-debugging-port=")]
+        assert len(debugging_args) == 1
+        debugging_port = int(debugging_args[0].split("=", 1)[1])
+        assert 1 <= debugging_port <= 65535
+        assert calls[0][1]["debugging_port"] == debugging_port
+        assert calls[0][1]["browser_pid"] == launch["pid"]
         assert "--remote-allow-origins=*" in argv
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [

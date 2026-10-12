@@ -459,7 +459,7 @@ describe("ProfileEditor, curated presets", () => {
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
   });
 
-  it("keeps sidecar templates out of the picker and offers Custom, Real and Compatible managed before refresh", async () => {
+  it("keeps sidecar templates out of the picker and offers Custom and Real before refresh", async () => {
     allSaveCommandsSucceed();
 
     render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -468,7 +468,7 @@ describe("ProfileEditor, curated presets", () => {
 
     const select = await screen.findByLabelText(/start from a preset/i);
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
-    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Custom", "Real", "Compatible managed (recommended)"]);
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Custom", "Real"]);
     expect(screen.getByRole("button", { name: "Refresh presets" })).toBeEnabled();
   });
 

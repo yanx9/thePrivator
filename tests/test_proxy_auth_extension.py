@@ -274,7 +274,8 @@ def test_identity_and_proxy_auth_extensions_compose_with_webrtc_and_cdp_flags(tm
         assert launch["status"] == "running"
         argv = json.loads(argv_capture.read_text(encoding="utf-8"))
         joined = "\n".join(argv)
-        assert "--remote-debugging-port=0" in argv
+        assert "--remote-debugging-port=0" not in argv
+        assert any(arg.startswith("--remote-debugging-port=") for arg in argv)
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=https://proxy.example.invalid:18443"

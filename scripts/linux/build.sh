@@ -4,7 +4,7 @@ project_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$project_root"
 builder=theprivator-linux-builder:jammy
 container="theprivator-linux-build-$$"
-output="$project_root/dist/linux"
+output="$project_root/src-tauri/target/release/bundle/linux"
 docker build -t "$builder" scripts/linux
 docker create --name "$container" -v "$project_root:/source:ro" "$builder" bash -lc '
   set -euo pipefail

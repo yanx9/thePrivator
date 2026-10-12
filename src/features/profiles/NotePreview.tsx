@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProfileRecord } from "../../sidecar/types";
 import styles from "./ProfileTable.module.css";
+import { writeToClipboard } from "../../clipboard";
 
 export function NotePreview({ profile }: { profile: ProfileRecord }) {
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const anchor = useRef<HTMLButtonElement>(null);
   const bubble = useRef<HTMLDivElement>(null);
@@ -35,8 +37,17 @@ export function NotePreview({ profile }: { profile: ProfileRecord }) {
       aria-describedby={open ? `note-${profile.id}` : undefined} onMouseEnter={show} onMouseLeave={leave} onFocus={show} onBlur={leave}
       onClick={(event) => { event.stopPropagation(); if (pinned) { setOpen(false); setPinned(false); } else { show(); setPinned(true); } }}>{note}</button>
     {open ? createPortal(<div ref={bubble} id={`note-${profile.id}`} role="tooltip" className={styles.noteBubble} style={position}
-      onMouseEnter={show} onMouseLeave={leave}>
-      {note}<small>Edit in Profile settings → General → Notes</small>
+      onMouseEnter={show} onMouseLeave={leave}
+      onPointerDown={(event) => { event.stopPropagation(); if (leaveTimer.current) clearTimeout(leaveTimer.current); setPinned(true); }}
+      onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+      <div className={styles.noteText}>{note}</div>
+      <div className={styles.noteActions}>
+        <button type="button" onFocus={() => { show(); setPinned(true); }} onClick={() => {
+          void writeToClipboard(note).then((copied) => setCopyStatus(copied ? "Copied" : "Clipboard unavailable. Select text and press Ctrl+C."));
+        }}>Copy note</button>
+        <span role="status">{copyStatus}</span>
+      </div>
+      <small>Edit in Profile settings → General → Notes</small>
     </div>, document.body) : null}
   </div>;
 }

@@ -332,3 +332,10 @@
   .noteBubble { position: fixed; z-index: 50; width: min(360px, 75vw); padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; background: var(--color-bg-raised); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 8px; box-shadow: 0 8px 28px #0003; }
   .noteBubble small { display: block; margin-top: 12px; opacity: .65; }
 }
+
+@layer components {
+  .noteText { user-select: text; -webkit-user-select: text; cursor: text; }
+  .noteActions { display: flex; align-items: center; gap: 10px; margin-top: 12px; white-space: normal; }
+  .noteActions button { cursor: pointer; border: 1px solid var(--color-border); border-radius: 4px; padding: 4px 8px; }
+  .noteActions [role="status"] { font-size: .85em; }
+}

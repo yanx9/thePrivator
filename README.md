@@ -60,11 +60,12 @@ close it. Edit notes in the profile's **General** settings. Launch history updat
 only after successful starts. **App data** in the footer opens a disk usage
 breakdown. Appearance, column layout and sidebar preferences are saved locally.
 
-**Compatible managed** keeps the actual browser/device identity and uses
-Chromium's native non-proxied WebRTC restriction, without identity scripts or
-DevTools overrides. It is a compatibility option for sites that reject modified
-fingerprints, including Google sign-in; acceptance still depends on the site.
 API-generated fingerprints remain available in both profile creation and editing.
+Their native overrides stay attached for the browser lifetime and are applied to
+new page/iframe targets before those targets resume. Ordinary managed launches
+use a nonzero local debugging port. Google sign-in with a generated profile was
+confirmed on Linux Mint during 3.2 release validation; acceptance can still vary
+by account and configuration.
 
 ## Optional encrypted storage
 
@@ -164,7 +165,7 @@ bash scripts/linux/build.sh
 ```
 
 This requires Docker, builds Linux x86-64 `.deb` and `.rpm` packages, and writes
-them with checksums to `dist/linux/`. The container targets Ubuntu 22.04 / Mint 21
+them with checksums to `src-tauri/target/release/bundle/linux/`. The container targets Ubuntu 22.04 / Mint 21
 and newer. A native build on a rolling-release distribution is only suitable for
 that host unless tested against the intended older runtime.
 

@@ -63,6 +63,9 @@ def run(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entrypoint used by ``python -m theprivator_sidecar``."""
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["identity-session"]:
+        from .identity_session import worker_main
+        return worker_main()
     if args[:1] == ["automation-api"]:
         from .automation_api import run_from_env
 

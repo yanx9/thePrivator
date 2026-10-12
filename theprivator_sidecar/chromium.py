@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -877,6 +878,7 @@ def _runtime_launch_args(
     proxy_auth_artifact: Optional[ProxyAuthExtensionArtifact],
     *,
     force_remote_debugging: bool = False,
+    debugging_port: int = 0,
 ) -> list[str]:
     args: list[str] = []
     args.extend(
@@ -889,7 +891,7 @@ def _runtime_launch_args(
         )
     )
     if force_remote_debugging or identity_plan.requires_cdp:
-        args.extend([_REMOTE_DEBUGGING_ARG, _REMOTE_ALLOW_ORIGINS_ARG])
+        args.extend([f"--remote-debugging-port={debugging_port}", _REMOTE_ALLOW_ORIGINS_ARG])
     args.extend(identity_plan.launch_flags)
     return _validate_extra_launch_args(args)
 
@@ -931,6 +933,10 @@ def _validate_extra_launch_args(args: Sequence[str]) -> list[str]:
         if arg in {_REMOTE_DEBUGGING_ARG, _REMOTE_ALLOW_ORIGINS_ARG} or arg in _ALLOWED_IDENTITY_LAUNCH_FLAGS:
             safe_args.append(arg)
             continue
+        if re.fullmatch(r"--remote-debugging-port=[1-9][0-9]{0,4}", arg):
+            if int(arg.split("=", 1)[1]) <= 65535:
+                safe_args.append(arg)
+                continue
         if arg.startswith(PROXY_SERVER_ARG_PREFIX):
             safe_args.append(validate_proxy_server_launch_arg(arg))
             continue
@@ -1062,6 +1068,9 @@ def _raise_launch_arg_error() -> None:
 def discover_devtools_endpoint(user_data_dir: Union[str, Path], **kwargs: Any) -> Any:
     """Lazy CDP discovery wrapper so non-CDP sidecar commands do not require CDP deps."""
     try:
+        if "debugging_port" in kwargs:
+            from .managed_debugging import discover_managed_endpoint
+            return discover_managed_endpoint(user_data_dir, **kwargs)
         from .cdp import discover_devtools_endpoint as _discover_devtools_endpoint
     except Exception as exc:
         raise SidecarError(
@@ -1074,7 +1083,7 @@ def discover_devtools_endpoint(user_data_dir: Union[str, Path], **kwargs: Any) -
 def apply_identity_cdp_overrides(endpoint_or_url: Any, overrides: Mapping[str, Any], **kwargs: Any) -> JsonObject:
     """Lazy CDP apply wrapper that collapses dependency/import failures safely."""
     try:
-        from .cdp import apply_identity_cdp_overrides as _apply_identity_cdp_overrides
+        from .identity_session import start_identity_session as _apply_identity_cdp_overrides
     except Exception as exc:
         raise SidecarError(
             code=IDENTITY_CDP_FAILED,
@@ -1164,6 +1173,17 @@ def _launch_registered(
     may take, and what to do with the endpoint once it exists.
     """
     executable = discover_executable()
+    # Port zero is Chromium's automation-launch convention. Human-operated
+    # managed profiles need DevTools for identity emulation, but are not an
+    # automation session. Explicit automation/audit launches retain port zero.
+    debugging_port = 0
+    if identity_plan.requires_cdp and not force_remote_debugging:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                debugging_port = reservation.getsockname()[1]
+        except OSError as exc:
+            raise SidecarError(code=IDENTITY_CDP_FAILED, message="Identity CDP operation failed.") from exc
     user_data_path = resolve_user_data_path(store_root, profile)
     try:
         user_data_path.mkdir(parents=True, exist_ok=True)
@@ -1190,6 +1210,7 @@ def _launch_registered(
                 extension_artifact,
                 proxy_auth_artifact,
                 force_remote_debugging=force_remote_debugging,
+                debugging_port=debugging_port,
             ),
             *proxy_runtime.launch_args,
             *_proxy_proof_trust_args(),
@@ -1220,6 +1241,7 @@ def _launch_registered(
             endpoint = discover_devtools_endpoint(
                 user_data_path,
                 timeout_seconds=discovery_timeout_seconds,
+                **({"debugging_port": debugging_port, "browser_pid": process.pid} if debugging_port else {}),
             )
             _apply_identity_cdp_to_endpoint_if_needed(identity_plan, endpoint)
             if after_endpoint is not None:

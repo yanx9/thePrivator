@@ -5,6 +5,50 @@ All notable changes to thePrivator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-10-13
+
+Promotes the validated 3.1.x iterations to the final 3.2 release.
+
+### Highlights
+
+- Batch profile import/export, proxy credential paste, optional PIN/password vault encryption, and disk-usage reporting.
+- Persistent Linux settings, reliable launch history and proxy-check state, working user-agent refresh during profile creation, and descriptive platform labels.
+- Selectable notes bubbles with Copy note; notes are edited in profile settings.
+- Removed the Compatible managed preset. Generated profiles retain their configured fingerprints.
+
+### Fixed
+
+- Keep native generated-identity overrides attached for the browser lifetime, including new tabs and frames.
+- Prevent browser shutdown during cross-site iframe navigation, shared-renderer locale replies, and target-closure races.
+- Build Linux packages against Ubuntu 22.04 for Linux Mint compatibility.
+- Ordinary managed-profile launches use a dynamically selected nonzero loopback debugging port. Chromium treats port zero as an automation launch, which caused even manually operated generated profiles to expose `navigator.webdriver = true`. Explicit automation and audit launches retain their existing behavior.
+- Verify that the selected debugging listener belongs to the launched browser process or its children before attaching. Port collisions fail safely; discovery bypasses environment proxies and rejects redirects and non-loopback endpoints.
+- Preserve the profile-scoped discovery file so later browser-control operations can reconnect to an ordinary managed launch.
+
+### Verified
+
+- Added headed-browser regressions covering generated Windows/macOS identities, requester-process exit, multiple tabs, reloads, cross-site frames, and the native automation indicator. Generated identity settings are preserved.
+- The user confirmed Google sign-in succeeds with a generated profile on Linux Mint using the 3.1.4 iteration promoted here. This confirms the reported case; it is not a guarantee of acceptance for every account or fingerprint.
+
+## [3.1.3] - 2026-10-13
+
+### Fixed
+
+- Fixed managed browsers closing when pages create cross-site iframes: viewport emulation is now sent only to top-level targets.
+- Handle Chromium's shared-renderer locale response and target-closure races without treating them as fatal identity failures.
+- Added real-browser regressions covering cross-site iframe loading, navigation, reloads, generated client hints, and multiple tabs, with support for testing the worker extracted from an installer.
+
+## [3.1.2] - 2026-10-13
+
+### Fixed
+
+- Keep generated identity overrides attached for the browser lifetime and apply them to new page/iframe targets before resuming execution. Previously, disconnecting the one-shot CDP session discarded native overrides and could leave browser/network values inconsistent with page scripts.
+- Notes bubbles allow text selection and stay open during interaction. Added Copy note with a manual-copy fallback when clipboard access is unavailable.
+
+### Removed
+
+- Removed the Compatible managed preset from the fingerprint picker. Existing saved identities remain unchanged.
+
 ## [3.1.1] - 2026-10-13
 
 ### Fixed

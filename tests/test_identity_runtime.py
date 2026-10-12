@@ -346,7 +346,7 @@ def test_runtime_and_extension_modules_do_not_import_legacy_fingerprint_dataclas
         assert "theprivator.utils" not in source
 
 
-def test_compatible_managed_uses_native_policy_without_identity_injection():
+def test_webrtc_only_policy_uses_native_flag_without_identity_injection():
     import copy
     from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
     identity = copy.deepcopy(DEFAULT_REAL_IDENTITY)

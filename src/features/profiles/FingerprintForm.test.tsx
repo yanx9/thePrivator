@@ -78,6 +78,10 @@ function pendingUserAgent() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("FingerprintForm", () => {
+  it("does not offer the removed compatibility preset", () => {
+    render(<FingerprintForm draft={createIdentityDraftState(realIdentity())} warnings={[]} onChange={vi.fn()} />);
+    expect(screen.queryByRole("option", { name: /compatible/i })).not.toBeInTheDocument();
+  });
   it.each([undefined, []])("offers Real without API templates and resets every surface in the draft", (presets) => {
     let draft = createIdentityDraftState(realIdentity());
     for (const surface of IDENTITY_SURFACE_ORDER) {
