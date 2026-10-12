@@ -28,6 +28,10 @@ const REAL_PRESET: ProfileIdentity = {
   ports: { mode: "real" },
 };
 
+const COMPATIBLE_PRESET: ProfileIdentity = {
+  ...REAL_PRESET, label: "Compatible managed", webrtc: { mode: "masked", policy: "disableNonProxiedUdp" },
+};
+
 export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
   const id = useId();
   const request = useRef<AbortController | null>(null);
@@ -67,14 +71,17 @@ export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
   }
 
   const selected = generated.findIndex((preset) => JSON.stringify(preset) === JSON.stringify(draft.identity));
+  const isCompatiblePreset = JSON.stringify(draft.identity) === JSON.stringify(COMPATIBLE_PRESET);
   const isRealPreset = JSON.stringify(draft.identity) === JSON.stringify(REAL_PRESET);
   return <div className={styles.labelRow}>
     <label htmlFor={id}>Start from a preset</label>
     <div className={styles.inputAction}>
-      <select id={id} value={isRealPreset ? "real" : selected >= 0 ? `api:${selected}` : ""}
+      <select id={id} value={isCompatiblePreset ? "compatible" : isRealPreset ? "real" : selected >= 0 ? `api:${selected}` : ""}
         onChange={(event) => {
           const value = event.target.value;
-          if (value === "real") {
+          if (value === "compatible") {
+            onChange(createIdentityDraftState(structuredClone(COMPATIBLE_PRESET)));
+          } else if (value === "real") {
             onChange(createIdentityDraftState(structuredClone(REAL_PRESET)));
           } else if (value.startsWith("api:")) {
             const preset = generated[Number(value.slice(4))];
@@ -83,18 +90,19 @@ export function IdentityPresetPicker({ draft, presets, onChange }: Props) {
         }}>
         <option value="">Custom</option>
         <option value="real">Real</option>
+        <option value="compatible">Compatible managed (recommended)</option>
         {generated.length > 0 ? <optgroup label="Generated from API">
           {generated.map((preset, index) => <option key={index} value={`api:${index}`}>{preset.label}</option>)}
         </optgroup> : null}
       </select>
-      <button type="button" className={styles.refreshButton} disabled={busy} aria-label="Refresh presets" aria-describedby={`${id}-hint`} onClick={() => void refresh()}>
+      <button type="button" className={styles.refreshButton} disabled={busy || presets.length === 0} aria-label="Refresh presets" aria-describedby={`${id}-hint`} onClick={() => void refresh()}>
         <span aria-hidden="true">↻</span> {busy ? "Refreshing…" : "Refresh"}
       </button>
       <button type="button" className={styles.infoButton} aria-label="Preset information" aria-expanded={showInfo}
         aria-controls={`${id}-info`} title="Preset information" onClick={() => setShowInfo(!showInfo)}>ⓘ</button>
     </div>
     <div id={`${id}-info`} className={styles.presetInfo} hidden={!showInfo}>
-    <p className={styles.hint}>A preset sets every surface at once. Editing any field afterwards makes the identity custom.</p>
+    <p className={styles.hint}>Compatible managed keeps the actual browser version and device identity, and restricts non-proxied WebRTC traffic. It does not spoof canvas or hardware. Google sign-in still depends on Google’s checks. A preset sets every surface at once. Editing any field afterwards makes the identity custom.</p>
     <p className={styles.hint}>Real disables masking on every surface, restores real WebRTC and asks for geolocation permission. Changes stay in the draft until Save.</p>
     <p className={styles.hint} id={`${id}-hint`}>randomapi.dev: direct connection, not the profile proxy. Sends only OS/browser filters, no profile configuration or cookies; the provider sees your IP. Refresh does not change your draft.</p>
     <p className={styles.hint}>API supplies random Chrome desktop user agents, not necessarily the latest Chrome. Other settings come from OS-matched local templates. This does not update Chromium; review consistency warnings before saving.</p>

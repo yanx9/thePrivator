@@ -465,12 +465,14 @@ def create_app(config: AutomationApiConfig) -> FastAPI:
 
     @asynccontextmanager
     async def automation_lifespan(lifespan_app: FastAPI):  # type: ignore[no-untyped-def]
-        try:
-            yield
-        finally:
-            manager = getattr(lifespan_app.state, "automation_lease_manager", None)
-            if isinstance(manager, AutomationLeaseManager):
-                manager.close(config.store_root)
+        from .storage_access import activity_lock
+        with activity_lock(config.store_root):
+            try:
+                yield
+            finally:
+                manager = getattr(lifespan_app.state, "automation_lease_manager", None)
+                if isinstance(manager, AutomationLeaseManager):
+                    manager.close(config.store_root)
 
     app = FastAPI(
         title="ThePrivator Automation API",

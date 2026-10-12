@@ -756,7 +756,7 @@ describe("verify-s06 guard helpers", () => {
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);
 
     writeJson(storePath, {
-      storeVersion: 5,
+      storeVersion: 99,
       profiles: [packagedSmokeStoreProfile(profileId, context.smokeProfileName)],
     });
     expect(() => assertPostSmokeProfileStore({ rootDir: root, smokeContext: context })).toThrow(/storeVersion/i);

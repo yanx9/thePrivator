@@ -262,7 +262,7 @@ describe("ProfileTable", () => {
     });
 
     const cell = screen.getByText(notes);
-    expect(cell.tagName).toBe("SPAN");
+    expect(cell.tagName).toBe("BUTTON");
     expect(cell.innerHTML).not.toContain("<img");
     expect(document.querySelector("[title]")).toBeNull();
   });

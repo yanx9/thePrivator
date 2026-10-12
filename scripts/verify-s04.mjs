@@ -694,7 +694,7 @@ function assertPrivateStoreNoRuntime(storeRoot, profileId, { expectPrivateCreden
   const path = join(storeRoot, "profile-store", "profiles.json");
   assert(existsSync(path), "profiles.json was not written.", { profileId });
   const payload = JSON.parse(readFileSync(path, "utf8"));
-  assert(payload.storeVersion === 4, "S04 proxy check must use the store-v4 profile schema.", { storeVersion: payload.storeVersion });
+  assert([4, 5].includes(payload.storeVersion), "S04 proxy check must use the store-v4 profile schema.", { storeVersion: payload.storeVersion });
   assert(Array.isArray(payload.profiles), "profiles.json profiles field must be an array.", { profileId });
   const profile = payload.profiles.find((item) => item?.id === profileId);
   assert(profile, "profiles.json does not contain the case profile.", { profileId });
@@ -736,7 +736,7 @@ async function createProfile(session, storeRoot, name) {
     "profiles.create",
     { storeRoot, name },
   );
-  assert(create.result.storeVersion === 4, "profiles.create did not return storeVersion 4.", { storeVersion: create.result.storeVersion });
+  assert([4, 5].includes(create.result.storeVersion), "profiles.create did not return storeVersion 4.", { storeVersion: create.result.storeVersion });
   return assertProfileShape(create.result.profile, name);
 }
 
@@ -747,7 +747,7 @@ async function applyRestrictedWebRtcPreset(session, storeRoot, profileId) {
     "profiles.identity.applyPreset",
     { storeRoot, profileId, presetId: PRESET_ID },
   );
-  assert(applied.result.storeVersion === 4, "profiles.identity.applyPreset did not return storeVersion 4.", { storeVersion: applied.result.storeVersion });
+  assert([4, 5].includes(applied.result.storeVersion), "profiles.identity.applyPreset did not return storeVersion 4.", { storeVersion: applied.result.storeVersion });
   assert(applied.result.profile?.identity?.presetId === PRESET_ID, "Restricted WebRTC preset was not applied.", { profileId });
   assert(applied.result.profile?.identity?.webrtc?.policy === "disableNonProxiedUdp", "Restricted WebRTC preset policy mismatch.", { profileId });
   return { presetId: PRESET_ID, policy: applied.result.profile.identity.webrtc.policy };
@@ -760,7 +760,7 @@ async function saveProxy(session, storeRoot, profileId, proxy) {
     "profiles.proxy.update",
     { storeRoot, profileId, proxy },
   );
-  assert(saved.result.storeVersion === 4, "profiles.proxy.update did not return storeVersion 4.", { storeVersion: saved.result.storeVersion });
+  assert([4, 5].includes(saved.result.storeVersion), "profiles.proxy.update did not return storeVersion 4.", { storeVersion: saved.result.storeVersion });
   assertPublicProxySummary(saved.result.profile?.proxy, proxy, "profiles.proxy.update.profile.proxy");
   return saved.result.profile.proxy;
 }
@@ -772,7 +772,7 @@ async function assertPublicProfileSummary(session, storeRoot, profileId, expecte
     "profiles.list",
     { storeRoot },
   );
-  assert(listed.result.storeVersion === 4, "profiles.list did not return storeVersion 4.", { storeVersion: listed.result.storeVersion });
+  assert([4, 5].includes(listed.result.storeVersion), "profiles.list did not return storeVersion 4.", { storeVersion: listed.result.storeVersion });
   const profile = listed.result.profiles?.find((item) => item?.id === profileId);
   assert(profile, "profiles.list did not include the case profile.", { profileId });
   assertPublicProxySummary(profile.proxy, expectedProxy, "profiles.list.profile.proxy");

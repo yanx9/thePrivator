@@ -4,10 +4,14 @@ import { SyncSettings } from "../sync/SyncSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { DiagnosticsSettings } from "./DiagnosticsSettings";
 import { ImportSettings } from "./ImportSettings";
+import { SecuritySettings } from "./SecuritySettings";
+import { StorageSettings } from "./StorageSettings";
 import styles from "./SettingsPage.module.css";
 
 const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: "appearance", label: "Appearance" },
+  { id: "security", label: "Data protection" },
+  { id: "storage", label: "Disk usage" },
   { id: "sync", label: "Synchronization" },
   { id: "diagnostics", label: "Diagnostics" },
   { id: "import", label: "Import" },
@@ -30,7 +34,7 @@ export function SettingsPage({ section }: { section: SettingsSection }) {
       </nav>
 
       <div className={styles.panel}>
-        {section === "sync" ? (
+        {section === "security" ? <SecuritySettings /> : section === "storage" ? <StorageSettings /> : section === "sync" ? (
           <SyncSettings />
         ) : section === "diagnostics" ? (
           <DiagnosticsSettings />

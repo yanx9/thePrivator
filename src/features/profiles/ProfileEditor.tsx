@@ -371,7 +371,7 @@ export function ProfileEditor({ profileId, running: runningProp, onClose, onSave
           <FingerprintForm
             draft={draft.identity}
             warnings={warnings}
-            presets={profile === null ? undefined : (presets ?? undefined)}
+            presets={presets ?? undefined}
             onChange={(identity) => setDraft((current) => ({ ...current, identity }))}
             onApplyPreset={applyPreset}
           />

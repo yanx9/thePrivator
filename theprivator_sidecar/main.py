@@ -116,6 +116,10 @@ def handle_request_line(raw_line: str) -> Tuple[JsonObject, list[JsonObject]]:
         return response, _with_store_root_persistence(request, diagnostics)
 
     except SidecarError as error:
+        if request is not None and error.request_id is None:
+            error = SidecarError(code=error.code, message=error.message,
+                recoverable=error.recoverable, detail_ref=error.detail_ref,
+                request_id=request.id, method=request.method)
         duration_ms = _elapsed_ms(started)
         response = ErrorResponse(
             id=error.request_id,
@@ -167,9 +171,13 @@ def _with_store_root_persistence(
     diagnostics: list[JsonObject],
 ) -> list[JsonObject]:
     """Persist store-root diagnostics without changing response authority."""
-    if request.method == "proxy.validate":
+    if request.method == "proxy.validate" or request.method == "desktop.data":
         return diagnostics
 
+    from pathlib import Path
+    root = request.params.get("storeRoot")
+    if isinstance(root, str) and (Path(root) / "vault.json").exists():
+        return diagnostics
     result = append_events(
         request.params.get("storeRoot"),
         diagnostics,
@@ -184,7 +192,24 @@ def _with_store_root_persistence(
 
 
 def dispatch(request: SidecarRequest) -> JsonObject:
+    from .storage_access import activity_lock
+    root = request.params.get("storeRoot")
+    action = request.params.get("action", "")
+    public_desktop = request.method == "desktop.data" and action != "packages.export"
+    if isinstance(root, str) and root and not public_desktop:
+        with activity_lock(root):
+            return _dispatch(request)
+    return _dispatch(request)
+
+
+def _dispatch(request: SidecarRequest) -> JsonObject:
     """Dispatch a validated sidecar request to a command handler."""
+    if request.method == "desktop.data":
+        from pathlib import Path
+        from .desktop_data import command
+        return command(Path(require_string_param(request.params, "storeRoot", "A data directory is required.")),
+                       require_string_param(request.params, "action", "A desktop action is required."), request.params)
+
     if request.method == "health.status":
         return health_status()
 

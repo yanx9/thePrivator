@@ -113,6 +113,7 @@ pub enum SidecarRunnerError {
     Unavailable,
     Timeout,
     Io,
+    Locked,
 }
 
 #[async_trait]
@@ -166,13 +167,52 @@ impl SidecarRunner for TauriSidecarRunner {
         let pool = self.pool.clone();
 
         tokio::task::spawn_blocking(move || {
+            let state = app.state::<DesktopDataState>();
+            let mut request: Value = serde_json::from_str(&request_line).map_err(|_| SidecarRunnerError::Io)?;
+            let action = request["params"]["action"].as_str().unwrap_or("").to_owned();
+            let is_desktop = request["method"] == "desktop.data";
+            let vault_change = is_desktop && action.starts_with("vault.") && action != "vault.status";
+            let exclusive = vault_change || (is_desktop && action == "settings.save");
+            let mut write_guard = if exclusive { Some(state.key.write().map_err(|_| SidecarRunnerError::Io)?) } else { None };
+            let read_guard = if exclusive { None } else { Some(state.key.read().map_err(|_| SidecarRunnerError::Io)?) };
+            let key = write_guard.as_ref().and_then(|g| g.as_ref()).or_else(|| read_guard.as_ref().and_then(|g| g.as_ref())).cloned();
+            let root = app.path().app_data_dir().map_err(|_| SidecarRunnerError::Configuration)?;
+            let protected = root.join("vault.json").exists();
+            let public = is_desktop && matches!(action.as_str(), "settings.get" | "settings.save" | "storage.usage" | "machine.info" | "vault.status" | "vault.unlock" | "vault.disable");
+            if protected && key.is_none() && !public {
+                return Err(SidecarRunnerError::Locked);
+            }
+            if vault_change {
+                app.state::<crate::automation_api::AutomationApiSupervisor>().stop().map_err(|_| SidecarRunnerError::Io)?;
+                if action == "vault.lock" {
+                    request["params"]["sessionKey"] = json!(key);
+                }
+            }
             let spawn = || -> Result<StdCommand, SidecarRunnerError> {
-                app.shell()
-                    .sidecar(SIDECAR_LOGICAL_NAME)
-                    .map(StdCommand::from)
-                    .map_err(|_| SidecarRunnerError::Configuration)
+                app.shell().sidecar(SIDECAR_LOGICAL_NAME).map(StdCommand::from).map_err(|_| SidecarRunnerError::Configuration)
             };
-            pool.run(spawn, request_line, timeout)
+            if vault_change { if let Some(guard) = write_guard.as_mut() { **guard = None; } }
+            let mut output = pool.run(spawn, serde_json::to_string(&request).map_err(|_| SidecarRunnerError::Io)?, timeout)?;
+            if is_desktop && action.starts_with("vault.") {
+                let mut response: Value = serde_json::from_str(output.stdout.trim()).map_err(|_| SidecarRunnerError::Io)?;
+                if response["ok"] == true {
+                    let session_key = response["result"].as_object_mut().and_then(|r| r.remove("sessionKey")).and_then(|v| v.as_str().map(String::from));
+                    if let Some(guard) = write_guard.as_mut() {
+                        **guard = session_key;
+                    } else {
+                        response["result"]["locked"] = json!(protected && key.is_none());
+                        if key.is_some() { response["result"]["recoveryRequired"] = json!(false); }
+                    }
+                }
+                if response["ok"] != true {
+                    // A committed snapshot may already have replaced partial plaintext.
+                    // Require password recovery before any further data access.
+                    if let Some(guard) = write_guard.as_mut() { **guard = None; }
+                }
+                // Filter private key material before response parsing or diagnostic handling.
+                output.stdout = serde_json::to_string(&response).map_err(|_| SidecarRunnerError::Io)?;
+            }
+            Ok(output)
         })
         .await
         .map_err(|_| SidecarRunnerError::Io)?
@@ -181,6 +221,27 @@ impl SidecarRunner for TauriSidecarRunner {
     fn diagnostics_store(&self) -> Option<&DiagnosticStore> {
         self.diagnostics_store.as_ref()
     }
+}
+
+#[derive(Default)]
+pub struct DesktopDataState {
+    pub key: std::sync::RwLock<Option<String>>,
+    pub closing: std::sync::atomic::AtomicBool,
+    pub exit_ready: std::sync::atomic::AtomicBool,
+}
+
+#[tauri::command]
+pub async fn desktop_data(app: tauri::AppHandle, action: String, params: Value) -> Result<SidecarCommandSuccess, SidecarCommandError> {
+    if !matches!(action.as_str(), "settings.get" | "settings.save" | "storage.usage" | "machine.info" | "packages.export" | "vault.status" | "vault.enable" | "vault.unlock" | "vault.lock" | "vault.disable") {
+        return Err(bridge_error(SIDECAR_PROTOCOL_ERROR, "Unknown desktop operation."));
+    }
+    let mut args = params.as_object().cloned().unwrap_or_default();
+    // Authority fields are injected by the native host, never accepted from UI.
+    args.remove("sessionKey");
+    args.insert("action".into(), json!(action));
+    args.insert("storeRoot".into(), json!(resolve_profile_store_root(&app)?));
+    let runner = TauriSidecarRunner::new(app);
+    invoke_method_with_params_timeout(&runner, "desktop.data", Value::Object(args), Duration::from_secs(3600)).await
 }
 
 #[tauri::command]
@@ -1694,6 +1755,7 @@ fn map_runner_error(
             SIDECAR_TIMEOUT,
             "The Python sidecar did not respond before the bridge timeout.",
         ),
+        SidecarRunnerError::Locked => bridge_error("VAULT_LOCKED", "Unlock ThePrivator to access profiles."),
         SidecarRunnerError::Io => bridge_error(
             SIDECAR_PROCESS_ERROR,
             "The Rust bridge could not complete sidecar process I/O.",

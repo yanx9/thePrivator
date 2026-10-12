@@ -359,6 +359,22 @@ describe("ProfileEditor, editing an existing profile", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("saves pasted proxy credentials through the validated sidecar client", async () => {
+    allSaveCommandsSucceed();
+    render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await screen.findByLabelText("Name");
+    fireEvent.click(screen.getByRole("tab", { name: /proxy/i }));
+    fireEvent.paste(screen.getByLabelText("Paste proxy"), {
+      clipboardData: { getData: () => "socks5://alice:p%40ss@proxy.example:1080" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_proxy_update", {
+      profileId: PROFILE_ID,
+      proxy: { proxyVersion: 1, mode: "fixedServer", protocol: "socks5", host: "proxy.example", port: 1080,
+        credentials: { username: "alice", password: "p@ss" } },
+    }));
+  });
+
   it("writes the proxy once the user actually edits it", async () => {
     allSaveCommandsSucceed();
 
@@ -443,7 +459,7 @@ describe("ProfileEditor, curated presets", () => {
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
   });
 
-  it("keeps sidecar templates out of the picker and offers only Custom and Real before refresh", async () => {
+  it("keeps sidecar templates out of the picker and offers Custom, Real and Compatible managed before refresh", async () => {
     allSaveCommandsSucceed();
 
     render(<ProfileEditor profileId={PROFILE_ID} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -452,7 +468,7 @@ describe("ProfileEditor, curated presets", () => {
 
     const select = await screen.findByLabelText(/start from a preset/i);
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list"));
-    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Custom", "Real"]);
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Custom", "Real", "Compatible managed (recommended)"]);
     expect(screen.getByRole("button", { name: "Refresh presets" })).toBeEnabled();
   });
 
@@ -498,6 +514,15 @@ describe("ProfileEditor, curated presets", () => {
 
     expect(select.value).toBe("");
     expect(within(select).getByRole("option", { name: "Custom" })).toBeInTheDocument();
+  });
+
+  it("loads preset templates before enabling refresh in the create flow", async () => {
+    allSaveCommandsSucceed();
+    render(<ProfileEditor profileId={null} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: /fingerprint/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh presets" })).toBeEnabled());
+    expect(mockInvoke).toHaveBeenCalledWith("identity_presets_list");
+    expect(mockInvoke.mock.calls.some(([command]) => command === "profiles_create")).toBe(false);
   });
 
   it("offers Real in the create flow and saves it only after creating the profile", async () => {

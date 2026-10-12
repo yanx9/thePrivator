@@ -648,7 +648,7 @@ function assertPresetList(result) {
 }
 
 function assertAppliedIdentity(result, profile, preset) {
-  assert(result.storeVersion === 4, "Identity apply did not preserve store v4.", { storeVersion: result.storeVersion });
+  assert([4, 5].includes(result.storeVersion), "Identity apply did not preserve store v4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.warnings) && result.warnings.length === 0, "Curated identity preset should apply without warnings.", {
     warnings: result.warnings,
   });
@@ -749,7 +749,7 @@ function assertPrivateProfileStoreSafe(storeRoot, profileId, expectedProxy) {
   const text = readFileSync(path, "utf8");
   assertNoPrivateStoreRuntimeLeaks("profiles.json", text);
   const payload = JSON.parse(text);
-  assert(payload.storeVersion === 4, "profiles.json did not remain store v4.", { storeVersion: payload.storeVersion });
+  assert([4, 5].includes(payload.storeVersion), "profiles.json did not remain store v4.", { storeVersion: payload.storeVersion });
   const profile = payload.profiles.find((item) => item?.id === profileId);
   assert(profile, "profiles.json does not contain the proof profile.", { profileId });
   assert(profile.proxy?.protocol === expectedProxy.protocol, "Persisted proxy protocol mismatch.", { protocol: profile.proxy?.protocol, expectedProtocol: expectedProxy.protocol });
@@ -1193,7 +1193,7 @@ async function createProfileWithProxy(binaryPath, storeRoot, caseConfig, proxy, 
     "profiles.create",
     { storeRoot, name: profileName },
   ).result;
-  assert(create.storeVersion === 4, "Profile create did not return store v4.", { storeVersion: create.storeVersion });
+  assert([4, 5].includes(create.storeVersion), "Profile create did not return store v4.", { storeVersion: create.storeVersion });
   const profile = assertProfileShape(create.profile, profileName);
 
   const applied = sidecarSuccess(
@@ -1210,7 +1210,7 @@ async function createProfileWithProxy(binaryPath, storeRoot, caseConfig, proxy, 
     "profiles.proxy.update",
     { storeRoot, profileId: profile.id, proxy },
   ).result;
-  assert(updated.storeVersion === 4, "Proxy update did not preserve store v4.", { storeVersion: updated.storeVersion });
+  assert([4, 5].includes(updated.storeVersion), "Proxy update did not preserve store v4.", { storeVersion: updated.storeVersion });
   assert(updated.profile?.id === profile.id, "Proxy update profile id mismatch.", { profileId: updated.profile?.id, expectedProfileId: profile.id });
   assertProxySummary(updated.profile.proxy, {
     protocol: proxy.protocol,

@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { NotePreview } from "./NotePreview";
+import { useMachineInfo } from "../../app/DesktopSession";
+import type { MachineInfo } from "../../sidecar/client";
 import type { ProfileRecord } from "../../sidecar/types";
 import {
   type ColumnDescriptor,
@@ -58,8 +61,15 @@ function formatTimestamp(value: string | null): string {
   });
 }
 
-function fingerprintLabel(profile: ProfileRecord): string {
-  return profile.defaults.fingerprintMode === "managed" ? "Managed" : "Off";
+function fingerprintLabel(profile: ProfileRecord, machine: MachineInfo | null): string {
+  const { browser, navigator: nav } = profile.identity;
+  const ua = browser.mode === "real" ? "" : browser.userAgent;
+  const hints = browser.mode === "real" ? undefined : browser.clientHints;
+  const platform = hints?.platform ?? (nav.mode === "real" ? "" : nav.uaPlatform);
+  const os = platform || (/Windows/.test(ua) ? "Windows" : /Macintosh/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : machine?.platform ?? "Real device");
+  const arch = hints?.architecture ?? (nav.mode === "real" ? machine?.architecture ?? "" : nav.uaArchitecture);
+  const version = /Chrome\/(\d+)/.exec(ua)?.[1] ?? (browser.mode === "real" ? machine?.browserVersion?.split(".")[0] : undefined);
+  return [os, arch || (/x86_64|Win64|x64/.test(ua) ? "x86_64" : ""), version ? `Chrome ${version}` : "Installed browser"].filter(Boolean).join(" · ");
 }
 
 /** Deterministic hue per tag, so a tag keeps its colour across profiles and sessions. */
@@ -86,25 +96,10 @@ interface CellProps {
   onStop: (id: string) => void;
 }
 
-function NotesCell({ profile, busy, onSaveNotes }: { profile: ProfileRecord; busy: boolean; onSaveNotes: NonNullable<CellProps["onSaveNotes"]> }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const value = draft ?? profile.organization.notes;
-  const dirty = draft !== null && draft !== profile.organization.notes;
-  return <div className={styles.notesEditor} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
-    <textarea aria-label={`Notes for ${profile.name}`} value={value} maxLength={1500} rows={1} disabled={busy}
-      placeholder="Add notes…" onChange={(event) => setDraft(event.target.value)}
-      onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setDraft(null); } }} />
-    {dirty ? <span>
-      <button type="button" disabled={busy} aria-label={`Save notes for ${profile.name}`} onClick={() => {
-        void onSaveNotes(profile.id, value).then((saved) => { if (saved) setDraft(null); });
-      }}>Save</button>
-      <button type="button" disabled={busy} aria-label={`Cancel notes for ${profile.name}`} onClick={() => setDraft(null)}>Cancel</button>
-    </span> : null}
-  </div>;
-}
 
 function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLaunch, onStop, proxyCheck, onCheckProxy, onSaveNotes }: CellProps) {
   const { profile, running } = row;
+  const machine = useMachineInfo();
 
   switch (column.key) {
     case "select":
@@ -183,16 +178,14 @@ function Cell({ row, column, folderNames, selected, busy, onSelect, onOpen, onLa
       return (
         <div className={styles.cell} role="gridcell">
           <span className={profile.defaults.fingerprintMode === "managed" ? undefined : styles.muted}>
-            {fingerprintLabel(profile)}
+            {fingerprintLabel(profile, machine)}
           </span>
         </div>
       );
     case "notes":
       return (
         <div className={styles.cell} role="gridcell">
-          {onSaveNotes && profile.lifecycle.deletedAt === null
-            ? <NotesCell profile={profile} busy={busy} onSaveNotes={onSaveNotes} />
-            : <span className={styles.truncate}>{profile.organization.notes || "—"}</span>}
+          <NotePreview profile={profile} />
         </div>
       );
     case "lastLaunchedAt":

@@ -19,6 +19,7 @@ import "./styles/index.css";
 
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { DesktopSession } from "./app/DesktopSession";
 import { App } from "./App";
 import { suppressNativeContextMenu } from "./nativeContextMenu";
 
@@ -33,6 +34,6 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <DesktopSession><App /></DesktopSession>
   </StrictMode>,
 );

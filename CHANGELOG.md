@@ -5,6 +5,56 @@ All notable changes to thePrivator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-10-13
+
+### Fixed
+
+- Rebuild Linux installers against Ubuntu 22.04 instead of the rolling-release development host. The 3.1.0 local build bundled newer glibc-dependent libraries, preventing the Python sidecar from starting on older Linux Mint systems.
+- Add a containerized Linux build environment to keep host system libraries out of release packages.
+
+### Verified
+
+- Installed the replacement DEB in Ubuntu 22.04 and confirmed the desktop reaches the loaded profile screen with the sidecar connected.
+- Verified packaged-sidecar contracts, saved preferences, profile creation, and vault encryption/unlock in that environment.
+
+## [3.1.0] - 2026-10-13
+
+### Added
+
+- Batch import of `.tpkg` profile packages and export of selected or all profiles, with per-profile results and cancellation of remaining work.
+- Proxy credential paste support for `host:port:user:pass` in the paste control and Host field.
+- Optional PIN/password protection in Settings → Data protection. AES-256-GCM encrypts the local profile store, proxy credentials, notes, browser sessions, and local sync configuration; scrypt protects the data key.
+- Manual locking and automatic locking on normal exit, stopping browsers, background jobs, and the app-owned automation server before sealing data.
+- Recovery for interrupted vault operations, authenticated snapshots, and native-only session-key handling. Concurrent desktop instances and independent automation activity cannot race vault sealing.
+- App data disk usage in the footer, with a detailed storage breakdown and refresh control.
+- A Compatible managed fingerprint preset using the actual browser/device identity and Chromium's native WebRTC restriction without injected identity scripts or DevTools overrides.
+
+### Changed
+
+- Notes display in a hover/focus bubble that can be pinned by clicking; editing is available in the profile's General settings.
+- The Platform column displays operating system, architecture, and browser version instead of only the fingerprint mode.
+- Theme, column layout, and sidebar preferences are saved atomically in local desktop settings.
+- Proxy credentials remain stored without app encryption when optional vault protection is off.
+- Persistent diagnostic logging is suspended while vault protection is enabled.
+- Packaged sidecars include the cryptography dependency required by vault protection.
+
+### Fixed
+
+- Successful profile launches now persist the last-launched timestamp and launch count, including launches through automation.
+- Proxy IP/check results survive tag, note, and unrelated profile edits and navigation; changing proxy configuration invalidates the cached result.
+- Fingerprint/user-agent API refresh is available during profile creation as well as editing, with loading and empty-result handling.
+- Saved themes are restored at startup instead of reverting to light mode.
+- Desktop command errors retain their request IDs for valid bridge responses.
+
+### Migration and limitations
+
+- Profile store version 5 adds a durable proxy revision and retains version 4 profile metadata and browser data. Older application builds must not write the migrated store.
+- Vault files are decrypted while unlocked. A crash or forced termination can leave plaintext until password recovery and locking; full-disk encryption is needed to protect an interrupted unlocked session. There is no forgotten-password reset.
+- Exported packages omit proxy passwords. Exported browser sessions and copies synced elsewhere are outside local vault encryption.
+- An independently started automation server must be stopped before locking.
+- The compatibility preset may help sites that reject modified fingerprints; Gmail sign-in acceptance and the packaged Linux Mint window still require real-environment verification.
+- Broader script and AI-agent automation capabilities remain planned for a later phase.
+
 ## [3.0.0] - 2026-09-07
 
 ### Changed
@@ -269,7 +319,7 @@ Automatic migration from v1.x:
 
 ---
 
-## [Unreleased] - Future
+## Future roadmap
 
 ### 🔮 Planned Features
 - Plugin system for extensibility
@@ -283,7 +333,7 @@ Automatic migration from v1.x:
 ### 🛠️ Technical Improvements
 - Async/await refactoring
 - Database backend option
-- REST API for automation
+- Expanded script and AI-agent automation over the existing local API
 - Docker containerization
 - Microservices architecture
 

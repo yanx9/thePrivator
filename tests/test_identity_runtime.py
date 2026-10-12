@@ -344,3 +344,14 @@ def test_runtime_and_extension_modules_do_not_import_legacy_fingerprint_dataclas
         assert "import theprivator." not in source
         assert "theprivator.core" not in source
         assert "theprivator.utils" not in source
+
+
+def test_compatible_managed_uses_native_policy_without_identity_injection():
+    import copy
+    from theprivator_sidecar.identity import DEFAULT_REAL_IDENTITY
+    identity = copy.deepcopy(DEFAULT_REAL_IDENTITY)
+    identity['webrtc'] = {'mode': 'masked', 'policy': 'disableNonProxiedUdp'}
+    plan = build_identity_runtime_plan(identity)
+    assert not plan.requires_cdp
+    assert not plan.requires_extension
+    assert plan.launch_flags == ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp']

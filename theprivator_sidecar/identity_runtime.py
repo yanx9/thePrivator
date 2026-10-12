@@ -155,6 +155,10 @@ def _build_extension_config(identity: Mapping[str, Any]) -> JsonObject:
             "allowedPorts": list(ports.get("allowedPorts", [])),
         }
 
+    # Compatibility mode can enforce this policy natively. Avoid injecting JS
+    # or enabling DevTools solely for a WebRTC networking preference.
+    if config == {"webrtc": {"policy": "disableNonProxiedUdp"}}:
+        return {}
     if not config:
         return {}
     return {"schemaVersion": RUNTIME_PLAN_SCHEMA_VERSION, **config}

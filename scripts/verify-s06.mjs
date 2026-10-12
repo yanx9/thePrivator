@@ -3362,7 +3362,7 @@ export function assertPostSmokeProfileStore(options = {}) {
   }, { rootDir });
 
   const { path, appDataRoot, payload, profile } = findSmokeProfileStore(rootDir, smokeContext);
-  assert(payload.storeVersion === 4, "profile-store/profiles.json must persist storeVersion: 4 for packaged proxy smoke.", {
+  assert([4, 5].includes(payload.storeVersion), "profile-store/profiles.json must persist storeVersion 4 or 5 for packaged proxy smoke.", {
     code: "S06_PROFILE_STORE_VERSION",
     profileStore: repoRelative(rootDir, path),
     smokeProfileName: smokeContext.smokeProfileName,

@@ -8,7 +8,7 @@ import type { ProxyCheckState } from "./ProxyExit";
  * since list records intentionally omit credentials. Never persist proxy secrets. */
 function scope(profile: ProfileRecord): string {
   const proxy = profile.proxy;
-  return JSON.stringify([profile.id, profile.updatedAt, profile.sync.revision, proxy.mode,
+  return JSON.stringify([profile.id, profile.proxyRevision ?? "initial", proxy.mode,
     proxy.credentialState, ...(proxy.mode === "fixedServer" ? [proxy.protocol, proxy.host, proxy.port] : [])]);
 }
 export function useProxyChecks(rows: readonly ProfileRow[]) {
@@ -33,7 +33,7 @@ export function useProxyChecks(rows: readonly ProfileRow[]) {
     update({ status: "pending" });
     try {
       const result = await checkProfileProxy(id);
-      update({ status: "done", result });
+      update({ status: "done", result, checkedAt: Date.now() });
     } catch {
       // Do not reflect bridge/provider text: it can contain endpoint credentials.
       update({ status: "error" });

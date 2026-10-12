@@ -348,7 +348,7 @@ impl AutomationApiSupervisor {
         }
     }
 
-    fn stop(&self) -> Result<AutomationApiStatusSnapshot, SidecarCommandError> {
+    pub(crate) fn stop(&self) -> Result<AutomationApiStatusSnapshot, SidecarCommandError> {
         let mut state = self.lock_state()?;
         reconcile_child_locked(&mut state);
         if state.phase == AutomationApiLifecyclePhase::Stopped {
@@ -432,7 +432,12 @@ pub fn automation_api_start(
             "The Tauri app data directory could not be resolved for the automation API.",
         )
     })?;
-    let launcher = TauriAutomationApiLauncher::new(app);
+    let vault_state = app.state::<crate::sidecar::DesktopDataState>();
+    let vault_guard = vault_state.key.read().map_err(|_| bridge_error("VAULT_LOCKED", "Vault state unavailable."))?;
+    if store_root.join("vault.json").exists() && vault_guard.is_none() {
+        return Err(bridge_error("VAULT_LOCKED", "Unlock ThePrivator before starting automation."));
+    }
+    let launcher = TauriAutomationApiLauncher::new(app.clone());
     state.start_with_launcher(&launcher, store_root)
 }
 

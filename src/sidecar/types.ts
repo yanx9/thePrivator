@@ -757,6 +757,7 @@ export interface ProfileSync {
 }
 
 export interface ProfileRecord {
+  proxyRevision?: string;
   id: string;
   name: string;
   createdAt: string;
@@ -773,7 +774,7 @@ export interface ProfileRecord {
 }
 
 export interface ProfileListResult {
-  storeVersion: 4;
+  storeVersion: 4 | 5;
   profiles: ProfileRecord[];
   count: number;
 }
@@ -911,7 +912,7 @@ export interface SyncRunSnapshot extends SyncRunResult {
 }
 
 export interface ProfileTrashListResult {
-  storeVersion: 4;
+  storeVersion: 4 | 5;
   profiles: ProfileRecord[];
   count: number;
 }

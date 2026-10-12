@@ -5,6 +5,7 @@ import { fetchRandomUserAgent, inferUserAgentOs } from "./userAgentApi";
 export async function refreshIdentityPresets(
   templates: readonly ProfileIdentity[], signal: AbortSignal,
 ): Promise<ProfileIdentity[]> {
+  if (templates.length === 0) throw new Error("Identity templates are not loaded.");
   return Promise.all(templates.map(async (template) => {
     if (template.browser.mode === "real") throw new Error("A browser template is required.");
     const os = inferUserAgentOs(

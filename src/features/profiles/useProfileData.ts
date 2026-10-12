@@ -8,6 +8,7 @@ import {
 } from "../../sidecar/client";
 import type { ProfileRecord, SidecarClientError } from "../../sidecar/types";
 import { subscribeToProfilesChanged, subscribeToChromiumStatusChanged } from "../../sidecarEvents";
+import { useProxyChecks } from "./useProxyChecks";
 import type { ProfileRow } from "./tableModel";
 
 /**
@@ -26,6 +27,7 @@ import type { ProfileRow } from "./tableModel";
 const STATUS_POLL_MS = 5_000;
 
 export interface ProfileData {
+  proxyChecks?: ReturnType<typeof useProxyChecks>;
   rows: ProfileRow[];
   trashed: ProfileRecord[];
   runningCount: number;
@@ -103,5 +105,6 @@ export function useProfileData(includeTrash: boolean): ProfileData {
     [profiles, runningIds],
   );
 
-  return { rows, trashed, runningCount: runningIds.size, loading, error, refresh };
+  const proxyChecks = useProxyChecks(rows);
+  return { proxyChecks, rows, trashed, runningCount: runningIds.size, loading, error, refresh };
 }

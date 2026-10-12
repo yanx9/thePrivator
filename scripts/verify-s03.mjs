@@ -570,7 +570,7 @@ function assertProfileShape(profile, expectedName = SMOKE_PROFILE_NAME) {
 }
 
 function assertCollectionShape(result, expectedProfileId) {
-  assert(result.storeVersion === 4, "Profile collection must use storeVersion 4.", { storeVersion: result.storeVersion });
+  assert([4, 5].includes(result.storeVersion), "Profile collection must use storeVersion 4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.profiles), "Profile collection profiles field is not an array.");
   assert(result.count === result.profiles.length, "Profile collection count mismatch.", {
     count: result.count,
@@ -650,7 +650,7 @@ function assertProxyValidationResult(result, expected) {
 }
 
 function assertProxyMutationResult(result, profileId, expected) {
-  assert(result.storeVersion === 4, "Proxy update did not preserve store v4.", { storeVersion: result.storeVersion });
+  assert([4, 5].includes(result.storeVersion), "Proxy update did not preserve store v4.", { storeVersion: result.storeVersion });
   assert(Array.isArray(result.profiles), "Proxy update did not return a profiles array.");
   assert(result.profile?.id === profileId, "Proxy update returned the wrong profile id.", {
     profileId: result.profile?.id,
@@ -681,7 +681,7 @@ function readProfilesJson(storeRoot) {
 
 function findPrivateProfile(storeRoot, profileId) {
   const { text, payload } = readProfilesJson(storeRoot);
-  assert(payload.storeVersion === 4, "profiles.json must remain a v4 profile-store payload.", {
+  assert([4, 5].includes(payload.storeVersion), "profiles.json must remain a v4 profile-store payload.", {
     storeVersion: payload.storeVersion,
   });
   assert(Array.isArray(payload.profiles), "profiles.json profiles field is not an array.");

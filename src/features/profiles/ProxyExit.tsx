@@ -4,6 +4,7 @@ import styles from "./ProxyExit.module.css";
 export interface ProxyCheckState {
   status: "pending" | "done" | "error";
   result?: ProxyCheckSnapshot;
+  checkedAt?: number;
 }
 
 export function ProxyExit({ direct, state, onCheck }: { direct: boolean; state?: ProxyCheckState; onCheck?: () => void }) {
@@ -17,7 +18,7 @@ export function ProxyExit({ direct, state, onCheck }: { direct: boolean; state?:
     {direct ? <span className={styles.direct}>No proxy · Direct</span> : null}
     {ip ? <span className={styles.exit}>
       {code ? <span className={styles.flag} role="img" aria-label={`${country} flag`} title={country ?? code}>{String.fromCodePoint(...[...code].map((letter) => 127397 + letter.charCodeAt(0)))}</span> : <span className={styles.flag} role="img" aria-label="Country unknown" title="Country unknown">?</span>}
-      <button className={styles.ip} type="button" disabled={!onCheck} title={`${direct ? "Direct public IP (no proxy)" : "Last checked public exit IP"}: ${ip}.${onCheck ? " Click to recheck." : ""}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onCheck?.(); }}>{ip}</button>
+      <button className={styles.ip} type="button" disabled={!onCheck} title={`${direct ? "Direct public IP (no proxy)" : "Last checked public exit IP"}: ${ip}.${state?.checkedAt ? ` Checked ${new Date(state.checkedAt).toLocaleString()}.` : ""}${onCheck ? " Click to recheck." : ""}`} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onCheck?.(); }}>{ip}</button>
     </span> : !direct || state ? <button className={styles.check} type="button" disabled={pending || !onCheck} title={state?.status === "error" ? "Proxy check failed. Verify the proxy configuration and connection, then retry." : undefined} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onCheck?.(); }}>{label}</button> : null}
   </span>;
 }

@@ -1,10 +1,14 @@
 mod automation_api;
+use tauri::{Manager, Emitter};
 mod diagnostics;
 mod events;
 #[cfg(target_os = "linux")]
 mod linux_webkit;
 mod sidecar;
 mod sidecar_pool;
+
+// Holding the handle holds the OS lock until the desktop process exits.
+struct DesktopInstanceLock(#[allow(dead_code)] std::fs::File);
 
 mod commands {
     use serde::Serialize;
@@ -33,14 +37,33 @@ pub fn run() {
     linux_webkit::configure();
 
     tauri::Builder::default()
+        .manage(sidecar::DesktopDataState::default())
         .manage(automation_api::AutomationApiSupervisor::new())
         // Sidecar workers are kept warm between commands, so the pool has to
         // outlive any single command. Dropping it stops every pooled process.
         .manage(std::sync::Arc::new(sidecar_pool::SidecarPool::new()))
+        .setup(|app| {
+            let root = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&root)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            #[cfg(windows)] { use std::os::windows::fs::OpenOptionsExt; options.share_mode(0); }
+            let file = options.open(root.join(".desktop.lock"))?;
+            #[cfg(unix)] {
+                use std::os::fd::AsRawFd;
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                    return Err("ThePrivator is already open for this data folder.".into());
+                }
+            }
+            app.manage(DesktopInstanceLock(file));
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::shell_status,
+            sidecar::desktop_data,
             automation_api::automation_api_start,
             automation_api::automation_api_status,
             automation_api::automation_api_copy_token,
@@ -92,6 +115,32 @@ pub fn run() {
             sidecar::legacy_scan_profiles,
             sidecar::legacy_import_profiles
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ThePrivator Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building ThePrivator Tauri application")
+        .run(|app, event| {
+            if !matches!(&event, tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::CloseRequested { .. }, .. } | tauri::RunEvent::ExitRequested { .. }) { return; }
+            let state = app.state::<sidecar::DesktopDataState>();
+            if state.exit_ready.load(std::sync::atomic::Ordering::SeqCst) { return; }
+            let protected = app.path().app_data_dir().map(|p| p.join("vault.json").exists()).unwrap_or(false);
+            let unlocked = state.key.try_read().map(|k| k.is_some()).unwrap_or(true);
+            if !protected || !unlocked { return; }
+            match event {
+                tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::CloseRequested { api, .. }, .. } => api.prevent_close(),
+                tauri::RunEvent::ExitRequested { api, .. } => api.prevent_exit(),
+                _ => return,
+            }
+            if state.closing.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let result = sidecar::desktop_data(handle.clone(), "vault.lock".into(), serde_json::json!({})).await;
+                let state = handle.state::<sidecar::DesktopDataState>();
+                if result.is_ok() {
+                    state.exit_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                    handle.exit(0);
+                } else {
+                    state.closing.store(false, std::sync::atomic::Ordering::SeqCst);
+                    let _ = handle.emit("theprivator://vault-close-failed", "The vault could not be locked. The app remains open; retry Lock in Settings.");
+                }
+            });
+        });
 }

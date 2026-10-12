@@ -114,6 +114,8 @@ run(PYTHON, [
   // dispatch); psutil is imported under a try/except so a miss degrades the
   // process-tree stop path silently instead of failing the build.
   "--hidden-import",
+  "theprivator_sidecar.vault",
+  "--hidden-import",
   "theprivator_sidecar.cdp",
   "--hidden-import",
   "theprivator_sidecar.proxy_bridge",

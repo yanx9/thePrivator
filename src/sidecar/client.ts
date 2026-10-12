@@ -3660,7 +3660,7 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
   assertNoForbiddenPublicProfileFields(record, field);
   requirePublicKeys(
     record,
-    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "organization", "launch", "lifecycle", "sync", "metadata"],
+    ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "organization", "launch", "lifecycle", "sync", "metadata", "proxyRevision"],
     ["id", "name", "createdAt", "updatedAt", "defaults", "storage", "identity", "proxy", "organization", "launch", "lifecycle", "sync"],
     field,
   );
@@ -3692,6 +3692,7 @@ function parseProfileRecord(value: unknown, field = "profile"): ProfileRecord {
     lifecycle: parseProfileLifecycle(record.lifecycle, `${field}.lifecycle`),
     sync: parseProfileSync(record.sync, `${field}.sync`),
     ...(metadata === undefined ? {} : { metadata }),
+    ...(record.proxyRevision === undefined ? {} : { proxyRevision: requireNonBlankString(record.proxyRevision, `${field}.proxyRevision`) }),
   };
 }
 
@@ -5169,12 +5170,12 @@ function containsControlCharactersOrDelete(value: string): boolean {
   });
 }
 
-function requireStoreVersion(value: unknown): 4 {
-  if (value !== 4) {
-    throw makeProtocolError("The sidecar profile result field storeVersion must be 4.");
+function requireStoreVersion(value: unknown): 4 | 5 {
+  if (value !== 4 && value !== 5) {
+    throw makeProtocolError("The sidecar profile result field storeVersion must be 4 or 5.");
   }
 
-  return 4;
+  return value;
 }
 
 function requireNonBlankString(value: unknown, field: string): string {
@@ -5678,3 +5679,44 @@ function formatRequestId(value: JsonScalar): string {
 function extractErrorMessage(_error: unknown): string {
   return "The Tauri bridge rejected the sidecar request before returning a typed error.";
 }
+
+export type ThemePreference = "system" | "light" | "dark";
+export interface VaultStatus { enabled: boolean; locked: boolean; recoveryRequired: boolean }
+export interface MachineInfo { platform: string; architecture: string; browserVersion: string | null }
+export interface StorageUsage { bytes: number; groups: { profiles: number; vault: number; other: number }; incomplete: boolean }
+
+async function desktopRequest(action: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  try {
+    const envelope = parseSuccessEnvelope(await invoke<unknown>("desktop_data", { action, params }));
+    return requireRecord(envelope.result, "desktop result");
+  } catch (error) { throw normalizeSidecarError(error); }
+}
+export interface Preferences { theme: ThemePreference; tableLayout?: unknown; sidebarCollapsed?: boolean }
+export async function getPreferences(): Promise<Preferences> {
+  const result = await desktopRequest("settings.get");
+  if (!["system", "light", "dark"].includes(String(result.theme))) throw makeProtocolError("Invalid saved theme.");
+  return { theme: result.theme as ThemePreference, tableLayout: result.tableLayout, sidebarCollapsed: result.sidebarCollapsed === true };
+}
+export async function savePreferences(theme: ThemePreference): Promise<void> { await desktopRequest("settings.save", { theme }); }
+export async function vaultOperation(action: "status" | "enable" | "unlock" | "lock" | "disable", password?: string): Promise<VaultStatus> {
+  const result = await desktopRequest(`vault.${action}`, password === undefined ? {} : { password });
+  if (typeof result.enabled !== "boolean" || typeof result.locked !== "boolean" || typeof result.recoveryRequired !== "boolean") throw makeProtocolError("Invalid vault status.");
+  return { enabled: result.enabled, locked: result.locked, recoveryRequired: result.recoveryRequired };
+}
+export async function getMachineInfo(): Promise<MachineInfo> {
+  const result = await desktopRequest("machine.info");
+  return { platform: requireNonBlankString(result.platform, "platform"), architecture: requireNonBlankString(result.architecture, "architecture"), browserVersion: result.browserVersion === null ? null : requireNonBlankString(result.browserVersion, "browser version") };
+}
+export async function getStorageUsage(): Promise<StorageUsage> {
+  const result = await desktopRequest("storage.usage");
+  const groups = requireRecord(result.groups, "storage groups");
+  for (const value of [result.bytes, groups.profiles, groups.vault, groups.other]) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw makeProtocolError("Invalid disk usage.");
+  }
+  return { bytes: result.bytes as number, groups: groups as StorageUsage["groups"], incomplete: result.incomplete === true };
+}
+export async function exportProfileToDirectory(profileId: string, directory: string): Promise<void> {
+  await desktopRequest("packages.export", { profileId, directory });
+}
+
+export async function saveInterfacePreferences(params: Pick<Preferences, "tableLayout" | "sidebarCollapsed">): Promise<void> { await desktopRequest("settings.save", params); }

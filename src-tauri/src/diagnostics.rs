@@ -94,6 +94,11 @@ impl DiagnosticStore {
     where
         I: IntoIterator<Item = Value>,
     {
+        // Do not recreate profile-store after sealing. Protected-session events
+        // remain in IPC responses; disk logging resumes when protection is off.
+        if self.app_data_root.join("vault.json").exists() {
+            return DiagnosticWriteOutcome { written: 0, skipped: 0, failed: false };
+        }
         let mut normalized = Vec::new();
         let mut skipped = 0;
         for event in events {

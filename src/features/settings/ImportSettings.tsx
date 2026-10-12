@@ -8,6 +8,7 @@ import {
   scanLegacyProfiles,
 } from "../../sidecar/client";
 import type { LegacyImportResult, LegacyScanResult, ProfilePackageImportResult } from "../../sidecar/types";
+import { BatchTransfer } from "../profiles/BatchTransfer";
 import styles from "./SettingsPage.module.css";
 
 /**
@@ -94,6 +95,7 @@ export function ImportSettings() {
 
   return (
     <div className={styles.page}>
+      <BatchTransfer />
       <header className={styles.header}>
         <h1>Import</h1>
         <p className={styles.lede}>

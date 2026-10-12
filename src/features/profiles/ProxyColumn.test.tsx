@@ -180,7 +180,7 @@ it("preserves checks across polling but invalidates changed proxy configuration 
  rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: changed, running: false }] }} />);
  expect(screen.queryByText("203.0.113.9")).not.toBeInTheDocument();
  expect(screen.getByRole("button", { name: "Check proxy" })).toBeInTheDocument();
- rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: { ...profile, sync: { ...profile.sync, revision: 2 } }, running: false }] }} />);
+ rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: { ...profile, proxyRevision: "changed-credentials" }, running: false }] }} />);
  expect(screen.queryByText("203.0.113.9")).not.toBeInTheDocument();
  expect(mockInvoke).toHaveBeenCalledTimes(1);
 });
@@ -189,7 +189,7 @@ it("discards an in-flight result after the profile proxy changes", async () => {
  mockInvoke.mockImplementation(() => new Promise((done) => { resolve = done; }));
  const { profile, props, rerender } = mount();
  fireEvent.click(screen.getByRole("button", { name: "Check proxy" }));
- rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: { ...profile, updatedAt: "2026-09-07T00:00:00Z" }, running: false }] }} />);
+ rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: { ...profile, proxyRevision: "changed-credentials" }, running: false }] }} />);
  await act(async () => resolve(result()));
  expect(screen.queryByText("203.0.113.9")).not.toBeInTheDocument();
  expect(screen.getByRole("button", { name: "Check proxy" })).toBeInTheDocument();
@@ -234,4 +234,14 @@ it("checks on demand through IPC and renders the public exit and accessible flag
  openMenu();
  expect(screen.getByRole("menuitem", { name: /Cookies/ })).toBeInTheDocument();
  expect(screen.getByRole("menuitem", { name: /Run Cookie Bot/ })).toBeInTheDocument();
+});
+
+it("retains a checked IP when tags, notes or launch history change", async () => {
+ mockInvoke.mockResolvedValue(result());
+ const { profile, props, rerender } = mount();
+ fireEvent.click(screen.getByRole("button", { name: "Check proxy" }));
+ await screen.findByText("203.0.113.9");
+ const updated = { ...profile, updatedAt: "2026-10-12T00:00:00Z", sync: { ...profile.sync, revision: 99 }, organization: { ...profile.organization, tags: ["new"], notes: "changed" }, lifecycle: { ...profile.lifecycle, launchCount: 1 } };
+ rerender(<ProfilesPage {...props} data={{ ...props.data, rows: [{ profile: updated, running: false }] }} />);
+ expect(screen.getByText("203.0.113.9")).toBeInTheDocument();
 });

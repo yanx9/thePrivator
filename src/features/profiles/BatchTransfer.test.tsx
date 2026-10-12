@@ -1,0 +1,30 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, expect, it, vi } from "vitest";
+import { BatchTransfer } from "./BatchTransfer";
+import { makeProfile } from "../../testing/profileFactory";
+const api = vi.hoisted(() => ({ exportProfileToDirectory: vi.fn(), importProfilePackage: vi.fn(), normalizeSidecarError: (e: Error) => ({ message: e.message }) }));
+const dialogs = vi.hoisted(() => ({ pickFiles: vi.fn(), pickDirectory: vi.fn() }));
+vi.mock("../../sidecar/client", () => api);
+vi.mock("../../dialogs", () => dialogs);
+beforeEach(() => { vi.clearAllMocks(); dialogs.pickFiles.mockResolvedValue(["/one.tpkg", "/two.tpkg"]); dialogs.pickDirectory.mockResolvedValue("/exports"); });
+it("imports multiple packages and preserves successes when another fails", async () => {
+ api.importProfilePackage.mockResolvedValueOnce({ importedProfileName: "One" }).mockRejectedValueOnce(new Error("Invalid package"));
+ const refreshed = vi.fn(); render(<BatchTransfer onImported={refreshed} />);
+ fireEvent.click(screen.getByRole("button", { name: "Import packages" }));
+ await screen.findByText("1 succeeded, 1 failed, 0 skipped.");
+ expect(screen.getByText("Imported One")).toBeInTheDocument();
+ expect(screen.getByText("Package 2: Invalid package")).toBeInTheDocument();
+ expect(refreshed).toHaveBeenCalledOnce();
+});
+it("cancels remaining exports after the current profile completes", async () => {
+ let finish!: () => void;
+ api.exportProfileToDirectory.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+ const profiles = [makeProfile({ name: "One" }), makeProfile({ id: "22222222-2222-2222-2222-222222222222", name: "Two" })];
+ render(<BatchTransfer rows={profiles.map((profile) => ({ profile, running: false }))} />);
+ fireEvent.click(screen.getByRole("button", { name: "Export all" }));
+ await waitFor(() => expect(api.exportProfileToDirectory).toHaveBeenCalledOnce());
+ fireEvent.click(screen.getByRole("button", { name: "Cancel remaining" }));
+ await act(async () => finish());
+ expect(screen.getByRole("status")).toHaveTextContent("1 succeeded, 0 failed, 1 skipped · Cancelled");
+ expect(api.exportProfileToDirectory).toHaveBeenCalledOnce();
+});

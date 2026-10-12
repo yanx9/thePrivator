@@ -17,6 +17,8 @@ import {
   updateProfileOrganization,
 } from "../../sidecar/client";
 import type { SidecarClientError } from "../../sidecar/types";
+import { usePreferences } from "../../app/DesktopSession";
+import { BatchTransfer } from "./BatchTransfer";
 import { CookieBotDialog } from "./CookieBotDialog";
 import { ColumnManager } from "./ColumnManager";
 import { ProfileTable } from "./ProfileTable";
@@ -27,6 +29,7 @@ import {
   type ColumnLayout,
   DEFAULT_SORT,
   defaultLayout,
+  reconcileLayout,
   nextSort,
   setColumnWidth,
 } from "./columns";
@@ -114,9 +117,18 @@ export function ProfilesPage({
 }: ProfilesPageProps) {
   const { rows, trashed, loading, error, refresh } = data;
 
-  const { states: proxyChecks, check: onCheckProxy } = useProxyChecks(rows);
+  const localChecks = useProxyChecks(data.proxyChecks ? [] : rows);
+  const { states: proxyChecks, check: onCheckProxy } = data.proxyChecks ?? localChecks;
 
-  const [layout, setLayout] = useState<ColumnLayout>(defaultLayout);
+  const preferences = usePreferences();
+  const [layout, setLayout] = useState<ColumnLayout>(() => preferences ? reconcileLayout(preferences.preferences.tableLayout) : defaultLayout());
+  const savedLayout = useRef(layout);
+  const savePreferences = preferences?.save;
+  useEffect(() => {
+    if (!savePreferences || JSON.stringify(savedLayout.current) === JSON.stringify(layout)) return;
+    const timer = window.setTimeout(() => { savedLayout.current = layout; savePreferences({ tableLayout: layout }); }, 350);
+    return () => window.clearTimeout(timer);
+  }, [layout, savePreferences]);
   const [sort, setSort] = useState(DEFAULT_SORT);
   const [selection, setSelection] = useState<SelectionState>(EMPTY_SELECTION);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -374,6 +386,8 @@ export function ProfilesPage({
           ) : null}
         </div>
       </div>
+
+      {view !== "trash" ? <BatchTransfer rows={rows} selectedIds={selectedIds} onImported={refresh} /> : null}
 
       {error !== null ? (
         <p className={styles.error} role="alert">

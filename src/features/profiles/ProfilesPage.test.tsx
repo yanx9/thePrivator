@@ -247,19 +247,12 @@ it.each(["Edit tags…", "Move to folder…"])("applies bulk %s to every selecte
   }
 });
 
-it("retains failed notes for retry and cancels without saving", async () => {
-  const profile = record(ALPHA, "Alpha");
-  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]),
-    profiles_organization_update: () => Promise.reject(bridgeError("STORE_WRITE_FAILED", "Could not save notes.")) });
+it("keeps empty notes read only in the table", async () => {
+  respond({ profiles_list: () => listResult([record(ALPHA, "Alpha")]), chromium_status: () => statusResult([]) });
   renderPage();
-  const notes = await screen.findByRole("textbox", { name: "Notes for Alpha" });
-  fireEvent.change(notes, { target: { value: "Unsaved draft" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save notes for Alpha" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save notes.");
-  expect(notes).toHaveValue("Unsaved draft");
-  fireEvent.click(screen.getByRole("button", { name: "Cancel notes for Alpha" }));
-  expect(notes).toHaveValue("");
-  expect(mockInvoke.mock.calls.filter(([command]) => command === "profiles_organization_update")).toHaveLength(1);
+  await screen.findByText("Alpha");
+  expect(screen.queryByRole("textbox", { name: "Notes for Alpha" })).not.toBeInTheDocument();
+  expect(mockInvoke.mock.calls.filter(([command]) => command === "profiles_organization_update")).toHaveLength(0);
 });
 
 it("keeps rejected tag edits visible for correction", async () => {
@@ -277,28 +270,18 @@ it("keeps rejected tag edits visible for correction", async () => {
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-it("saves notes directly in the default main table without opening the editor", async () => {
-  let profile = record(ALPHA, "Alpha");
-  mockInvoke.mockImplementation(async (command, args) => {
-    if (command === "profiles_list") return listResult([profile]);
-    if (command === "chromium_status") return statusResult([]);
-    if (command === "profiles_organization_update") {
-      profile = { ...profile, organization: (args as { organization: typeof profile.organization }).organization };
-      return envelope({ storeVersion: 4, profile, profiles: [profile], count: 1 });
-    }
-    throw new Error(`Unexpected ${command}`);
-  });
+it("opens a read-only note bubble and dismisses it with Escape", async () => {
+  const profile = record(ALPHA, "Alpha");
+  profile.organization.notes = "Keep this note";
+  respond({ profiles_list: () => listResult([profile]), chromium_status: () => statusResult([]) });
   const { onOpenProfile } = renderPage();
-  const notes = await screen.findByRole("textbox", { name: "Notes for Alpha" });
-  fireEvent.doubleClick(notes);
-  fireEvent.change(notes, { target: { value: "Keep this\n<script>as text</script>" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save notes for Alpha" }));
-  await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("profiles_organization_update", {
-    profileId: ALPHA, organization: { ...profile.organization, notes: "Keep this\n<script>as text</script>" },
-  }));
+  const note = await screen.findByRole("button", { name: "Notes for Alpha" });
+  fireEvent.click(note);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("Keep this note");
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   expect(onOpenProfile).not.toHaveBeenCalled();
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Save notes for Alpha" })).not.toBeInTheDocument());
-  expect(notes).toHaveValue("Keep this\n<script>as text</script>");
+  expect(mockInvoke.mock.calls.filter(([command]) => command === "profiles_organization_update")).toHaveLength(0);
 });
 
 it("exports cookies to the chosen file and reports skipped cookies", async () => {

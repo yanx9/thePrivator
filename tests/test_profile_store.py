@@ -151,10 +151,8 @@ def public_equivalent_for_store_profile(store_profile: Mapping[str, Any], public
 
 
 def test_empty_store_returns_versioned_empty_collection(tmp_path):
-    # Bumped once for the whole roadmap: each version change costs ~30 coordinated
-    # edits across four languages, so organization, launch, lifecycle and sync all
-    # landed together rather than one release at a time.
-    assert STORE_VERSION == 4
+    # Version 5 adds a durable proxy revision without discarding v4 metadata.
+    assert STORE_VERSION == 5
     result = ProfileStore(tmp_path).list()
 
     assert result == {"storeVersion": STORE_VERSION, "profiles": [], "count": 0}

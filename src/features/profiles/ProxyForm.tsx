@@ -1,4 +1,6 @@
-import { useId } from "react";
+import { useId, useState, type ClipboardEvent } from "react";
+
+import { parseProxyClipboard } from "../../proxyClipboard";
 
 import {
   DEFAULT_PROXY_PROTOCOL,
@@ -18,7 +20,10 @@ interface ProxyFormProps {
 }
 
 export function ProxyForm({ draft, onChange }: ProxyFormProps) {
+  const [clipboardText, setClipboardText] = useState("");
+  const [clipboardError, setClipboardError] = useState<string | null>(null);
   const ids = {
+    clipboard: useId(),
     mode: useId(),
     protocol: useId(),
     host: useId(),
@@ -27,8 +32,61 @@ export function ProxyForm({ draft, onChange }: ProxyFormProps) {
     password: useId(),
   };
 
+  function applyClipboard(text: string) {
+    const result = parseProxyClipboard(text, draft);
+    setClipboardError(result.ok ? null : result.error);
+    if (result.ok) {
+      onChange(result.draft);
+      setClipboardText("");
+    }
+  }
+
+  function pasteProxy(event: ClipboardEvent<HTMLInputElement>, hostOnly = false) {
+    const text = event.clipboardData.getData("text");
+    if (hostOnly && !/[:@\s,;|]/.test(text.trim())) return;
+    if (hostOnly && text.includes(":")) {
+      try {
+        // A bare IPv6 address is still a normal manual Host paste.
+        new URL(`http://[${text}]/`);
+        return;
+      } catch {
+        // A complete proxy should be parsed into its individual fields.
+      }
+    }
+    event.preventDefault();
+    applyClipboard(text);
+  }
+
   return (
     <div className={styles.form}>
+      <section className={styles.surface}>
+        <div className={styles.field}>
+          <label htmlFor={ids.clipboard}>Paste proxy</label>
+          <input
+            id={ids.clipboard}
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="protocol://user:pass@host:port"
+            value={clipboardText}
+            aria-invalid={clipboardError !== null}
+            aria-describedby={`${ids.clipboard}-hint${clipboardError ? ` ${ids.clipboard}-error` : ""}`}
+            onChange={(event) => { setClipboardText(event.target.value); setClipboardError(null); }}
+            onPaste={(event) => pasteProxy(event)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") { event.preventDefault(); applyClipboard(clipboardText); }
+            }}
+          />
+          <p id={`${ids.clipboard}-hint`} className={styles.hint}>
+            Paste to fill the fields below, or type and press Enter. Accepts host:port,
+            host:port:user:pass, user:pass@host:port, and space-, tab-, comma-, semicolon-, or pipe-separated fields.
+            Without a protocol, uses the selected protocol (HTTP by default). Without credentials, removes authentication.
+          </p>
+          {clipboardError === null ? null : (
+            <p id={`${ids.clipboard}-error`} className={styles.error} role="alert">{clipboardError}</p>
+          )}
+        </div>
+      </section>
       <section className={styles.surface} aria-labelledby={`${ids.mode}-heading`}>
         <div className={styles.surfaceHead}>
           <h3 id={`${ids.mode}-heading`}>Connection</h3>
@@ -80,6 +138,7 @@ export function ProxyForm({ draft, onChange }: ProxyFormProps) {
                 id={ids.host}
                 type="text"
                 value={draft.host}
+                onPaste={(event) => pasteProxy(event, true)}
                 aria-invalid={draft.errors.host !== undefined}
                 onChange={(event) => onChange(updateProxyDraftField(draft, "host", event.target.value))}
               />

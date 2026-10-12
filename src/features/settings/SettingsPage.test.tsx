@@ -89,15 +89,17 @@ describe("Appearance", () => {
     expect(screen.getByRole("radio", { name: /match the system/i })).toBeChecked();
   });
 
-  it("stamps an explicit choice onto the document", () => {
+  it("persists an explicit choice before applying it", async () => {
+    respond({ desktop_data: () => envelope({ theme: "dark" }) });
     render(<SettingsPage section="appearance" />);
 
     fireEvent.click(screen.getByRole("radio", { name: /^dark/i }));
 
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    await waitFor(() => expect(document.documentElement.getAttribute("data-theme")).toBe("dark"));
   });
 
-  it("removes the attribute rather than writing 'system' onto it", () => {
+  it("removes the attribute rather than writing 'system' onto it", async () => {
+    respond({ desktop_data: () => envelope({ theme: "system" }) });
     // The token layer distinguishes "no attribute" (follow prefers-color-scheme)
     // from an explicit choice. A third value would match neither rule.
     document.documentElement.setAttribute("data-theme", "light");
@@ -105,7 +107,7 @@ describe("Appearance", () => {
 
     fireEvent.click(screen.getByRole("radio", { name: /match the system/i }));
 
-    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+    await waitFor(() => expect(document.documentElement.hasAttribute("data-theme")).toBe(false));
   });
 });
 

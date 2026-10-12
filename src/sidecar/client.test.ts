@@ -2764,7 +2764,7 @@ describe("sidecar client", () => {
     ["stale v1 store version", profileEnvelope(profileResult({ storeVersion: 1 }))],
     ["stale v2 store version", profileEnvelope(profileResult({ storeVersion: 2 }))],
     ["stale v3 store version", profileEnvelope(profileResult({ storeVersion: 3 }))],
-    ["store version newer than this build", profileEnvelope(profileResult({ storeVersion: 5 }))],
+    ["store version newer than this build", profileEnvelope(profileResult({ storeVersion: 99 }))],
     ["wrong profiles item type", profileEnvelope(profileResult({ profiles: ["not-a-profile"] }))],
     ["missing defaults", profileEnvelope(profileResult({ profiles: [profileRecord({ defaults: undefined })] }))],
     ["missing identity", profileEnvelope(profileResult({ profiles: [profileRecord({ identity: undefined })] }))],

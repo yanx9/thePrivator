@@ -11,7 +11,7 @@ export type ProfileView = "all" | "favorites" | "running" | "trash";
 
 export type EditorSection = "general" | "proxy" | "fingerprint" | "extra" | "tools";
 
-export type SettingsSection = "appearance" | "sync" | "diagnostics" | "import";
+export type SettingsSection = "appearance" | "sync" | "diagnostics" | "import" | "security" | "storage";
 
 export type Route =
   | { name: "profiles"; view: ProfileView; folderId: string | null }
@@ -24,7 +24,7 @@ export type Route =
 export const DEFAULT_ROUTE: Route = { name: "profiles", view: "all", folderId: null };
 
 const PROFILE_VIEWS: readonly ProfileView[] = ["all", "favorites", "running", "trash"];
-const SETTINGS_SECTIONS: readonly SettingsSection[] = ["appearance", "sync", "diagnostics", "import"];
+const SETTINGS_SECTIONS: readonly SettingsSection[] = ["appearance", "sync", "diagnostics", "import", "security", "storage"];
 
 /**
  * Ids come out of the address bar, so they are treated as untrusted input and

@@ -43,6 +43,60 @@ a folder your own sync client already keeps up to date.
   listens on loopback and needs an access token, which is never displayed —
   copying puts it on the clipboard and nowhere else.
 
+## Profile tools and saved preferences
+
+Use **Import packages**, **Export selected**, or **Export all** above the table
+for batch `.tpkg` transfer. Each profile reports its own result; cancelling skips
+remaining profiles after the current operation finishes. Stop browsers before
+exporting. Packages omit proxy passwords and are separate from vault protection.
+
+Paste `host:port:user:pass` into **Paste proxy** or the proxy Host field to fill
+all credentials. Proxy checks survive tag, note and other unrelated edits;
+changing the endpoint or credentials invalidates the previous check.
+
+The **Platform** column summarizes the configured OS, architecture and browser
+version. Hover or focus a note to read it, click to pin it, and press Escape to
+close it. Edit notes in the profile's **General** settings. Launch history updates
+only after successful starts. **App data** in the footer opens a disk usage
+breakdown. Appearance, column layout and sidebar preferences are saved locally.
+
+**Compatible managed** keeps the actual browser/device identity and uses
+Chromium's native non-proxied WebRTC restriction, without identity scripts or
+DevTools overrides. It is a compatibility option for sites that reject modified
+fingerprints, including Google sign-in; acceptance still depends on the site.
+API-generated fingerprints remain available in both profile creation and editing.
+
+## Optional encrypted storage
+
+Enable protection under **Settings → Data protection**, using a PIN or password
+of at least six characters. A longer password is preferable to a short PIN.
+Enabling protection immediately locks the library. **Lock now** and normal app
+exit stop browsers, jobs and the app-owned automation server before sealing data.
+An independently started automation server must be stopped before locking.
+
+The vault covers the local profile store (including proxy credentials, notes,
+Chromium cookies and session files) and local sync configuration. Appearance
+preferences remain available on the unlock screen. Copies exported or synced
+elsewhere are not encrypted by this setting. Protection is off by default;
+proxy credentials are then stored as plaintext with restricted file permissions.
+
+Chromium needs decrypted files while the app is unlocked. A crash, power loss or
+forced termination can leave those files on disk. On the next start, enter the
+password to recover the latest session, then lock again. Full-disk encryption
+is needed to protect an interrupted unlocked session. Deletion does not promise
+secure erasure of previous disk blocks, backups or filesystem snapshots.
+There is no forgotten-password reset.
+
+Internally, a random 256-bit data key is wrapped with a scrypt-derived key
+(N=131072, r=8, p=1, random salt). AES-GCM authenticates both the wrapped key and
+the streaming archive. Snapshots are verified before plaintext is removed;
+restore verifies the archive before extracting it. Interrupted cleanup retains
+the complete encrypted snapshot. Vault keys are kept in native process memory
+and private sidecar IPC, and never returned to the UI or written to disk.
+Persistent diagnostic logging is suspended while vault protection is enabled.
+The profile store migrates version 4 to version 5 while retaining existing data;
+older application builds must not be used to write the migrated library.
+
 ## Cookies from the profile menu
 
 Right-click a profile and open **Cookies** to import or export without leaving
@@ -101,6 +155,19 @@ npm run tauri build
 ```
 
 Installers land in `src-tauri/target/release/bundle/`.
+
+For distributable Linux builds, use the Ubuntu 22.04 container so newer host
+libraries do not make the bundled Python runtime incompatible with Linux Mint:
+
+```bash
+bash scripts/linux/build.sh
+```
+
+This requires Docker, builds Linux x86-64 `.deb` and `.rpm` packages, and writes
+them with checksums to `dist/linux/`. The container targets Ubuntu 22.04 / Mint 21
+and newer. A native build on a rolling-release distribution is only suitable for
+that host unless tested against the intended older runtime.
+
 
 On macOS, build with `npm run tauri build -- --bundles app,dmg`. The sidecar
 uses a directory-based Python runtime in `Contents/Frameworks`, avoiding

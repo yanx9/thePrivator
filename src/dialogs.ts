@@ -72,3 +72,11 @@ export async function pickSaveTarget(title: string, filters?: FileFilter[]): Pro
 }
 
 export type { FileFilter };
+
+/** Choose multiple profile packages. */
+export async function pickFiles(title: string, filters?: FileFilter[]): Promise<string[]> {
+  const module = (await import("@tauri-apps/plugin-dialog")) as DialogModule;
+  if (!module.open) throw new Error("File picker unavailable.");
+  const selection = await module.open({ multiple: true, title, filters });
+  return Array.isArray(selection) ? selection : typeof selection === "string" ? [selection] : [];
+}

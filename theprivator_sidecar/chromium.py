@@ -1237,6 +1237,7 @@ def _launch_registered(
         updated = dict(active)
         updated[profile.id] = record
         registry.write(updated, error_code=error_code)
+        ProfileStore(store_root).record_launch(profile.id, record.started_at)
     except SidecarError:
         if process is not None:
             _stop_child_after_failed_launch(process.pid)

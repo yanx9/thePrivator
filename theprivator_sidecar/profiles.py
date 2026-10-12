@@ -46,8 +46,8 @@ from .protocol import (
     SidecarError,
 )
 
-STORE_VERSION = 4
-SUPPORTED_READ_STORE_VERSIONS = frozenset({1, 2, 3, STORE_VERSION})
+STORE_VERSION = 5
+SUPPORTED_READ_STORE_VERSIONS = frozenset({1, 2, 3, 4, STORE_VERSION})
 DEVICE_FILE = "device.json"
 STORE_DIR = "profile-store"
 PROFILES_DIR = "profiles"
@@ -117,6 +117,7 @@ class ProfileRecord:
     identity: JsonObject
     proxy: JsonObject = field(default_factory=default_proxy_config)
     metadata: Optional[JsonObject] = None
+    proxyRevision: str = "initial"
     organization: JsonObject = field(default_factory=default_organization)
     launch: JsonObject = field(default_factory=default_launch)
     lifecycle: JsonObject = field(default_factory=default_lifecycle)
@@ -217,12 +218,13 @@ class ProfileRecord:
             "defaults",
             "storage",
             "metadata",
+            "proxyRevision",
         }
         if store_version >= 2:
             allowed_fields.add("identity")
         if store_version >= 3:
             allowed_fields.add("proxy")
-        if store_version >= STORE_VERSION:
+        if store_version >= 4:
             allowed_fields.update({"organization", "launch", "lifecycle", "sync"})
         if set(data) - allowed_fields:
             raise_corrupt_store()
@@ -262,16 +264,16 @@ class ProfileRecord:
 
         # Sections a pre-v4 record never had; a migrated profile starts them at
         # their inert defaults rather than inventing content.
-        launch = normalize_profile_launch(data.get("launch")) if store_version >= STORE_VERSION else default_launch()
+        launch = normalize_profile_launch(data.get("launch")) if store_version >= 4 else default_launch()
         organization = (
-            normalize_organization(data.get("organization")) if store_version >= STORE_VERSION else default_organization()
+            normalize_organization(data.get("organization")) if store_version >= 4 else default_organization()
         )
         lifecycle = (
-            normalize_lifecycle(data.get("lifecycle")) if store_version >= STORE_VERSION else default_lifecycle()
+            normalize_lifecycle(data.get("lifecycle")) if store_version >= 4 else default_lifecycle()
         )
         sync = (
             normalize_sync(data.get("sync"), device_id=local_device_id())
-            if store_version >= STORE_VERSION
+            if store_version >= 4
             else default_sync(local_device_id())
         )
 
@@ -288,7 +290,12 @@ class ProfileRecord:
         if PurePosixPath(expected_storage["userDataDir"]).is_absolute():
             raise_corrupt_store()
 
+        revision = data.get("proxyRevision", "initial")
+        if not isinstance(revision, str) or len(revision) > 64:
+            raise_corrupt_store()
+
         return cls(
+            proxyRevision=revision,
             id=profile_id,
             name=name,
             createdAt=created_at,
@@ -345,7 +352,7 @@ class ProfileRecord:
         return self._evolve(identity=identity, device_id=device_id)
 
     def with_proxy(self, proxy: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
-        return self._evolve(proxy=proxy, device_id=device_id)
+        return self._evolve(proxy=proxy, proxyRevision=uuid.uuid4().hex if normalize_proxy_config(proxy) != self.proxy else self.proxyRevision, device_id=device_id)
 
     def with_organization(self, organization: Mapping[str, Any], *, device_id: Optional[str] = None) -> "ProfileRecord":
         return self._evolve(organization=organization, device_id=device_id)
@@ -378,6 +385,7 @@ class ProfileRecord:
             "storage": asdict(self.storage),
             "identity": normalize_profile_identity(self.identity),
             "proxy": proxy,
+            "proxyRevision": self.proxyRevision,
             "organization": normalize_organization(self.organization),
             "launch": normalize_profile_launch(self.launch),
             "lifecycle": normalize_lifecycle(self.lifecycle),
@@ -399,6 +407,7 @@ class ProfileRecord:
             "storage": asdict(self.storage),
             "identity": normalize_profile_identity(self.identity),
             "proxy": public_proxy_summary(proxy),
+            "proxyRevision": self.proxyRevision,
             "organization": normalize_organization(self.organization),
             "launch": normalize_profile_launch(self.launch),
             "lifecycle": normalize_lifecycle(self.lifecycle),
@@ -656,6 +665,15 @@ class ProfileStore:
         )
         self._write_profiles(updated_profiles)
         return self._collection_response(updated_profiles, profile=updated)
+
+    def record_launch(self, profile_id: str, launched_at: str) -> None:
+        """Persist successful launches; failed starts never call this method."""
+        profiles = self._read_profiles()
+        target = self._find_profile(profiles, profile_id)
+        updated = target._evolve(lifecycle={**target.lifecycle,
+            "lastLaunchedAt": launched_at, "launchCount": target.lifecycle["launchCount"] + 1},
+            device_id=self.device_id)
+        self._write_profiles([updated if p.id == profile_id else p for p in profiles])
 
     def update_organization(self, profile_id: str, organization: Mapping[str, Any]) -> JsonObject:
         """Replace one profile's folder, tags, notes, favourite flag and colour.
@@ -1092,7 +1110,7 @@ def defaults_for_store_version(store_version: int, *, proxy: Any, identity: Any,
     older record look tampered with. Tamper detection therefore survives at every
     version instead of being switched off for the ones being migrated.
     """
-    if store_version >= STORE_VERSION:
+    if store_version >= 4:
         return derive_defaults(proxy=proxy, identity=identity, launch=launch)
     return ProfileDefaults(proxyMode=normalize_proxy_config(proxy)["mode"])
 

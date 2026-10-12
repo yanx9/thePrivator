@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { savePreferences, normalizeSidecarError } from "../../sidecar/client";
 import styles from "./SettingsPage.module.css";
 
 export type ThemeChoice = "system" | "light" | "dark";
@@ -23,13 +24,18 @@ function currentTheme(): ThemeChoice {
 }
 
 export function AppearanceSettings() {
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [theme, setTheme] = useState<ThemeChoice>(currentTheme);
 
   useEffect(() => {
     setTheme(currentTheme());
   }, []);
 
-  const choose = useCallback((choice: ThemeChoice) => {
+  const choose = useCallback(async (choice: ThemeChoice) => {
+    setSaving(true); setError("");
+    try {
+      await savePreferences(choice);
     if (choice === "system") {
       // Removed, not set to "system": the token layer distinguishes "no
       // attribute" (follow prefers-color-scheme) from an explicit choice, and a
@@ -39,6 +45,8 @@ export function AppearanceSettings() {
       document.documentElement.setAttribute("data-theme", choice);
     }
     setTheme(choice);
+    } catch (caught) { setError(normalizeSidecarError(caught).message); }
+    finally { setSaving(false); }
   }, []);
 
   return (
@@ -48,6 +56,7 @@ export function AppearanceSettings() {
         <p className={styles.lede}>How ThePrivator looks on this device.</p>
       </header>
 
+      {error ? <p role="alert">{error}</p> : null}
       <section className={styles.card} aria-labelledby="theme-heading">
         <h2 id="theme-heading">Theme</h2>
 
@@ -59,6 +68,7 @@ export function AppearanceSettings() {
                 name="theme"
                 value={entry.id}
                 checked={theme === entry.id}
+                disabled={saving}
                 onChange={() => choose(entry.id)}
               />
               <span>

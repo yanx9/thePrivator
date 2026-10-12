@@ -1,6 +1,9 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 
+import { usePreferences } from "./app/DesktopSession";
+import { getStorageUsage } from "./sidecar/client";
+import { formatBytes } from "./features/settings/StorageSettings";
 import { type Route, primaryNavKeyForRoute } from "./app/routes";
 import { useNavigate, useRoute } from "./app/useRoute";
 import { ProfileEditor } from "./features/profiles/ProfileEditor";
@@ -76,10 +79,23 @@ function renderDestination(route: Route, context: DestinationContext) {
 export function App() {
   const route = useRoute();
   const navigate = useNavigate();
+  const [diskUsage, setDiskUsage] = useState("Measuring…");
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number;
+    async function refreshDisk() {
+      try { const usage = await getStorageUsage(); if (!cancelled) setDiskUsage(`${usage.incomplete ? "≥ " : ""}${formatBytes(usage.bytes)}`); }
+      catch { if (!cancelled) setDiskUsage("Unavailable"); }
+      if (!cancelled) timer = window.setTimeout(() => void refreshDisk(), 60_000);
+    }
+    void refreshDisk();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, []);
   const [search, setSearch] = useState("");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const preferences = usePreferences();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(preferences?.preferences.sidebarCollapsed ?? false);
 
-  const toggleSidebar = useCallback(() => setSidebarCollapsed((collapsed) => !collapsed), []);
+  const toggleSidebar = useCallback(() => { const next = !sidebarCollapsed; setSidebarCollapsed(next); preferences?.save({ sidebarCollapsed: next }); }, [sidebarCollapsed, preferences]);
 
   // One loader for the whole window: the sidebar counts the same profiles the
   // table lists, and a second loader would poll twice and could disagree.
@@ -112,6 +128,7 @@ export function App() {
 
   const statusTiles = useMemo<StatusTile[]>(
     () => [
+      { key: "disk", label: "App data", value: diskUsage, onSelect: () => navigate({ name: "settings", section: "storage" }) },
       { key: "profiles", label: "Profiles", value: String(data.rows.length) },
       {
         key: "running",
@@ -126,7 +143,7 @@ export function App() {
         tone: data.error === null ? "ok" : "danger",
       },
     ],
-    [data.rows.length, data.runningCount, data.error],
+    [data.rows.length, data.runningCount, data.error, diskUsage, navigate],
   );
 
   const destination = primaryNavKeyForRoute(route);
