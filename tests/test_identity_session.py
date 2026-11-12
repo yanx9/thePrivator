@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.process_helpers import wait_for_document
 
 from theprivator_sidecar.identity_session import IdentitySession, start_identity_session, emulation_commands
 from theprivator_sidecar.protocol import SidecarError
@@ -104,6 +105,7 @@ def test_real_chromium_retains_generated_identity_across_tabs_and_http(tmp_path,
         for target in [discover_page_target_endpoint(endpoint), create_page_target_endpoint(endpoint)]:
             with CdpClient(target.web_socket_debugger_url) as client:
                 page_navigate(client, url)
+                wait_for_document(client, url)
                 result = runtime_evaluate(client, '({ua:navigator.userAgent,platform:navigator.platform,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})')
                 assert result == {'ua': identity['browser']['userAgent'], 'platform': 'Win32', 'tz': identity['locale']['timezoneId']}
                 frame = runtime_evaluate(client, "new Promise(resolve => {if(window.frameResult) return resolve(window.frameResult);addEventListener('message', e => resolve(e.data), {once:true});setTimeout(()=>resolve(null),3000)})")
@@ -111,6 +113,7 @@ def test_real_chromium_retains_generated_identity_across_tabs_and_http(tmp_path,
                 assert browser.poll() is None
                 # Reload re-creates renderer/frame targets and must also survive.
                 page_navigate(client, url + '?reload')
+                wait_for_document(client, url + '?reload')
                 frame = runtime_evaluate(client, "new Promise(resolve => {if(window.frameResult) return resolve(window.frameResult);addEventListener('message', e => resolve(e.data), {once:true});setTimeout(()=>resolve(null),3000)})")
                 assert frame == {'platform': 'Win32', 'tz': identity['locale']['timezoneId']}
                 assert browser.poll() is None

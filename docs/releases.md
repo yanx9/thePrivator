@@ -62,7 +62,7 @@ security exception. Full signing can be enabled through repository Actions secre
 | `WINDOWS_CERTIFICATE` | Optional base64-encoded code-signing PFX usable by the runner |
 | `WINDOWS_CERTIFICATE_PASSWORD` | Password for that PFX |
 
-Tauri imports the Apple identity before its build hook. The hook signs the Python
+The workflow imports the Apple identity before Tauri's build hook. The hook signs the Python
 runtime with the same identity before bundling. Windows imports the PFX only for
 the job and removes it afterwards. Hardware/cloud-backed Windows signing services
 need their own provider integration instead of the optional PFX path.

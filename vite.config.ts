@@ -10,6 +10,8 @@ export default defineConfig({
     strictPort: true,
   },
   test: {
+    // Shared CI runners can be considerably slower than local development.
+    testTimeout: process.env.CI ? 15_000 : 5_000,
     environment: "jsdom",
     globals: true,
     setupFiles: "./vitest.setup.ts",

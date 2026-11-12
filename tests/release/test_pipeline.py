@@ -7,8 +7,29 @@ import unittest
 from scripts.release.prepare import release_plan
 from scripts.release.assets import assemble, collect
 from scripts.release.arch import render
+from scripts.release.configure import apple_environment
 
 SHA = 'a' * 40
+
+
+class SigningEnvironmentTests(unittest.TestCase):
+    def test_absent_or_empty_secrets_do_not_request_certificate_import(self):
+        self.assertEqual(apple_environment({}), {})
+        self.assertEqual(apple_environment({key: '' for key in (
+            'APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY',
+            'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')}), {})
+
+    def test_imported_identity_is_forwarded_without_p12_credentials(self):
+        self.assertEqual(apple_environment({
+            'APPLE_CERTIFICATE': 'base64', 'APPLE_CERTIFICATE_PASSWORD': 'secret',
+            'APPLE_SIGNING_IDENTITY': 'Developer ID Application: Example',
+        }), {'APPLE_SIGNING_IDENTITY': 'Developer ID Application: Example'})
+
+    def test_incomplete_signing_or_notarization_fails_early(self):
+        for environment in ({'APPLE_SIGNING_IDENTITY': 'Example'},
+                            {'APPLE_CERTIFICATE': 'base64'}, {'APPLE_ID': 'example'}):
+            with self.subTest(environment=environment), self.assertRaises(ValueError):
+                apple_environment(environment)
 
 
 class ReleasePlanTests(unittest.TestCase):

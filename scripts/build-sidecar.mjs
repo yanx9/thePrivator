@@ -107,7 +107,7 @@ run(PYTHON, [
   "--noconfirm",
   "--clean",
   process.platform === "darwin" ? "--onedir" : "--onefile",
-  // tauri-action imports the signing identity before the release build hook runs.
+  // The release workflow imports the identity before this build hook runs.
   ...(process.platform === "darwin" && process.env.APPLE_SIGNING_IDENTITY
     ? ["--codesign-identity", process.env.APPLE_SIGNING_IDENTITY]
     : []),
