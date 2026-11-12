@@ -107,6 +107,10 @@ run(PYTHON, [
   "--noconfirm",
   "--clean",
   process.platform === "darwin" ? "--onedir" : "--onefile",
+  // tauri-action imports the signing identity before the release build hook runs.
+  ...(process.platform === "darwin" && process.env.APPLE_SIGNING_IDENTITY
+    ? ["--codesign-identity", process.env.APPLE_SIGNING_IDENTITY]
+    : []),
   "--name",
   SIDECAR_NAME,
   // Lazily-imported modules PyInstaller's static analysis can miss. cdp and

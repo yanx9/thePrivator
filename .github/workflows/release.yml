@@ -1,46 +1,88 @@
 name: Release
 
-# Platform runners, because the sidecar decides.
-#
-# scripts/build-sidecar.mjs packs the Python sidecar with PyInstaller and names
-# the binary after `rustc --print host-tuple`. PyInstaller bundles the host's
-# interpreter and its native libraries -- it has no cross-compilation mode at
-# all. A macOS sidecar can therefore only be produced on macOS and a Windows one
-# only on Windows, whatever the Rust side could manage. That is the constraint
-# this matrix exists for, not a preference.
 on:
+  push:
+    branches: [master, "3.*"]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/release/**"
+      - "scripts/build-sidecar.mjs"
+      - "packaging/**"
+      - "tests/release/**"
+      - "src-tauri/tauri*.json"
   workflow_dispatch:
     inputs:
+      channel:
+        description: "Artifacts only, development prerelease, or versioned release"
+        type: choice
+        options: [artifacts, nightly, release]
+        default: artifacts
       tag:
-        description: "Tag to publish under, e.g. v3.0.0. Leave blank to build artifacts only."
-        required: false
+        description: "Existing vX.Y.Z tag to build (release channel only); blank uses the selected ref"
         type: string
-  push:
-    tags: ["v*"]
+        required: false
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.channel != 'release' }}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      publish: ${{ steps.plan.outputs.publish }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      tag: ${{ steps.plan.outputs.tag }}
+      aur: ${{ steps.plan.outputs.aur }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Verify release tooling
+        run: |
+          python -m unittest discover -s tests/release -p 'test_*.py'
+          node --test tests/release/publish.node.cjs
+          bash scripts/release/check-workflows.sh
+          node scripts/verify-release.mjs
+      - name: Resolve release identity
+        id: plan
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel || 'artifacts' }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python scripts/release/prepare.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-plan
+          path: release-plan.json
+          if-no-files-found: error
+
   bundle:
     name: ${{ matrix.label }}
-    permissions:
-      contents: write
+    needs: prepare
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
-      # One platform failing must not cancel the other two: a macOS signing
-      # problem should still leave usable Linux and Windows artifacts.
       fail-fast: false
       matrix:
         include:
           - label: Linux (deb, rpm, AppImage)
             os: ubuntu-22.04
-            # The config pins deb and rpm because scripts/verify-m005-s04.mjs
-            # asserts exactly that pair. AppImage is added here rather than
-            # there so the verifier's contract stays untouched.
             bundles: deb,rpm,appimage
-            artifact: linux
+            artifact: linux-x86_64
           - label: macOS (Apple silicon)
             os: macos-15
             bundles: app,dmg
@@ -49,105 +91,190 @@ jobs:
             os: macos-15-intel
             bundles: app,dmg
             artifact: macos-x86_64
-          - label: Windows (msi, nsis)
-            os: windows-latest
+          - label: Windows (exe, msi)
+            os: windows-2022
             bundles: msi,nsis
             artifact: windows-x86_64
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          node-version: "20.19"
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
           cache: npm
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
           cache: pip
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: src-tauri
           key: ${{ matrix.artifact }}
-
-      # Tauri needs the WebKitGTK stack to compile at all on Linux, and patchelf
-      # to produce an AppImage.
-      - name: Install system dependencies
+      - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
       - run: npm ci
-
-      - name: Verify release version
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}
-        run: node scripts/verify-release.mjs "$RELEASE_TAG"
-
       - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Frontend checks
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      # The gates that would have caught the last two broken releases. Building
-      # an installer from a tree that fails them wastes everyone's afternoon.
-      - name: Type check
-        run: npx tsc --noEmit
-
-      - name: Frontend tests
-        run: npx vitest run
-
+          npx tsc --noEmit
+          npx vitest run
+      - name: Select browser for Linux regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          browser=$(command -v google-chrome || command -v chromium)
+          test -n "$browser"
+          printf 'THEPRIVATOR_TEST_CHROMIUM_PATH=%s\n' "$browser" >> "$GITHUB_ENV"
       - name: Sidecar tests
-        run: python -m pytest tests/ -q
-
-      - name: Build the sidecar binary
-        run: npm run sidecar:build
-
-      # Proves the packed binary answers before it is sealed inside an
-      # installer. A sidecar that only works from source is the failure mode
-      # this repo has hit before -- proxy_bridge was missing from the packed
-      # build and no test caught it.
-      - name: Verify the packed sidecar
-        run: npm run verify:sidecar
-
-      - name: Build the application
-        uses: tauri-apps/tauri-action@v0
+        run: python -m pytest tests/ -q --timeout=120
+      - name: Build and verify the Python runtime
+        run: |
+          npm run sidecar:build
+          npm run verify:sidecar
+      - name: Rust bridge tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Generate installer icons and platform configuration
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          npx tauri icon src-tauri/icons/icon.png --output src-tauri/icons/generated
+          python scripts/release/configure.py
+      - name: Configure optional Windows signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./scripts/release/windows-signing.ps1
+      - name: Build installers
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          # Passed on the command line rather than written into
-          # tauri.conf.json, whose bundle.targets a verifier asserts.
-          args: --bundles ${{ matrix.bundles }}
-          # tauri-action creates a release only when it is given a tag, so an
-          # empty tagName is what makes a manual run build artifacts and publish
-          # nothing. There is no separate switch for it.
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag }}
-          releaseName: ${{ (startsWith(github.ref, 'refs/tags/') || inputs.tag) && format('ThePrivator {0}', startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.tag) || '' }}
-          releaseDraft: true
-          prerelease: false
-
-      - name: Verify the bundled macOS sidecar
+          args: --bundles ${{ matrix.bundles }} --config tmp/ci-bundle.json --ci
+          # Publication happens only after every platform and Arch succeeds.
+      - name: Verify the bundled macOS Python runtime
         if: runner.os == 'macOS'
         env:
           THEPRIVATOR_VERIFY_SIDECAR_BINARY: src-tauri/target/release/bundle/macos/ThePrivator.app/Contents/MacOS/theprivator-sidecar
         run: npm run verify:sidecar
-
-      - uses: actions/upload-artifact@v4
+      - name: Verify and collect expected installers
+        run: python scripts/release/assets.py collect --source src-tauri/target/release/bundle --destination dist/installers --platform ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: theprivator-${{ matrix.artifact }}
+          path: dist/installers/*
           if-no-files-found: error
           retention-days: 14
-          path: |
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.rpm
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
+          compression-level: 0
+      - name: Remove Windows signing certificate
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:THEPRIVATOR_SIGNING_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:THEPRIVATOR_SIGNING_THUMBPRINT" -Force
+          }
+
+  arch:
+    name: Arch package and PKGBUILD
+    needs: [prepare, bundle]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: release-plan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: theprivator-linux-x86_64
+          path: dist/linux
+      - name: Render PKGBUILD from this build's checksum
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          debs=(dist/linux/*.deb)
+          test "${#debs[@]}" -eq 1
+          python scripts/release/arch.py --deb "${debs[0]}" --repository "$RELEASE_REPOSITORY" --destination dist/arch
+      - name: Build and check in Arch Linux
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          docker run --rm -e RELEASE_TAG -v "$PWD:/work" -w /work archlinux:base-devel bash scripts/release/build-arch.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: theprivator-arch
+          path: dist/arch/release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish complete release
+    needs: [prepare, bundle, arch]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: release-plan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: theprivator-*
+          path: dist/downloaded
+      - name: Validate complete release and compute checksums
+        run: python3 scripts/release/assets.py assemble --source dist/downloaded --destination dist/release
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const { publish } = require('./scripts/release/publish.cjs');
+            const plan = require('./release-plan.json');
+            await publish({ github, context, core, directory: 'dist/release', plan });
+
+  aur:
+    name: Update AUR
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.aur == 'true' && vars.AUR_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: aur-theprivator-bin
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: theprivator-arch
+          path: dist/arch
+      - name: Push the verified stable recipe
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ vars.AUR_KNOWN_HOSTS }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: bash scripts/release/publish-aur.sh dist/arch/theprivator-arch-recipe-*.tar.gz

@@ -2035,7 +2035,9 @@ def test_readiness_payload_is_strict_safe_json(tmp_path):
     assert_no_forbidden_markers(line, str(config.store_root), "event", "phase", "status")
 
 
-def test_bind_failure_is_typed_and_redacted(tmp_path):
+def test_bind_failure_is_typed_and_redacted(tmp_path, monkeypatch):
+    # A bind regression must fail promptly instead of entering a server loop.
+    monkeypatch.setattr(automation_api, "_serve", lambda *args: pytest.fail("Occupied port was reused"))
     occupied = bind_loopback_socket("127.0.0.1", 0)
     port = int(occupied.getsockname()[1])
     store_root = str(tmp_path / "bind-root-should-not-leak")

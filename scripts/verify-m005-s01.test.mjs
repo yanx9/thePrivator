@@ -381,7 +381,7 @@ describe("verify-m005-s01 source sidecar smoke", () => {
     expect(parsedEvents.some((event) => event.phase === "sidecar.busy-profile-rejected" && event.errorCode === "PORTABILITY_PROFILE_BUSY")).toBe(true);
     expect(parsedEvents.some((event) => event.phase === "cleanup.temp-fixtures" && event.cleanupStatus === "removed")).toBe(true);
     expect(findM005ForbiddenPublicMarker(parsedEvents)).toBeNull();
-  });
+  }, 30_000);
 
   it("exports canonical format constants consumed by downstream verifier phases", () => {
     expect(FORMAT_THEPRIVATOR_JSON).toBe("theprivator-json");

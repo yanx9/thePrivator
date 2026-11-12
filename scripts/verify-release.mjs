@@ -7,7 +7,7 @@ const lock = JSON.parse(read("package-lock.json"));
 const tauri = JSON.parse(read("src-tauri/tauri.conf.json"));
 const cargo = read("src-tauri/Cargo.toml").match(/^version = "([^"]+)"/m)?.[1];
 const cargoLock = read("src-tauri/Cargo.lock")
-  .match(/name = "theprivator"\nversion = "([^"]+)"/)?.[1];
+  .match(/name = "theprivator"\r?\nversion = "([^"]+)"/)?.[1];
 
 for (const [source, version] of Object.entries({
   npmLock: lock.version,
