@@ -10,6 +10,7 @@ works until the second device wakes up.
 from __future__ import annotations
 
 import json
+import platform
 import os
 from pathlib import Path
 
@@ -325,7 +326,7 @@ class TestLocks:
         holder = eng.holder("profile-1")
 
         assert holder is not None and holder.device_label == "Laptop A"
-        assert os.uname().nodename not in json.dumps(
+        assert platform.node() not in json.dumps(
             json.loads((shared.root / lock_key("profile-1")).read_text())
         )
 
@@ -485,6 +486,7 @@ class TestStateRoundTrip:
         assert read_back.enabled
         assert read_back.sync_root == str(tmp_path)
 
+    @pytest.mark.skipif(os.name != "posix", reason="chmod mode bits require POSIX")
     def test_state_is_written_owner_only(self, tmp_path):
         """It records the sync folder path and the device label."""
         root = tmp_path / "store"
@@ -612,4 +614,4 @@ class TestNoSecretReachesTheSharedFolder:
         publish(eng, store, created["id"], "device-a")
         eng.acquire(created["id"], device_id="device-a", device_label="Laptop A")
 
-        assert os.uname().nodename.encode() not in self._folder_bytes(shared)
+        assert platform.node().encode() not in self._folder_bytes(shared)

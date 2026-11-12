@@ -856,7 +856,9 @@ def _ready_file_is_locked(path: Path) -> bool:
             return False
         if os.name == "nt":
             import msvcrt
+            from .proxy_bridge import WINDOWS_READY_LOCK_OFFSET
 
+            handle.seek(WINDOWS_READY_LOCK_OFFSET)
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:

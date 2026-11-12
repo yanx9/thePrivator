@@ -180,6 +180,9 @@ def test_ready_file_reports_the_bound_loopback_port_and_owning_pid(bridge, tmp_p
         "port": server.local_port,
         "pid": os.getpid(),
     }
+    from theprivator_sidecar.chromium import _ready_file_is_locked
+    assert _ready_file_is_locked(tmp_path / "bridge.ready.json")
+    assert (tmp_path / "bridge.ready.json").stat().st_size < 1024
 
 
 def test_ready_file_stays_locked_while_the_bridge_lives(bridge, tmp_path):

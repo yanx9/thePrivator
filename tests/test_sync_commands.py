@@ -8,6 +8,7 @@ leaks a path fails here rather than in a screenshot.
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 
 import pytest
@@ -343,4 +344,4 @@ class TestResponsesStayInsideTheRedactionPerimeter:
 
         body = json.dumps([call("sync.status", first), call("sync.run", first)])
 
-        assert os.uname().nodename not in body
+        assert platform.node() not in body

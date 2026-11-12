@@ -138,14 +138,14 @@ jobs:
         run: |
           npm run sidecar:build
           npm run verify:sidecar
-      - name: Rust bridge tests
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Generate installer icons and platform configuration
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           npx tauri icon src-tauri/icons/icon.png --output src-tauri/icons/generated
           python scripts/release/configure.py
+      - name: Rust bridge tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Configure optional Windows signing
         if: runner.os == 'Windows'
         shell: pwsh
@@ -171,6 +171,15 @@ jobs:
         env:
           THEPRIVATOR_VERIFY_SIDECAR_BINARY: src-tauri/target/release/bundle/macos/ThePrivator.app/Contents/MacOS/theprivator-sidecar
         run: npm run verify:sidecar
+      - name: Verify the Python runtime inside AppImage
+        if: runner.os == 'Linux'
+        run: |
+          temporary=$(mktemp -d)
+          trap 'rm -rf "$temporary"' EXIT
+          appimages=("$PWD"/src-tauri/target/release/bundle/appimage/*.AppImage)
+          test "${#appimages[@]}" -eq 1
+          (cd "$temporary" && "${appimages[0]}" --appimage-extract > /dev/null)
+          THEPRIVATOR_VERIFY_SIDECAR_BINARY="$temporary/squashfs-root/usr/bin/theprivator-sidecar" npm run verify:sidecar
       - name: Verify and collect expected installers
         run: python scripts/release/assets.py collect --source src-tauri/target/release/bundle --destination dist/installers --platform ${{ matrix.artifact }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

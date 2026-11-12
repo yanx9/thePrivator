@@ -538,7 +538,9 @@ def _collect_payload_files(
                 if not entry.is_file(follow_symlinks=False):
                     warnings.add("PACKAGE_PAYLOAD_SPECIAL_SKIPPED")
                     continue
-                stat_result = entry.stat(follow_symlinks=False)
+                # DirEntry.stat on Windows can report st_nlink=0 from cached
+                # directory metadata; os.stat queries the actual link count.
+                stat_result = os.stat(entry_path, follow_symlinks=False) if os.name == "nt" else entry.stat(follow_symlinks=False)
             except OSError:
                 warnings.add("PACKAGE_PAYLOAD_UNREADABLE_SKIPPED")
                 continue

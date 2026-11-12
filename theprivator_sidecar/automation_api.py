@@ -149,7 +149,7 @@ class AutomationApiConfig:
         return replace(self, port=port)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AutomationStartupError(Exception):
     """Safe startup/configuration failure that never stores sensitive values."""
 
@@ -162,7 +162,7 @@ class AutomationStartupError(Exception):
         Exception.__init__(self, self.message)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AutomationHttpError(Exception):
     """Safe HTTP failure rendered through the automation API error envelope."""
 

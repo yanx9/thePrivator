@@ -10,6 +10,7 @@ device joins.
 from __future__ import annotations
 
 import json
+import platform
 import os
 import stat
 
@@ -40,6 +41,7 @@ def test_health_reports_a_missing_folder_rather_than_creating_one(tmp_path):
     assert not (tmp_path / "nope").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="chmod mode bits require POSIX")
 def test_health_reports_a_read_only_folder_as_reachable_but_not_writable(store):
     os.chmod(store.root, stat.S_IRUSR | stat.S_IXUSR)
     try:
@@ -145,6 +147,7 @@ def test_a_failed_write_leaves_no_partial_file(store, monkeypatch):
     assert leftovers == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="chmod mode bits require POSIX")
 def test_objects_are_written_owner_only(store):
     store.put("profiles/a/meta.json", b"payload", expected_etag=None)
 
@@ -209,7 +212,7 @@ def test_listing_survives_a_file_that_vanishes_between_listing_and_reading(store
     real_stat = os.stat
 
     def flaky_stat(path, *args, **kwargs):
-        if str(path).endswith("profiles/b/meta.json"):
+        if str(path).replace("\\", "/").endswith("profiles/b/meta.json"):
             raise FileNotFoundError(2, "No such file or directory")
         return real_stat(path, *args, **kwargs)
 
@@ -281,7 +284,7 @@ class TestLocks:
         read = store.read_lock("profiles/a/lock.json")
         assert read is not None
         assert read.device_label == "Laptop A"
-        assert os.uname().nodename not in (store.root / "profiles/a/lock.json").read_text()
+        assert platform.node() not in (store.root / "profiles/a/lock.json").read_text()
 
     def test_a_second_device_cannot_take_a_held_lock(self, store):
         store.write_lock("profiles/a/lock.json", make_lock("device-a", "Laptop A"))

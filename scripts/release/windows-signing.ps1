@@ -8,7 +8,7 @@ $certificatePath = Join-Path $env:RUNNER_TEMP 'theprivator-signing.pfx'
 try {
     [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
     $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-    $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+    $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object { $_.HasPrivateKey }
     if (@($certificate).Count -ne 1) { throw 'Expected one code-signing certificate.' }
     $config = Get-Content 'tmp/ci-bundle.json' -Raw | ConvertFrom-Json
     $config.bundle | Add-Member -Name windows -MemberType NoteProperty -Value @{
