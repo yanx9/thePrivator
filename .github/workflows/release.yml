@@ -125,13 +125,21 @@ jobs:
         run: |
           npx tsc --noEmit
           npx vitest run
+      - name: Install Chrome for Testing for extension regressions
+        if: runner.os == 'Linux'
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4
+        id: test-browser
+        with:
+          chrome-version: stable
+          install-dependencies: true
       - name: Select browser for Linux regressions
         if: runner.os == 'Linux'
+        env:
+          TEST_BROWSER: ${{ steps.test-browser.outputs.chrome-path }}
         shell: bash
         run: |
-          browser=$(command -v google-chrome || command -v chromium)
-          test -n "$browser"
-          printf 'THEPRIVATOR_TEST_CHROMIUM_PATH=%s\n' "$browser" >> "$GITHUB_ENV"
+          test -x "$TEST_BROWSER"
+          printf 'THEPRIVATOR_TEST_CHROMIUM_PATH=%s\n' "$TEST_BROWSER" >> "$GITHUB_ENV"
       - name: Sidecar tests
         run: python -m pytest tests/ -q --timeout=120
       - name: Build and verify the Python runtime

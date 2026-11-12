@@ -30,7 +30,8 @@ before creating a stable tag. `node scripts/verify-release.mjs vX.Y.Z` checks th
 The build jobs have read-only repository permissions. Only the final publication
 job has `contents: write`, using GitHub's built-in `GITHUB_TOKEN`; no PAT is needed.
 Frontend, Python and Rust tests run before packaging. Linux also runs the real
-Chromium regressions. The packaged Python runtime is tested, including the runtime
+Chromium regressions using Chrome for Testing, which supports loading the test
+extensions. The packaged Python runtime is tested, including the runtime
 extracted from the Arch package. Every expected installer must exist and be nonempty.
 Individual Python tests have a 120-second timeout. Tests that require POSIX shell
 executables and signal delivery are explicitly skipped on Windows; portable tests
