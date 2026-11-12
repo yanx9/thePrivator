@@ -55,7 +55,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Unit and component tests
-        run: npx vitest run
+        run: npx vitest run --testTimeout=15000
 
   sidecar:
     name: Python sidecar

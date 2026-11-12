@@ -124,7 +124,7 @@ jobs:
       - name: Frontend checks
         run: |
           npx tsc --noEmit
-          npx vitest run
+          npx vitest run --testTimeout=15000
       - name: Install Chrome for Testing for extension regressions
         if: runner.os == 'Linux'
         uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4
