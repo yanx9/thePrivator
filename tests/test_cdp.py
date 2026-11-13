@@ -109,6 +109,19 @@ def test_active_port_polling_accepts_delayed_file_without_assuming_fixed_port(tm
     assert endpoint.version_url == "http://127.0.0.1:45678/json/version"
 
 
+@pytest.mark.parametrize("initial", ["", "45678\n"])
+def test_active_port_waits_for_an_incomplete_write(tmp_path, monkeypatch, initial):
+    write_active_port(tmp_path, initial)
+
+    def finish_write(_interval):
+        write_active_port(tmp_path, "45678\n/devtools/browser/completed-target\n")
+
+    monkeypatch.setattr("theprivator_sidecar.cdp.time.sleep", finish_write)
+    endpoint = read_devtools_active_port(tmp_path, timeout_seconds=1)
+    assert endpoint.port == 45678
+    assert endpoint.browser_target_path == "/devtools/browser/completed-target"
+
+
 @pytest.mark.parametrize(
     "content",
     [

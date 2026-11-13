@@ -119,7 +119,10 @@ def read_devtools_active_port(
                 content = path.read_text(encoding="utf-8")
                 if len(content.encode("utf-8", errors="ignore")) > _MAX_ACTIVE_PORT_BYTES:
                     raise ValueError("active-port file is too large")
-                return _parse_active_port_content(content)
+                # A reader can observe the file after creation/truncation but
+                # before Chromium finishes writing its two lines.
+                if len(content.splitlines()) >= 2:
+                    return _parse_active_port_content(content)
         except SidecarError:
             raise
         except Exception as exc:

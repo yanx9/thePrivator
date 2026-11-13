@@ -1491,6 +1491,23 @@ def test_launch_failure_does_not_leave_runtime_record_or_profile_runtime_fields(
     monkeypatch.setenv("THEPRIVATOR_CHROMIUM_PATH", str(fake_chromium))
     monkeypatch.setenv("THEPRIVATOR_FAKE_CHROMIUM_EXIT_IMMEDIATELY", "1")
 
+    # Exercise an already-exited child, independent of the host's Python startup
+    # speed relative to the launcher's short liveness-settle interval.
+    original_popen = chromium.subprocess.Popen
+
+    def exited_browser(command, *args, **kwargs):
+        process = original_popen(command, *args, **kwargs)
+        if str(command[0]) == str(fake_chromium):
+            try:
+                process.wait(timeout=30)
+            except chromium.subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise
+        return process
+
+    monkeypatch.setattr(chromium.subprocess, "Popen", exited_browser)
+
     with pytest.raises(SidecarError) as exc_info:
         chromium.launch(tmp_path, profile["id"])
 

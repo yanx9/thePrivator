@@ -23,10 +23,11 @@ class MetadataTests(unittest.TestCase):
             (root / "src-tauri/Cargo.toml").write_bytes(b'[package]\r\nversion = "3.2.7"\r\n')
             (root / "src-tauri/Cargo.lock").write_bytes(b'[[package]]\r\nname = "theprivator"\r\nversion = "3.2.7"\r\n')
             (root / "CHANGELOG.md").write_bytes(b'## [3.2.7]\r\n')
+            # Cold Node startup can exceed 10 seconds on shared Windows runners.
             result = subprocess.run(["node", "scripts/verify-release.mjs", "v3.2.7"], cwd=root,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run(["node", "scripts/verify-release.mjs", "v9.9.9"], cwd=root,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=30)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Release tag must match", result.stderr)
