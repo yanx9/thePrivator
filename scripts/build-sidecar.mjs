@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   chmodSync,
   copyFileSync,
   cpSync,
@@ -153,6 +154,23 @@ if (process.platform === "darwin") {
   const runtime = join(BINARIES_DIR, "_internal");
   rmSync(runtime, { recursive: true, force: true });
   cpSync(join(DIST_DIR, SIDECAR_NAME, "_internal"), runtime, { recursive: true, verbatimSymlinks: true });
+
+  // Let PyInstaller classify binaries and data for macOS codesign. An onedir
+  // runtime copied wholesale into Frameworks fails on data such as *.dist-info.
+  // BUNDLE retains the console bootloader needed by our stdin/stdout protocol,
+  // and cross-links Frameworks and Resources without moving data into code dirs.
+  const spec = join(SPEC_DIR, `${SIDECAR_NAME}.spec`);
+  appendFileSync(spec, `\napp = BUNDLE(coll, name='${SIDECAR_NAME}.app', bundle_identifier='com.theprivator.sidecar')\n`);
+  run(PYTHON, [
+    "-m", "PyInstaller", "--noconfirm", "--distpath", DIST_DIR,
+    "--workpath", WORK_DIR, spec,
+  ]);
+  const bundleRuntime = join(BINARIES_DIR, "macos-runtime");
+  rmSync(bundleRuntime, { recursive: true, force: true });
+  for (const directory of ["Frameworks", "Resources"]) {
+    cpSync(join(DIST_DIR, `${SIDECAR_NAME}.app`, "Contents", directory),
+      join(bundleRuntime, directory), { recursive: true, verbatimSymlinks: true });
+  }
 }
 if (!existsSync(builtBinary)) {
   fail(`PyInstaller did not produce ${relative(ROOT_DIR, builtBinary)}.`);
