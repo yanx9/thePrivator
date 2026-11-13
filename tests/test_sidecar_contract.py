@@ -95,6 +95,8 @@ def assert_error_envelope(response, code, request_id=None):
 
 
 def make_fake_chromium(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Browser stub requires POSIX executable scripts and signals")
     script = tmp_path / "fake-chromium"
     script.write_text(
         "\n".join(

@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 import pytest
 
+from tests.process_helpers import read_captured_argv
+
 from theprivator_sidecar import chromium
 from theprivator_sidecar.cdp import CdpEndpoint
 from theprivator_sidecar.identity import curated_preset
@@ -32,6 +34,8 @@ from theprivator_sidecar.protocol import (
 
 def make_fake_chromium(tmp_path: Path) -> Path:
     """Create a tiny executable that behaves like a long-lived browser process."""
+    if sys.platform == "win32":
+        pytest.skip("Browser stub requires POSIX executable scripts and signals")
     script = tmp_path / "fake-chromium"
     script.write_text(
         "\n".join(
@@ -247,7 +251,7 @@ def test_socks5_proxy_credentials_launch_uses_auth_helper_without_argv_secret_le
 
     try:
         assert launch["status"] == "running"
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined = "\n".join(argv)
         proxy_args = [arg for arg in argv if arg.startswith("--proxy-server=")]
         assert len(proxy_args) == 1
@@ -287,7 +291,7 @@ def test_launch_status_stop_round_trip_uses_relative_profile_storage_and_keeps_s
         assert not Path(launch["userDataDir"]).is_absolute()
         assert str(tmp_path) not in json.dumps(launch)
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         user_data_arg = next(arg for arg in argv if arg.startswith("--user-data-dir="))
         launched_user_data = Path(user_data_arg.split("=", 1)[1])
         assert launched_user_data == tmp_path / profile["storage"]["userDataDir"]
@@ -378,7 +382,7 @@ def test_launch_for_automation_direct_profile_forces_remote_debugging_and_return
             running_count=1,
             store_root=tmp_path,
         )
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         assert argv.count("--remote-debugging-port=0") == 1
         assert argv.count("--remote-allow-origins=*") == 1
         assert not any(arg.startswith("--load-extension=") for arg in argv)
@@ -457,7 +461,7 @@ def test_launch_for_automation_masked_identity_with_authenticated_proxy_composes
             store_root=tmp_path,
         )
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined_argv = "\n".join(argv)
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=https://proxy.example.invalid:18443"
@@ -741,7 +745,7 @@ def test_fixed_server_no_auth_launch_adds_one_safe_proxy_arg_without_direct_fall
 
     try:
         assert launch["status"] == "running"
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         proxy_args = [arg for arg in argv if arg.startswith("--proxy-server=")]
         assert proxy_args == [expected_arg]
         joined = "\n".join(argv)
@@ -813,7 +817,7 @@ def test_proxy_proof_spki_trust_is_env_gated_and_public_payload_redacted(tmp_pat
 
     try:
         assert launch["status"] == "running"
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         assert strategy.to_chromium_arg() in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=https://proxy.example.invalid:18443"
@@ -913,7 +917,7 @@ def test_masked_identity_launch_generates_extension_and_applies_cdp_before_regis
         assert "ws://" not in json.dumps(launch)
         assert "--remote-debugging-port" not in json.dumps(launch)
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined_argv = "\n".join(argv)
         debugging_args = [arg for arg in argv if arg.startswith("--remote-debugging-port=")]
         assert len(debugging_args) == 1
@@ -1034,7 +1038,7 @@ def test_audit_open_launches_stopped_real_profile_with_forced_internal_cdp_and_s
         assert "ws://" not in json.dumps(result)
         assert "--remote-debugging-port" not in json.dumps(result)
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         assert "--remote-debugging-port=0" in argv
         assert "--remote-allow-origins=*" in argv
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
@@ -1120,7 +1124,7 @@ def test_audit_open_stopped_masked_identity_with_authenticated_proxy_composes_ru
             extra_forbidden=(str(tmp_path), "profile-store/", "raw argv"),
         )
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined_argv = "\n".join(argv)
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=https://proxy.example.invalid:18443"
@@ -1797,7 +1801,7 @@ def test_launch_uses_the_profile_start_urls_and_curated_flags(tmp_path, monkeypa
 
     chromium.launch(store_root, profile_id)
     try:
-        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_path)
         assert [arg for arg in argv if arg.startswith("https://")] == [
             "https://first.example/",
             "https://second.example/",
@@ -1820,7 +1824,7 @@ def test_restore_session_replaces_the_positional_url(tmp_path, monkeypatch):
 
     chromium.launch(store_root, profile_id)
     try:
-        argv = json.loads(argv_path.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_path)
         assert "--restore-last-session" in argv
         assert not any(arg.startswith("http") for arg in argv)
         assert "about:blank" not in argv

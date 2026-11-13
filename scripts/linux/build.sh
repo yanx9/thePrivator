@@ -18,12 +18,12 @@ docker create --name "$container" -v "$project_root:/source:ro" "$builder" bash 
   uv pip install --python .venv/bin/python -r requirements.txt -r requirements-dev.txt
   npm ci
   npm run verify:release
-  npm run tauri build
+  APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri build -- --bundles deb,rpm,appimage
   npm run verify:sidecar
   mkdir -p /work/artifacts
-  cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm /work/artifacts/
+  cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm src-tauri/target/release/bundle/appimage/*.AppImage /work/artifacts/
   cd /work/artifacts
-  sha256sum *.deb *.rpm > SHA256SUMS
+  sha256sum *.deb *.rpm *.AppImage > SHA256SUMS
 '
 trap 'docker rm -f "$container" >/dev/null' EXIT
 docker start -a "$container"

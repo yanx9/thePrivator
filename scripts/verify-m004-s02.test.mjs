@@ -432,7 +432,7 @@ describe("verify-m004-s02 redaction and binary discovery", () => {
     chmodSync(binaryPath, 0o755);
 
     const target = assertS02TargetBinary({ rootDir: root, targetTriple: "x86_64-test-local", binaryPath });
-    expect(target).toMatchObject({ targetTriple: "x86_64-test-local", executableChecked: true });
+    expect(target).toMatchObject({ targetTriple: "x86_64-test-local", executableChecked: process.platform !== "win32" });
 
     const summary = buildFinalSummary({
       status: "pass",

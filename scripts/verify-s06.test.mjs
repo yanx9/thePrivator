@@ -360,7 +360,7 @@ describe("verify-s06 guard helpers", () => {
     ]));
   });
 
-  it("rejects stale package artifacts from before the recorded build start", () => {
+  it.skipIf(process.platform === "win32")("rejects stale package artifacts from before the recorded build start", () => {
     const root = makeRoot();
     const beforeBuild = new Date("2026-01-01T00:00:00.000Z");
     const buildStartedAt = new Date("2026-01-02T00:00:00.000Z");
@@ -384,7 +384,7 @@ describe("verify-s06 guard helpers", () => {
     })).toThrow(/stale/i);
   });
 
-  it("returns only repo-relative fresh package and sidecar artifact paths", () => {
+  it.skipIf(process.platform === "win32")("returns only repo-relative fresh package and sidecar artifact paths", () => {
     const root = makeRoot();
     const buildStartedAt = new Date("2026-01-02T00:00:00.000Z");
     const afterBuild = new Date("2026-01-02T00:00:10.000Z");
@@ -490,7 +490,7 @@ describe("verify-s06 guard helpers", () => {
     }
   });
 
-  it("rejects ambiguous Chromium env paths and resolves executable PATH candidates", () => {
+  it.skipIf(process.platform === "win32")("rejects ambiguous Chromium env paths and resolves executable PATH candidates", () => {
     const root = makeRoot();
     const binDir = join(root, "bin");
     const chromium = join(binDir, "chromium");

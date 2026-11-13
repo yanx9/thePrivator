@@ -1,0 +1,2 @@
+# Keep source and shell scripts identical on every native build runner.
+* text=auto eol=lf

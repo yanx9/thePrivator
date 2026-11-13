@@ -29,9 +29,13 @@ def test_settings_persist_and_invalid_input_keeps_previous(tmp_path):
 
 def test_disk_usage_excludes_external_symlinks(tmp_path):
     (tmp_path / 'one').write_bytes(b'hello')
-    (tmp_path / 'link').symlink_to('/tmp', target_is_directory=True)
+    outside = tmp_path.parent / (tmp_path.name + '-outside')
+    outside.mkdir()
+    (outside / 'excluded').write_bytes(b'not counted')
+    (tmp_path / 'link').symlink_to(outside, target_is_directory=True)
     result = disk_usage(tmp_path)
-    assert result['bytes'] == (tmp_path / 'one').stat().st_blocks * 512
+    own_file = (tmp_path / 'one').stat()
+    assert result['bytes'] == (own_file.st_blocks * 512 if hasattr(own_file, 'st_blocks') else 5)
 
 
 def test_vault_roundtrip_wrong_password_and_latest_session(tmp_path):

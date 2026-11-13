@@ -19,7 +19,8 @@
   "bundle": {
     "macOS": {
       "files": {
-        "Frameworks": "binaries/_internal"
+        "Frameworks": "binaries/macos-runtime/Frameworks",
+        "Resources": "binaries/macos-runtime/Resources"
       }
     }
   }

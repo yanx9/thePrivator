@@ -337,7 +337,7 @@ mod tests {
     /// A stand-in sidecar: reads NDJSON lines, echoes a response, and can be told
     /// to emit diagnostics, stall, or exit -- the behaviours the pool must handle.
     fn echo_worker_command() -> StdCommand {
-        let mut command = StdCommand::new("python3");
+        let mut command = StdCommand::new(if cfg!(windows) { "python" } else { "python3" });
         command.arg("-c").arg(ECHO_WORKER_SOURCE);
         command
     }
@@ -492,7 +492,7 @@ time.sleep(60)
         // The previous implementation read the child's pipes only after it
         // exited, so a large response filled the buffer and wedged both sides.
         let pool = SidecarPool::new();
-        let mut command = StdCommand::new("python3");
+        let mut command = StdCommand::new(if cfg!(windows) { "python" } else { "python3" });
         command.arg("-c").arg(
             r#"
 import json, sys

@@ -164,7 +164,7 @@ libraries do not make the bundled Python runtime incompatible with Linux Mint:
 bash scripts/linux/build.sh
 ```
 
-This requires Docker, builds Linux x86-64 `.deb` and `.rpm` packages, and writes
+This requires Docker, builds Linux x86-64 `.deb`, `.rpm` and `.AppImage` packages, and writes
 them with checksums to `src-tauri/target/release/bundle/linux/`. The container targets Ubuntu 22.04 / Mint 21
 and newer. A native build on a rolling-release distribution is only suitable for
 that host unless tested against the intended older runtime.
@@ -186,6 +186,11 @@ no cross-compilation mode — so a macOS build needs a Mac and a Windows build
 needs Windows, whatever the Rust side could otherwise manage. The
 [release workflow](.github/workflows/release.yml) runs one runner per platform
 for exactly that reason.
+
+Pushes to `master` and `3.*` branches publish development prereleases after all
+builds and tests succeed. Version tags publish stable releases. The workflow also
+builds Arch packages and versioned PKGBUILDs; optional AUR publishing and platform
+signing are described in [the release setup guide](docs/releases.md).
 
 ## How it fits together
 

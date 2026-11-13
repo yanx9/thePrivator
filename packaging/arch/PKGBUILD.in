@@ -1,0 +1,25 @@
+# Generated from a verified release installer; updated automatically by CI.
+pkgname=@PACKAGE@
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Chromium profile manager with isolated browser identities'
+arch=('x86_64')
+url='https://github.com/@REPOSITORY@'
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'openssl' 'hicolor-icon-theme')
+optdepends=('chromium: browser engine (Google Chrome is also supported)')
+provides=('theprivator')
+conflicts=(@CONFLICTS@)
+options=('!strip' '!debug')
+source=('@DEB@::https://github.com/@REPOSITORY@/releases/download/@TAG@/@DEB@' 'LICENSE')
+sha256sums=('@SHA256@' '@LICENSE_SHA256@')
+noextract=('@DEB@')
+
+package() {
+    # bsdtar supports both the Debian ar container and its compressed data member.
+    local data_member
+    data_member=$(bsdtar -tf "$srcdir/@DEB@" | sed -n '/^data\.tar\./p')
+    [[ -n "$data_member" && "$data_member" != *$'\n'* ]] || return 1
+    bsdtar -xOf "$srcdir/@DEB@" "$data_member" | bsdtar --no-same-owner -xf - -C "$pkgdir"
+    install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

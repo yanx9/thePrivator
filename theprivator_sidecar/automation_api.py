@@ -149,7 +149,7 @@ class AutomationApiConfig:
         return replace(self, port=port)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AutomationStartupError(Exception):
     """Safe startup/configuration failure that never stores sensitive values."""
 
@@ -162,7 +162,7 @@ class AutomationStartupError(Exception):
         Exception.__init__(self, self.message)
 
 
-@dataclass(frozen=True)
+@dataclass
 class AutomationHttpError(Exception):
     """Safe HTTP failure rendered through the automation API error envelope."""
 
@@ -902,7 +902,12 @@ def bind_loopback_socket(host: str, port: int) -> socket.socket:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # On Windows SO_REUSEADDR permits another listener to claim this port.
+        # Reserve it exclusively so a second server fails instead of sharing it.
+        if sys.platform == "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
         sock.listen(socket.SOMAXCONN)
         sock.set_inheritable(False)

@@ -1,6 +1,7 @@
 """Contract tests for the loopback automation API sidecar mode."""
 
 import asyncio
+from contextlib import contextmanager
 import io
 import json
 from pathlib import Path
@@ -2035,7 +2036,24 @@ def test_readiness_payload_is_strict_safe_json(tmp_path):
     assert_no_forbidden_markers(line, str(config.store_root), "event", "phase", "status")
 
 
-def test_bind_failure_is_typed_and_redacted(tmp_path):
+@pytest.mark.parametrize("error", [
+    automation_api.AutomationHttpError(401, AUTOMATION_AUTH_REQUIRED, "Authentication required", "auth"),
+    automation_api.AutomationStartupError(AUTOMATION_API_BIND_FAILED, "Bind failed", "bind"),
+])
+def test_api_errors_survive_context_manager_reraising(error):
+    @contextmanager
+    def middleware():
+        yield
+
+    with pytest.raises(type(error)) as caught:
+        with middleware():
+            raise error
+    assert caught.value is error
+
+
+def test_bind_failure_is_typed_and_redacted(tmp_path, monkeypatch):
+    # A bind regression must fail promptly instead of entering a server loop.
+    monkeypatch.setattr(automation_api, "_serve", lambda *args: pytest.fail("Occupied port was reused"))
     occupied = bind_loopback_socket("127.0.0.1", 0)
     port = int(occupied.getsockname()[1])
     store_root = str(tmp_path / "bind-root-should-not-leak")

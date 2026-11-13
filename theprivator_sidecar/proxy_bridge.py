@@ -22,6 +22,9 @@ from typing import Any, Mapping, Optional
 
 SOCKS5_BRIDGE_VERSION = 1
 LOCAL_HOST = "127.0.0.1"
+# Windows byte-range locks are mandatory. Keep the ownership lock beyond the
+# small JSON payload so the parent can still read the bridge's port and PID.
+WINDOWS_READY_LOCK_OFFSET = 0x7FFFFFFF
 # Bounds the SOCKS5 handshake only. Once the tunnel is established the sockets
 # go back to blocking mode -- see _tunnel_pair.
 SOCKET_TIMEOUT_SECONDS = 10.0
@@ -227,7 +230,12 @@ def _hold_exclusive_lock(handle: Any) -> None:
         elif os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            position = handle.tell()
+            try:
+                handle.seek(WINDOWS_READY_LOCK_OFFSET)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            finally:
+                handle.seek(position)
     except (ImportError, OSError):
         return
 

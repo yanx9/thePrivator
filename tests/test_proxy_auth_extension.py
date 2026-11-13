@@ -7,6 +7,8 @@ from typing import Any, Mapping
 
 import pytest
 
+from tests.process_helpers import read_captured_argv
+
 from theprivator_sidecar import chromium
 from theprivator_sidecar.identity import curated_preset
 from theprivator_sidecar.profiles import ProfileStore
@@ -44,6 +46,8 @@ def authenticated_http_proxy(protocol="http", **overrides):
 
 
 def make_fake_chromium(tmp_path: Path) -> Path:
+    if sys.platform == "win32":
+        pytest.skip("Browser stub requires POSIX executable scripts and signals")
     script = tmp_path / "fake-chromium"
     script.write_text(
         "\n".join(
@@ -226,7 +230,7 @@ def test_credentialed_http_launch_uses_auth_helper_without_argv_or_payload_secre
             assert sentinel not in encoded_launch
         assert str(tmp_path) not in encoded_launch
 
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined = "\n".join(argv)
         assert [arg for arg in argv if arg.startswith("--proxy-server=")] == [
             "--proxy-server=http://proxy.example.invalid:18080"
@@ -272,7 +276,7 @@ def test_identity_and_proxy_auth_extensions_compose_with_webrtc_and_cdp_flags(tm
 
     try:
         assert launch["status"] == "running"
-        argv = json.loads(argv_capture.read_text(encoding="utf-8"))
+        argv = read_captured_argv(argv_capture)
         joined = "\n".join(argv)
         assert "--remote-debugging-port=0" not in argv
         assert any(arg.startswith("--remote-debugging-port=") for arg in argv)
