@@ -22,6 +22,7 @@ function fixture(t, overrides = {}) {
     getCommit: async () => ({ data: { sha: plan.sha } }),
     getReleaseByTag: async () => { throw Object.assign(new Error('Not found'), { status: 404 }); },
     createRelease: async (args) => { calls.push(['create', args]); return { data: { id: 1 } }; },
+    listReleases: () => {},
     listReleaseAssets: () => {},
     deleteReleaseAsset: async (args) => { calls.push(['delete', args]); },
     uploadReleaseAsset: async (args) => {
@@ -31,7 +32,18 @@ function fixture(t, overrides = {}) {
     updateRelease: async (args) => { calls.push(['publish', args]); return { data: { html_url: 'https://example.com/release' } }; },
     ...overrides,
   };
-  return { directory, plan, calls, github: { rest: { repos }, paginate: async () => [] },
+  const releasePages = [[]];
+  const oldAssets = [];
+  const paginate = async (method) => {
+    assert.equal(method, repos.listReleaseAssets);
+    return oldAssets;
+  };
+  paginate.iterator = async function* (method) {
+    assert.equal(method, repos.listReleases);
+    for (const data of releasePages) yield { data };
+  };
+  const git = { getRef: async () => { throw Object.assign(new Error('Not found'), { status: 404 }); } };
+  return { directory, plan, calls, releasePages, oldAssets, github: { rest: { repos, git }, paginate },
     context: { repo: { owner: 'test', repo: 'app' } }, core: { setOutput() {}, info() {} } };
 }
 
@@ -58,13 +70,58 @@ test('corrupt artifact fails before any release mutation', async (t) => {
 
 test('existing tag must identify the tested commit', async (t) => {
   const f = fixture(t, { getCommit: async () => ({ data: { sha: 'b'.repeat(40) } }) });
+  f.github.rest.git.getRef = async () => ({ data: { object: { type: 'commit' } } });
   await assert.rejects(publish(f), /different commit/);
   assert.deepEqual(f.calls, []);
+});
+
+test('new tags are allowed when the commit endpoint would return GitHub 422', async (t) => {
+  const f = fixture(t, { getCommit: async () => {
+    throw Object.assign(new Error('No commit found for SHA: v3.2.7'), { status: 422 });
+  } });
+  await publish(f);
+  assert.equal(f.calls[0][0], 'create');
+  assert.equal(f.calls.at(-1)[0], 'publish');
+});
+
+test('annotated tags are checked against their resolved commit', async (t) => {
+  const f = fixture(t);
+  f.github.rest.git.getRef = async () => ({ data: { object: { type: 'tag', sha: 'b'.repeat(40) } } });
+  await publish(f);
+  assert.equal(f.calls.at(-1)[0], 'publish');
+});
+
+test('tag lookup errors other than absence prevent publication', async (t) => {
+  for (const status of [403, 422]) {
+    const f = fixture(t);
+    f.github.rest.git.getRef = async () => { throw Object.assign(new Error('Lookup failed'), { status }); };
+    await assert.rejects(publish(f), /Lookup failed/);
+    assert.deepEqual(f.calls, []);
+  }
 });
 
 test('published installers cannot be overwritten on a rerun', async (t) => {
   const f = fixture(t, { getReleaseByTag: async () => ({ data: { id: 1, draft: false } }) });
   await assert.rejects(publish(f), /already published/);
+  assert.deepEqual(f.calls, []);
+});
+
+test('resumes an interrupted draft found on a later release-list page', async (t) => {
+  const f = fixture(t); // GitHub's tag endpoint returns 404 for drafts.
+  f.releasePages.push([{ id: 2, tag_name: 'unrelated', draft: true }], [
+    { id: 7, tag_name: f.plan.tag, draft: true, target_commitish: f.plan.sha },
+  ]);
+  f.oldAssets.push({ id: 11 });
+  await publish(f);
+  assert.deepEqual(f.calls.map(([name]) => name), ['delete', 'upload', 'upload', 'upload', 'publish']);
+  assert.equal(f.calls[0][1].asset_id, 11);
+  assert.equal(f.calls.at(-1)[1].release_id, 7);
+});
+
+test('never resumes a draft belonging to a different source commit', async (t) => {
+  const f = fixture(t);
+  f.releasePages.push([{ id: 7, tag_name: f.plan.tag, draft: true, target_commitish: 'b'.repeat(40) }]);
+  await assert.rejects(publish(f), /different source commit/);
   assert.deepEqual(f.calls, []);
 });
 

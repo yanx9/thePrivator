@@ -30,19 +30,35 @@ async function publish({ github, context, core, directory, plan }) {
   assert(plan.publish, 'This run only builds artifacts');
   const repo = context.repo;
   // A manual release must never attach a new build to an unrelated existing tag.
+  let existingTag = false;
   try {
-    const { data } = await github.rest.repos.getCommit({ ...repo, ref: plan.tag });
-    assert.equal(data.sha, plan.sha, 'Existing release tag points to a different commit');
+    await github.rest.git.getRef({ ...repo, ref: `tags/${plan.tag}` });
+    existingTag = true;
   } catch (error) {
     if (error.status !== 404) throw error;
+  }
+  if (existingTag) {
+    // Resolve annotated tags as well as lightweight tags. Unlike getCommit,
+    // getRef reports a missing ref as 404; a fresh nightly has no tag yet.
+    const { data } = await github.rest.repos.getCommit({ ...repo, ref: plan.tag });
+    assert.equal(data.sha, plan.sha, 'Existing release tag points to a different commit');
   }
   let release;
   try {
     release = (await github.rest.repos.getReleaseByTag({ ...repo, tag: plan.tag })).data;
-    assert(release.draft, 'This release is already published; its installers will not be replaced');
-    assert.equal(release.target_commitish, plan.sha, 'Draft belongs to a different source commit');
   } catch (error) {
     if (error.status !== 404) throw error;
+    // The tag endpoint only returns published releases. Interrupted uploads
+    // remain drafts, visible to this writer through the paginated release list.
+    for await (const page of github.paginate.iterator(github.rest.repos.listReleases, { ...repo, per_page: 100 })) {
+      release = page.data.find((item) => item.tag_name === plan.tag);
+      if (release) break;
+    }
+  }
+  if (release) {
+    assert(release.draft, 'This release is already published; its installers will not be replaced');
+    assert.equal(release.target_commitish, plan.sha, 'Draft belongs to a different source commit');
+  } else {
     release = (await github.rest.repos.createRelease({
       ...repo, tag_name: plan.tag, target_commitish: plan.sha,
       name: plan.prerelease ? `ThePrivator preview ${plan.tag}` : `ThePrivator ${plan.tag}`,
